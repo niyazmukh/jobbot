@@ -1,0 +1,34 @@
+{
+  "data": {
+    "job_search_with_featured_jobs": {
+      "all_jobs": [
+        {
+          "id": "meta-1001",
+          "title": "Software Engineer, Infrastructure",
+          "locations": [
+            "Menlo Park, CA"
+          ],
+          "teams": [
+            "Infrastructure"
+          ],
+          "sub_teams": [
+            "Core Systems"
+          ]
+        },
+        {
+          "id": "meta-1002",
+          "title": "Research Scientist, Generative AI",
+          "locations": [
+            "Remote, United States"
+          ],
+          "teams": [
+            "AI"
+          ],
+          "sub_teams": [
+            "Generative AI"
+          ]
+        }
+      ]
+    }
+  }
+}

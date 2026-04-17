@@ -1,0 +1,24 @@
+{
+  "jobs": [
+    {
+      "id": 12345,
+      "title": "Senior Backend Engineer",
+      "absolute_url": "https://boards.greenhouse.io/example/jobs/12345?gh_src=tracker",
+      "location": {
+        "name": "Remote - Canada"
+      },
+      "updated_at": "2026-04-15T10:15:00Z",
+      "data_compliance": []
+    },
+    {
+      "id": 67890,
+      "title": "Platform Engineer",
+      "absolute_url": "https://boards.greenhouse.io/example/jobs/67890",
+      "location": {
+        "name": "Toronto, Ontario"
+      },
+      "updated_at": "2026-04-15T11:30:00Z",
+      "data_compliance": []
+    }
+  ]
+}

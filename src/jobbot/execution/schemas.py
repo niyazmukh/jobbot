@@ -1,0 +1,337 @@
+"""Schemas for deterministic execution bootstrap workflows."""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict
+
+
+class DraftApplicationAttemptRead(BaseModel):
+    """Read model for a draft application attempt bootstrap."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: int
+    attempt_id: int
+    event_id: int
+    job_id: int
+    candidate_profile_slug: str
+    application_state: str
+    attempt_mode: str
+    browser_profile_key: str | None = None
+    session_health: str | None = None
+    attempt_result: str | None = None
+    failure_code: str | None = None
+    submit_confidence: float | None = None
+    notes: str | None = None
+    readiness_state: str
+    ready: bool
+    reasons: list[str]
+    created_application: bool
+    started_at: datetime
+
+
+class DraftExecutionOverviewRead(BaseModel):
+    """Read model for one operator-facing draft execution overview row."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: int
+    attempt_id: int
+    job_id: int
+    candidate_profile_slug: str
+    company_name: str | None = None
+    job_title: str
+    site_vendor: str | None = None
+    application_state: str
+    readiness_state: str
+    ready: bool
+    attempt_mode: str
+    attempt_result: str | None = None
+    failure_code: str | None = None
+    submit_confidence: float | None = None
+    browser_profile_key: str | None = None
+    session_health: str | None = None
+    latest_event_type: str | None = None
+    latest_event_message: str | None = None
+    attempt_route: str
+    replay_route: str
+    primary_action_route: str
+    primary_action_label: str
+    artifact_count: int = 0
+    screenshot_count: int = 0
+    html_snapshot_count: int = 0
+    model_io_count: int = 0
+    generated_document_count: int = 0
+    answer_pack_count: int = 0
+    reasons: list[str]
+    started_at: datetime
+
+
+class DraftExecutionEventRead(BaseModel):
+    """Read model for one persisted execution event."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: int
+    event_type: str
+    message: str
+    created_at: datetime
+    payload: dict
+
+
+class DraftExecutionArtifactRead(BaseModel):
+    """Read model for one persisted execution artifact."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: int
+    artifact_type: str
+    path: str
+    size_bytes: int | None = None
+    created_at: datetime
+
+
+class DraftExecutionArtifactDetailRead(BaseModel):
+    """Read model for one execution artifact with safe preview content."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: int
+    attempt_id: int | None = None
+    artifact_type: str
+    path: str
+    size_bytes: int | None = None
+    created_at: datetime
+    exists: bool
+    raw_route: str | None = None
+    launch_route: str | None = None
+    launch_label: str | None = None
+    preview_kind: str
+    preview_text: str | None = None
+    preview_truncated: bool = False
+
+
+class DraftExecutionReplayAssetRead(BaseModel):
+    """Read model for one replay-relevant execution asset."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str
+    artifact_id: int | None = None
+    artifact_type: str | None = None
+    path: str | None = None
+    exists: bool = False
+    inspect_route: str | None = None
+    raw_route: str | None = None
+    launch_route: str | None = None
+    launch_label: str | None = None
+    openable_locally: bool = False
+    open_hint: str | None = None
+
+
+class DraftExecutionReplayBundleRead(BaseModel):
+    """Read model for one replay-oriented execution bundle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: int
+    attempt_id: int
+    job_id: int
+    candidate_profile_slug: str
+    job_title: str
+    company_name: str | None = None
+    site_vendor: str | None = None
+    application_state: str
+    attempt_result: str | None = None
+    failure_code: str | None = None
+    latest_event_type: str | None = None
+    startup_dir: str | None = None
+    target_url: str | None = None
+    assets: list[DraftExecutionReplayAssetRead]
+    recommended_actions: list[str]
+
+
+class DraftExecutionDashboardRead(BaseModel):
+    """Read model for one candidate-scoped execution dashboard."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_profile_slug: str
+    total_attempts: int
+    blocked_attempts: int
+    pending_attempts: int
+    review_state_attempts: int
+    replay_ready_attempts: int
+    recent_attempts: list[DraftExecutionOverviewRead]
+    blocked_recent_attempts: list[DraftExecutionOverviewRead]
+    recommended_actions: list[str]
+
+
+class DraftExecutionAttemptDetailRead(BaseModel):
+    """Read model for one drill-down execution attempt detail."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: int
+    attempt_id: int
+    job_id: int
+    candidate_profile_slug: str
+    company_name: str | None = None
+    job_title: str
+    site_vendor: str | None = None
+    application_state: str
+    readiness_state: str
+    ready: bool
+    attempt_mode: str
+    attempt_result: str | None = None
+    failure_code: str | None = None
+    submit_confidence: float | None = None
+    browser_profile_key: str | None = None
+    session_health: str | None = None
+    notes: str | None = None
+    reasons: list[str]
+    started_at: datetime
+    events: list[DraftExecutionEventRead]
+    artifacts: list[DraftExecutionArtifactRead]
+
+
+class DraftExecutionStartupRead(BaseModel):
+    """Read model for a staged draft execution startup bundle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: int
+    attempt_id: int
+    event_id: int
+    job_id: int
+    candidate_profile_slug: str
+    browser_profile_key: str | None = None
+    readiness_state: str
+    target_url: str
+    startup_dir: str
+    prepared_document_count: int
+    prepared_answer_count: int
+    startup_artifact_ids: list[int]
+    started_at: datetime
+
+
+class DraftFieldPlanEntryRead(BaseModel):
+    """Read model for one persisted draft field mapping plan entry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    field_mapping_id: int
+    field_key: str
+    inferred_type: str | None = None
+    confidence: float | None = None
+    answer_id: int | None = None
+    truth_tier: str | None = None
+    chosen_answer: str | None = None
+    answer_source: str | None = None
+
+
+class DraftFieldPlanRead(BaseModel):
+    """Read model for a persisted draft field-plan bundle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: int
+    attempt_id: int
+    event_id: int
+    job_id: int
+    candidate_profile_slug: str
+    field_count: int
+    artifact_id: int
+    artifact_path: str
+    entries: list[DraftFieldPlanEntryRead]
+
+
+class DraftSiteFieldPlanEntryRead(BaseModel):
+    """Read model for one site-aware field overlay entry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    field_mapping_id: int
+    field_key: str
+    site_vendor: str
+    selector_candidates: list[str]
+    confidence_gate: float
+    manual_review_required: bool = False
+
+
+class DraftSiteFieldPlanRead(BaseModel):
+    """Read model for a site-aware execution overlay."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: int
+    attempt_id: int
+    event_id: int
+    job_id: int
+    candidate_profile_slug: str
+    site_vendor: str
+    entry_count: int
+    artifact_id: int
+    artifact_path: str
+    entries: list[DraftSiteFieldPlanEntryRead]
+
+
+class DraftResolvedFieldRead(BaseModel):
+    """Read model for one resolved site field entry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    field_mapping_id: int
+    field_key: str
+    resolved_selector: str | None = None
+    resolution_status: str
+    confidence_gate: float
+    manual_review_required: bool = False
+
+
+class DraftTargetOpenRead(BaseModel):
+    """Read model for a non-submitting page-open and field-resolution pass."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: int
+    attempt_id: int
+    event_id: int
+    job_id: int
+    candidate_profile_slug: str
+    site_vendor: str
+    browser_profile_key: str
+    target_url: str
+    capture_method: str
+    capture_error: str | None = None
+    opened_page_artifact_id: int
+    resolution_artifact_id: int
+    resolved_count: int
+    unresolved_count: int
+    entries: list[DraftResolvedFieldRead]
+
+
+class DraftSubmitGateRead(BaseModel):
+    """Read model for a guarded submit-confidence evaluation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: int
+    attempt_id: int
+    event_id: int
+    job_id: int
+    candidate_profile_slug: str
+    site_vendor: str
+    application_state: str
+    attempt_result: str | None = None
+    failure_code: str | None = None
+    confidence_score: float
+    allow_submit: bool
+    stop_reasons: list[str]
+    required_fields: list[str]
+    resolved_required_fields: list[str]
+    manual_review_fields: list[str]
+    artifact_id: int
+    artifact_path: str

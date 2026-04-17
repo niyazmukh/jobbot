@@ -1,0 +1,33 @@
+{
+  "data": {
+    "count": 2,
+    "positions": [
+      {
+        "id": "1772801",
+        "displayJobId": "1772801",
+        "name": "Senior Software Engineer",
+        "locations": [
+          "Redmond, Washington, United States"
+        ],
+        "positionUrl": "/careers/job/1772801",
+        "department": "Engineering",
+        "workLocationOption": "Onsite",
+        "locationFlexibility": "0-25% work from home",
+        "postedTs": 1713000000
+      },
+      {
+        "id": "1772802",
+        "displayJobId": "1772802",
+        "name": "Principal Applied Scientist",
+        "locations": [
+          "Multiple Locations, United States"
+        ],
+        "positionUrl": "/careers/job/1772802",
+        "department": "AI Platform",
+        "workLocationOption": "Up to 100% work from home",
+        "locationFlexibility": "Remote",
+        "postedTs": 1713001000
+      }
+    ]
+  }
+}

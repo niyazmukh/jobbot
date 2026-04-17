@@ -1,0 +1,36 @@
+{
+  "total": 2,
+  "jobPostings": [
+    {
+      "title": "Senior Data Engineer",
+      "externalPath": "/job/Toronto-ON/Senior-Data-Engineer_JR-9001",
+      "locationsText": "Toronto, ON",
+      "postedOn": "Posted Today",
+      "bulletFields": [
+        {
+          "label": "Time Type",
+          "text": "Full time"
+        }
+      ],
+      "jobReqId": "JR-9001"
+    },
+    {
+      "title": "Machine Learning Engineer",
+      "externalPath": "/job/Remote-United-States/Machine-Learning-Engineer_JR-9002",
+      "locationsText": "Remote - United States",
+      "remoteType": "Remote",
+      "postedOn": "Posted Yesterday",
+      "bulletFields": [
+        {
+          "label": "Time Type",
+          "text": "Full time"
+        },
+        {
+          "label": "Locations",
+          "text": "Remote - United States"
+        }
+      ],
+      "jobReqId": "JR-9002"
+    }
+  ]
+}

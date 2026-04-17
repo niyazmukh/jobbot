@@ -1,0 +1,2239 @@
+"""Execution bootstrap services built on persisted eligibility."""
+
+from __future__ import annotations
+
+import json
+import mimetypes
+import re
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from jobbot.config import get_settings
+from jobbot.browser.service import get_browser_profile_policy
+from jobbot.db.models import (
+    Application,
+    ApplicationAttempt,
+    ApplicationEligibility,
+    ApplicationEvent,
+    Artifact,
+    BrowserProfile,
+    CandidateProfile,
+    Company,
+    FieldMapping,
+    Job,
+    utcnow,
+)
+from jobbot.execution.schemas import (
+    DraftApplicationAttemptRead,
+    DraftExecutionArtifactRead,
+    DraftExecutionArtifactDetailRead,
+    DraftExecutionDashboardRead,
+    DraftExecutionAttemptDetailRead,
+    DraftExecutionEventRead,
+    DraftExecutionOverviewRead,
+    DraftExecutionReplayAssetRead,
+    DraftExecutionReplayBundleRead,
+    DraftExecutionStartupRead,
+    DraftFieldPlanEntryRead,
+    DraftFieldPlanRead,
+    DraftResolvedFieldRead,
+    DraftSubmitGateRead,
+    DraftSiteFieldPlanEntryRead,
+    DraftSiteFieldPlanRead,
+    DraftTargetOpenRead,
+)
+from jobbot.models.enums import (
+    ApplicationMode,
+    ApplicationState,
+    ArtifactType,
+    AttemptResult,
+    BrowserProfileType,
+    TruthTier,
+)
+from jobbot.preparation import get_prepared_job_read
+
+
+def bootstrap_draft_application_attempt(
+    session: Session,
+    *,
+    job_id: int,
+    candidate_profile_slug: str,
+    browser_profile_key: str | None = None,
+) -> DraftApplicationAttemptRead:
+    """Create a draft application attempt from a persisted ready-to-apply snapshot."""
+
+    candidate = session.scalar(
+        select(CandidateProfile).where(CandidateProfile.slug == candidate_profile_slug)
+    )
+    if candidate is None:
+        raise ValueError("candidate_profile_not_found")
+
+    eligibility = session.scalar(
+        select(ApplicationEligibility).where(
+            ApplicationEligibility.job_id == job_id,
+            ApplicationEligibility.candidate_profile_id == candidate.id,
+        )
+    )
+    if eligibility is None:
+        raise ValueError("application_eligibility_not_found")
+    if not eligibility.ready or eligibility.readiness_state != "ready_to_apply":
+        raise ValueError("application_not_ready_to_apply")
+
+    session_health = None
+    if browser_profile_key is not None:
+        profile = session.scalar(
+            select(BrowserProfile).where(BrowserProfile.profile_key == browser_profile_key)
+        )
+        if profile is None:
+            raise ValueError("browser_profile_not_found")
+        if profile.profile_type != BrowserProfileType.APPLICATION:
+            raise ValueError("browser_profile_not_application_type")
+        policy = get_browser_profile_policy(session, browser_profile_key)
+        if not policy.allow_application:
+            raise ValueError("browser_profile_not_ready_for_application")
+        session_health = profile.session_health
+
+    application = session.scalar(
+        select(Application).where(
+            Application.job_id == job_id,
+            Application.candidate_profile_id == candidate.id,
+        )
+    )
+    created_application = False
+    now = utcnow()
+    if application is None:
+        application = Application(
+            job_id=job_id,
+            candidate_profile_id=candidate.id,
+            current_state=ApplicationState.PREPARED.value,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(application)
+        session.flush()
+        created_application = True
+    else:
+        if application.current_state == ApplicationState.APPLIED.value:
+            raise ValueError("application_already_applied")
+        if application.current_state != ApplicationState.REVIEW.value:
+            application.current_state = ApplicationState.PREPARED.value
+        application.updated_at = now
+        session.flush()
+
+    attempt = ApplicationAttempt(
+        application_id=application.id,
+        mode=ApplicationMode.DRAFT,
+        browser_profile_key=browser_profile_key,
+        session_health=session_health,
+        started_at=now,
+        notes="Bootstrapped from persisted eligibility snapshot.",
+    )
+    session.add(attempt)
+    session.flush()
+
+    event = ApplicationEvent(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_type="draft_attempt_bootstrapped",
+        message="Draft attempt bootstrapped from persisted eligibility snapshot.",
+        payload={
+            "job_id": job_id,
+            "candidate_profile_slug": candidate_profile_slug,
+            "readiness_state": eligibility.readiness_state,
+            "ready": eligibility.ready,
+            "reasons": list(eligibility.reasons or []),
+            "browser_profile_key": browser_profile_key,
+            "eligibility_materialized_at": (
+                eligibility.materialized_at.isoformat() if eligibility.materialized_at else None
+            ),
+        },
+        created_at=now,
+    )
+    session.add(event)
+    session.flush()
+
+    application.last_attempt_id = attempt.id
+    application.updated_at = now
+    session.commit()
+    session.refresh(application)
+    session.refresh(attempt)
+    session.refresh(event)
+
+    return DraftApplicationAttemptRead(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_id=event.id,
+        job_id=job_id,
+        candidate_profile_slug=candidate_profile_slug,
+        application_state=application.current_state,
+        attempt_mode=attempt.mode.value,
+        browser_profile_key=attempt.browser_profile_key,
+        session_health=attempt.session_health,
+        attempt_result=attempt.result,
+        failure_code=attempt.failure_code,
+        submit_confidence=attempt.submit_confidence,
+        notes=attempt.notes,
+        readiness_state=eligibility.readiness_state,
+        ready=eligibility.ready,
+        reasons=list(eligibility.reasons or []),
+        created_application=created_application,
+        started_at=attempt.started_at,
+    )
+
+
+def list_draft_application_attempts(
+    session: Session,
+    *,
+    candidate_profile_slug: str,
+    limit: int = 50,
+) -> list[DraftApplicationAttemptRead]:
+    """List draft application attempts for one candidate."""
+
+    candidate = session.scalar(
+        select(CandidateProfile).where(CandidateProfile.slug == candidate_profile_slug)
+    )
+    if candidate is None:
+        raise ValueError("candidate_profile_not_found")
+
+    rows = session.execute(
+        select(Application, ApplicationAttempt, ApplicationEligibility)
+        .join(ApplicationAttempt, ApplicationAttempt.application_id == Application.id)
+        .join(
+            ApplicationEligibility,
+            (ApplicationEligibility.job_id == Application.job_id)
+            & (ApplicationEligibility.candidate_profile_id == Application.candidate_profile_id),
+        )
+        .where(
+            Application.candidate_profile_id == candidate.id,
+            ApplicationAttempt.mode == ApplicationMode.DRAFT,
+        )
+        .order_by(ApplicationAttempt.started_at.desc(), ApplicationAttempt.id.desc())
+        .limit(limit)
+    ).all()
+
+    items: list[DraftApplicationAttemptRead] = []
+    for application, attempt, eligibility in rows:
+        event_id = session.scalar(
+            select(ApplicationEvent.id)
+            .where(
+                ApplicationEvent.attempt_id == attempt.id,
+                ApplicationEvent.event_type == "draft_attempt_bootstrapped",
+            )
+            .order_by(ApplicationEvent.id.desc())
+        )
+        items.append(
+            DraftApplicationAttemptRead(
+                application_id=application.id,
+                attempt_id=attempt.id,
+                event_id=int(event_id or 0),
+                job_id=application.job_id,
+                candidate_profile_slug=candidate_profile_slug,
+                application_state=application.current_state,
+                attempt_mode=attempt.mode.value,
+                browser_profile_key=attempt.browser_profile_key,
+                session_health=attempt.session_health,
+                attempt_result=attempt.result,
+                failure_code=attempt.failure_code,
+                submit_confidence=attempt.submit_confidence,
+                notes=attempt.notes,
+                readiness_state=eligibility.readiness_state,
+                ready=eligibility.ready,
+                reasons=list(eligibility.reasons or []),
+                created_application=False,
+                started_at=attempt.started_at,
+            )
+        )
+
+    return items
+
+
+def list_execution_overview(
+    session: Session,
+    *,
+    candidate_profile_slug: str,
+    blocked_only: bool = False,
+    limit: int = 50,
+) -> list[DraftExecutionOverviewRead]:
+    """Return operator-facing draft execution rows with job context and attempt outcome."""
+
+    candidate = session.scalar(
+        select(CandidateProfile).where(CandidateProfile.slug == candidate_profile_slug)
+    )
+    if candidate is None:
+        raise ValueError("candidate_profile_not_found")
+
+    rows = session.execute(
+        select(Application, ApplicationAttempt, ApplicationEligibility, Job, Company.name)
+        .join(ApplicationAttempt, ApplicationAttempt.application_id == Application.id)
+        .join(
+            ApplicationEligibility,
+            (ApplicationEligibility.job_id == Application.job_id)
+            & (ApplicationEligibility.candidate_profile_id == Application.candidate_profile_id),
+        )
+        .join(Job, Job.id == Application.job_id)
+        .outerjoin(Company, Company.id == Job.company_id)
+        .where(
+            Application.candidate_profile_id == candidate.id,
+            ApplicationAttempt.mode == ApplicationMode.DRAFT,
+        )
+        .order_by(ApplicationAttempt.started_at.desc(), ApplicationAttempt.id.desc())
+        .limit(limit)
+    ).all()
+
+    items: list[DraftExecutionOverviewRead] = []
+    for application, attempt, eligibility, job, company_name in rows:
+        latest_event = session.execute(
+            select(ApplicationEvent)
+            .where(ApplicationEvent.attempt_id == attempt.id)
+            .order_by(ApplicationEvent.created_at.desc(), ApplicationEvent.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        artifacts = session.scalars(
+            select(Artifact).where(Artifact.attempt_id == attempt.id)
+        ).all()
+        artifact_type_counts = {
+            ArtifactType.SCREENSHOT.value: 0,
+            ArtifactType.HTML_SNAPSHOT.value: 0,
+            ArtifactType.MODEL_IO.value: 0,
+            ArtifactType.GENERATED_DOCUMENT.value: 0,
+            ArtifactType.ANSWER_PACK.value: 0,
+        }
+        for artifact in artifacts:
+            artifact_type_counts[artifact.artifact_type.value] = (
+                artifact_type_counts.get(artifact.artifact_type.value, 0) + 1
+            )
+        attempt_route = f"/execution/attempts/{attempt.id}"
+        replay_route = f"/execution/replay/{attempt.id}"
+        if attempt.result == AttemptResult.BLOCKED.value:
+            primary_action_route = replay_route
+            primary_action_label = "Open replay bundle"
+        else:
+            primary_action_route = attempt_route
+            primary_action_label = "Open attempt detail"
+
+        items.append(
+            DraftExecutionOverviewRead(
+                application_id=application.id,
+                attempt_id=attempt.id,
+                job_id=job.id,
+                candidate_profile_slug=candidate_profile_slug,
+                company_name=company_name,
+                job_title=job.title,
+                site_vendor=job.ats_vendor,
+                application_state=application.current_state,
+                readiness_state=eligibility.readiness_state,
+                ready=eligibility.ready,
+                attempt_mode=attempt.mode.value,
+                attempt_result=attempt.result,
+                failure_code=attempt.failure_code,
+                submit_confidence=attempt.submit_confidence,
+                browser_profile_key=attempt.browser_profile_key,
+                session_health=attempt.session_health,
+                latest_event_type=(latest_event.event_type if latest_event is not None else None),
+                latest_event_message=(latest_event.message if latest_event is not None else None),
+                attempt_route=attempt_route,
+                replay_route=replay_route,
+                primary_action_route=primary_action_route,
+                primary_action_label=primary_action_label,
+                artifact_count=len(artifacts),
+                screenshot_count=artifact_type_counts.get(ArtifactType.SCREENSHOT.value, 0),
+                html_snapshot_count=artifact_type_counts.get(ArtifactType.HTML_SNAPSHOT.value, 0),
+                model_io_count=artifact_type_counts.get(ArtifactType.MODEL_IO.value, 0),
+                generated_document_count=artifact_type_counts.get(ArtifactType.GENERATED_DOCUMENT.value, 0),
+                answer_pack_count=artifact_type_counts.get(ArtifactType.ANSWER_PACK.value, 0),
+                reasons=list(eligibility.reasons or []),
+                started_at=attempt.started_at,
+            )
+        )
+    if blocked_only:
+        items = [item for item in items if item.attempt_result == AttemptResult.BLOCKED.value]
+    return items
+
+
+def get_execution_dashboard(
+    session: Session,
+    *,
+    candidate_profile_slug: str,
+    limit: int = 10,
+) -> DraftExecutionDashboardRead:
+    """Return one candidate-scoped execution dashboard summary."""
+
+    rows = list_execution_overview(
+        session,
+        candidate_profile_slug=candidate_profile_slug,
+        blocked_only=False,
+        limit=max(limit, 50),
+    )
+    blocked_rows = [row for row in rows if row.attempt_result == AttemptResult.BLOCKED.value]
+    pending_rows = [row for row in rows if row.attempt_result is None]
+    review_application_ids = {
+        row.application_id
+        for row in rows
+        if row.application_state == ApplicationState.REVIEW.value
+    }
+    replay_ready_rows = [row for row in rows if row.artifact_count > 0]
+
+    recommended_actions = [
+        "Resolve blocked guarded attempts before retrying browser-driven execution.",
+        "Open replay bundles for attempts with persisted artifacts before any manual browser retry.",
+        "Track review_state_attempts to keep blocked applications from stalling silently.",
+    ]
+    if blocked_rows:
+        recommended_actions.append("Prioritize attempts with submit_gate_blocked failure codes and manual-review stop reasons.")
+
+    return DraftExecutionDashboardRead(
+        candidate_profile_slug=candidate_profile_slug,
+        total_attempts=len(rows),
+        blocked_attempts=len(blocked_rows),
+        pending_attempts=len(pending_rows),
+        review_state_attempts=len(review_application_ids),
+        replay_ready_attempts=len(replay_ready_rows),
+        recent_attempts=rows[:limit],
+        blocked_recent_attempts=blocked_rows[:limit],
+        recommended_actions=recommended_actions,
+    )
+
+
+def get_execution_attempt_detail(
+    session: Session,
+    *,
+    attempt_id: int,
+) -> DraftExecutionAttemptDetailRead:
+    """Return one execution attempt with ordered events and artifacts for drill-down."""
+
+    row = session.execute(
+        select(Application, ApplicationAttempt, ApplicationEligibility, Job, Company.name, CandidateProfile)
+        .join(ApplicationAttempt, ApplicationAttempt.application_id == Application.id)
+        .join(CandidateProfile, CandidateProfile.id == Application.candidate_profile_id)
+        .join(
+            ApplicationEligibility,
+            (ApplicationEligibility.job_id == Application.job_id)
+            & (ApplicationEligibility.candidate_profile_id == Application.candidate_profile_id),
+        )
+        .join(Job, Job.id == Application.job_id)
+        .outerjoin(Company, Company.id == Job.company_id)
+        .where(ApplicationAttempt.id == attempt_id)
+    ).first()
+    if row is None:
+        raise ValueError("application_attempt_not_found")
+
+    application, attempt, eligibility, job, company_name, candidate = row
+    events = session.scalars(
+        select(ApplicationEvent)
+        .where(ApplicationEvent.attempt_id == attempt.id)
+        .order_by(ApplicationEvent.created_at, ApplicationEvent.id)
+    ).all()
+    artifacts = session.scalars(
+        select(Artifact)
+        .where(Artifact.attempt_id == attempt.id)
+        .order_by(Artifact.created_at, Artifact.id)
+    ).all()
+
+    return DraftExecutionAttemptDetailRead(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        job_id=job.id,
+        candidate_profile_slug=candidate.slug,
+        company_name=company_name,
+        job_title=job.title,
+        site_vendor=job.ats_vendor,
+        application_state=application.current_state,
+        readiness_state=eligibility.readiness_state,
+        ready=eligibility.ready,
+        attempt_mode=attempt.mode.value,
+        attempt_result=attempt.result,
+        failure_code=attempt.failure_code,
+        submit_confidence=attempt.submit_confidence,
+        browser_profile_key=attempt.browser_profile_key,
+        session_health=attempt.session_health,
+        notes=attempt.notes,
+        reasons=list(eligibility.reasons or []),
+        started_at=attempt.started_at,
+        events=[
+            DraftExecutionEventRead(
+                event_id=event.id,
+                event_type=event.event_type,
+                message=event.message,
+                created_at=event.created_at,
+                payload=(event.payload or {}),
+            )
+            for event in events
+        ],
+        artifacts=[
+            DraftExecutionArtifactRead(
+                artifact_id=artifact.id,
+                artifact_type=artifact.artifact_type.value,
+                path=artifact.path,
+                size_bytes=artifact.size_bytes,
+                created_at=artifact.created_at,
+            )
+            for artifact in artifacts
+        ],
+    )
+
+
+def get_execution_artifact_detail(
+    session: Session,
+    *,
+    artifact_id: int,
+) -> DraftExecutionArtifactDetailRead:
+    """Return one execution artifact with a bounded preview when text is safe to display."""
+
+    artifact = session.get(Artifact, artifact_id)
+    if artifact is None:
+        raise ValueError("execution_artifact_not_found")
+
+    artifact_path = Path(artifact.path)
+    exists = artifact_path.exists()
+    preview_kind = "unavailable"
+    preview_text: str | None = None
+    preview_truncated = False
+    if exists:
+        preview_kind, preview_text, preview_truncated = _build_artifact_preview(
+            path=artifact_path,
+            artifact_type=artifact.artifact_type,
+        )
+    raw_route = f"/execution/artifacts/{artifact.id}/raw" if exists else None
+    launch_route, launch_label = _determine_launch_action(
+        raw_route=raw_route,
+        open_hint=_determine_replay_openability(
+            artifact_type=artifact.artifact_type.value,
+            path=artifact.path,
+            exists=exists,
+        )[1],
+        artifact_id=artifact.id,
+    )
+
+    return DraftExecutionArtifactDetailRead(
+        artifact_id=artifact.id,
+        attempt_id=artifact.attempt_id,
+        artifact_type=artifact.artifact_type.value,
+        path=artifact.path,
+        size_bytes=artifact.size_bytes,
+        created_at=artifact.created_at,
+        exists=exists,
+        raw_route=raw_route,
+        launch_route=launch_route,
+        launch_label=launch_label,
+        preview_kind=preview_kind,
+        preview_text=preview_text,
+        preview_truncated=preview_truncated,
+    )
+
+
+def get_execution_replay_bundle(
+    session: Session,
+    *,
+    attempt_id: int,
+) -> DraftExecutionReplayBundleRead:
+    """Return a replay-oriented bundle for one execution attempt."""
+
+    row = session.execute(
+        select(Application, ApplicationAttempt, Job, Company.name, CandidateProfile)
+        .join(ApplicationAttempt, ApplicationAttempt.application_id == Application.id)
+        .join(Job, Job.id == Application.job_id)
+        .join(CandidateProfile, CandidateProfile.id == Application.candidate_profile_id)
+        .outerjoin(Company, Company.id == Job.company_id)
+        .where(ApplicationAttempt.id == attempt_id)
+    ).first()
+    if row is None:
+        raise ValueError("application_attempt_not_found")
+
+    application, attempt, job, company_name, candidate = row
+    events = session.scalars(
+        select(ApplicationEvent)
+        .where(ApplicationEvent.attempt_id == attempt.id)
+        .order_by(ApplicationEvent.created_at, ApplicationEvent.id)
+    ).all()
+    artifacts = session.scalars(
+        select(Artifact)
+        .where(Artifact.attempt_id == attempt.id)
+        .order_by(Artifact.created_at, Artifact.id)
+    ).all()
+
+    startup_event = _event_by_type(events, "draft_execution_started")
+    field_plan_event = _event_by_type(events, "draft_field_plan_created")
+    overlay_event = _event_by_type(events, "draft_site_field_overlay_created")
+    target_event = _event_by_type(events, "draft_target_opened")
+    submit_gate_event = _event_by_type(events, "draft_submit_gate_evaluated")
+    latest_event = events[-1] if events else None
+
+    startup_payload = startup_event.payload if startup_event is not None else {}
+    startup_dir = str(startup_payload.get("startup_dir")) if startup_payload.get("startup_dir") else None
+    target_url = str(startup_payload.get("target_url")) if startup_payload.get("target_url") else None
+
+    assets = [
+        _build_replay_asset(
+            attempt_id=attempt.id,
+            label="startup_context",
+            artifact=_artifact_by_filename(artifacts, "startup_context.json"),
+        ),
+        _build_replay_asset(
+            attempt_id=attempt.id,
+            label="prepared_answer_pack",
+            artifact=_artifact_by_filename(artifacts, "prepared_answer_pack.json"),
+        ),
+        _build_replay_asset(
+            attempt_id=attempt.id,
+            label="startup_target_page",
+            artifact=_artifact_by_filename(artifacts, "target_page.html"),
+        ),
+        _build_replay_asset(
+            attempt_id=attempt.id,
+            label="draft_field_plan",
+            artifact=_artifact_from_event_payload(artifacts, field_plan_event, "artifact_id"),
+            fallback_path=_payload_value(field_plan_event, "artifact_path"),
+        ),
+        _build_replay_asset(
+            attempt_id=attempt.id,
+            label="site_field_overlay",
+            artifact=_artifact_from_event_payload(artifacts, overlay_event, "artifact_id"),
+            fallback_path=_payload_value(overlay_event, "artifact_path"),
+        ),
+        _build_replay_asset(
+            attempt_id=attempt.id,
+            label="opened_target_capture",
+            artifact=_artifact_from_event_payload(artifacts, target_event, "opened_page_artifact_id"),
+        ),
+        _build_replay_asset(
+            attempt_id=attempt.id,
+            label="field_resolution",
+            artifact=_artifact_from_event_payload(artifacts, target_event, "resolution_artifact_id"),
+        ),
+        _build_replay_asset(
+            attempt_id=attempt.id,
+            label="submit_gate",
+            artifact=_artifact_from_event_payload(artifacts, submit_gate_event, "artifact_id"),
+            fallback_path=_payload_value(submit_gate_event, "artifact_path"),
+        ),
+    ]
+
+    recommended_actions = [
+        "Inspect startup_context and prepared_answer_pack before any browser replay.",
+        "Compare draft_field_plan, site_field_overlay, and field_resolution to understand deterministic selector decisions.",
+        "Inspect submit_gate when attempt_result is blocked to see the exact stop reasons.",
+    ]
+    if startup_dir:
+        recommended_actions.append(f"Use startup_dir for local replay inputs: {startup_dir}")
+    if attempt.result == AttemptResult.BLOCKED.value:
+        recommended_actions.append("Resolve manual-review or unresolved fields before attempting guarded submit again.")
+
+    return DraftExecutionReplayBundleRead(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        job_id=job.id,
+        candidate_profile_slug=candidate.slug,
+        job_title=job.title,
+        company_name=company_name,
+        site_vendor=job.ats_vendor,
+        application_state=application.current_state,
+        attempt_result=attempt.result,
+        failure_code=attempt.failure_code,
+        latest_event_type=(latest_event.event_type if latest_event is not None else None),
+        startup_dir=startup_dir,
+        target_url=target_url,
+        assets=assets,
+        recommended_actions=recommended_actions,
+    )
+
+
+def start_draft_execution_attempt(
+    session: Session,
+    *,
+    attempt_id: int,
+) -> DraftExecutionStartupRead:
+    """Stage a draft attempt for future browser execution and capture startup artifacts."""
+
+    row = session.execute(
+        select(ApplicationAttempt, Application, CandidateProfile, ApplicationEligibility)
+        .join(Application, Application.id == ApplicationAttempt.application_id)
+        .join(CandidateProfile, CandidateProfile.id == Application.candidate_profile_id)
+        .join(
+            ApplicationEligibility,
+            (ApplicationEligibility.job_id == Application.job_id)
+            & (ApplicationEligibility.candidate_profile_id == Application.candidate_profile_id),
+        )
+        .where(ApplicationAttempt.id == attempt_id)
+    ).first()
+    if row is None:
+        raise ValueError("application_attempt_not_found")
+
+    attempt, application, candidate, eligibility = row
+    if attempt.mode != ApplicationMode.DRAFT:
+        raise ValueError("application_attempt_not_draft")
+    if application.current_state == ApplicationState.APPLIED.value:
+        raise ValueError("application_already_applied")
+    if not eligibility.ready or eligibility.readiness_state != "ready_to_apply":
+        raise ValueError("application_not_ready_to_apply")
+
+    profile = None
+    if attempt.browser_profile_key:
+        profile = session.scalar(
+            select(BrowserProfile).where(BrowserProfile.profile_key == attempt.browser_profile_key)
+        )
+        if profile is None:
+            raise ValueError("browser_profile_not_found")
+        policy = get_browser_profile_policy(session, attempt.browser_profile_key)
+        if not policy.allow_application:
+            raise ValueError("browser_profile_not_ready_for_application")
+        attempt.session_health = profile.session_health
+
+    existing_event = session.scalar(
+        select(ApplicationEvent).where(
+            ApplicationEvent.attempt_id == attempt.id,
+            ApplicationEvent.event_type == "draft_execution_started",
+        )
+    )
+    if existing_event is not None:
+        return _build_startup_read(
+            session,
+            application=application,
+            attempt=attempt,
+            candidate=candidate,
+            eligibility=eligibility,
+            event=existing_event,
+        )
+
+    prepared = get_prepared_job_read(
+        session,
+        job_id=application.job_id,
+        candidate_profile_slug=candidate.slug,
+    )
+    if prepared is None:
+        raise ValueError("prepared_outputs_not_found")
+
+    now = utcnow()
+    startup_dir = _execution_startup_dir(candidate.slug, application.job_id, attempt.id)
+    startup_dir.mkdir(parents=True, exist_ok=True)
+
+    target_url = _target_url(application.job_id, session)
+    startup_context_path = startup_dir / "startup_context.json"
+    startup_context_payload = {
+        "application_id": application.id,
+        "attempt_id": attempt.id,
+        "job_id": application.job_id,
+        "candidate_profile_slug": candidate.slug,
+        "browser_profile_key": attempt.browser_profile_key,
+        "session_health": attempt.session_health,
+        "readiness_state": eligibility.readiness_state,
+        "ready": eligibility.ready,
+        "reasons": list(eligibility.reasons or []),
+        "target_url": target_url,
+    }
+    startup_context_path.write_text(
+        json.dumps(startup_context_payload, indent=2, ensure_ascii=True),
+        encoding="utf-8",
+    )
+
+    answer_pack_path = startup_dir / "prepared_answer_pack.json"
+    answer_pack_payload = [answer.model_dump(mode="json") for answer in prepared.answers]
+    answer_pack_path.write_text(
+        json.dumps(answer_pack_payload, indent=2, ensure_ascii=True),
+        encoding="utf-8",
+    )
+
+    target_page_path = startup_dir / "target_page.html"
+    target_page_path.write_text(
+        _render_target_page_stub(
+            job_title=prepared.job_title,
+            target_url=target_url,
+            candidate_profile_slug=candidate.slug,
+        ),
+        encoding="utf-8",
+    )
+
+    artifacts = [
+        Artifact(
+            attempt_id=attempt.id,
+            artifact_type=ArtifactType.MODEL_IO,
+            path=str(startup_context_path),
+            size_bytes=startup_context_path.stat().st_size,
+            retention_days=get_settings().artifact_retention_days,
+            created_at=now,
+        ),
+        Artifact(
+            attempt_id=attempt.id,
+            artifact_type=ArtifactType.ANSWER_PACK,
+            path=str(answer_pack_path),
+            size_bytes=answer_pack_path.stat().st_size,
+            retention_days=get_settings().artifact_retention_days,
+            created_at=now,
+        ),
+        Artifact(
+            attempt_id=attempt.id,
+            artifact_type=ArtifactType.HTML_SNAPSHOT,
+            path=str(target_page_path),
+            size_bytes=target_page_path.stat().st_size,
+            retention_days=get_settings().artifact_retention_days,
+            created_at=now,
+        ),
+    ]
+    session.add_all(artifacts)
+    session.flush()
+
+    for document in prepared.documents:
+        if document.content_path:
+            document_path = Path(document.content_path)
+            size_bytes = document_path.stat().st_size if document_path.exists() else None
+            artifact = Artifact(
+                attempt_id=attempt.id,
+                artifact_type=ArtifactType.GENERATED_DOCUMENT,
+                path=document.content_path,
+                size_bytes=size_bytes,
+                retention_days=get_settings().artifact_retention_days,
+                created_at=now,
+            )
+            session.add(artifact)
+            session.flush()
+            artifacts.append(artifact)
+
+    event = ApplicationEvent(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_type="draft_execution_started",
+        message="Draft execution startup bundle created.",
+        payload={
+            "startup_dir": str(startup_dir),
+            "target_url": target_url,
+            "prepared_document_count": len(prepared.documents),
+            "prepared_answer_count": len(prepared.answers),
+            "artifact_ids": [artifact.id for artifact in artifacts],
+        },
+        created_at=now,
+    )
+    session.add(event)
+    attempt.notes = "Draft execution startup artifacts created."
+    application.updated_at = now
+    session.commit()
+    session.refresh(event)
+    session.refresh(attempt)
+
+    return DraftExecutionStartupRead(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_id=event.id,
+        job_id=application.job_id,
+        candidate_profile_slug=candidate.slug,
+        browser_profile_key=attempt.browser_profile_key,
+        readiness_state=eligibility.readiness_state,
+        target_url=target_url,
+        startup_dir=str(startup_dir),
+        prepared_document_count=len(prepared.documents),
+        prepared_answer_count=len(prepared.answers),
+        startup_artifact_ids=[artifact.id for artifact in artifacts],
+        started_at=attempt.started_at,
+    )
+
+
+def build_draft_field_plan(
+    session: Session,
+    *,
+    attempt_id: int,
+) -> DraftFieldPlanRead:
+    """Create deterministic field mappings from staged startup artifacts and prepared outputs."""
+
+    row = session.execute(
+        select(ApplicationAttempt, Application, CandidateProfile, ApplicationEligibility)
+        .join(Application, Application.id == ApplicationAttempt.application_id)
+        .join(CandidateProfile, CandidateProfile.id == Application.candidate_profile_id)
+        .join(
+            ApplicationEligibility,
+            (ApplicationEligibility.job_id == Application.job_id)
+            & (ApplicationEligibility.candidate_profile_id == Application.candidate_profile_id),
+        )
+        .where(ApplicationAttempt.id == attempt_id)
+    ).first()
+    if row is None:
+        raise ValueError("application_attempt_not_found")
+
+    attempt, application, candidate, eligibility = row
+    startup_event = session.scalar(
+        select(ApplicationEvent).where(
+            ApplicationEvent.attempt_id == attempt.id,
+            ApplicationEvent.event_type == "draft_execution_started",
+        )
+    )
+    if startup_event is None:
+        raise ValueError("draft_execution_not_started")
+
+    existing_event = session.scalar(
+        select(ApplicationEvent).where(
+            ApplicationEvent.attempt_id == attempt.id,
+            ApplicationEvent.event_type == "draft_field_plan_created",
+        )
+    )
+    if existing_event is not None:
+        return _build_field_plan_read(
+            session,
+            application=application,
+            attempt=attempt,
+            candidate=candidate,
+            event=existing_event,
+        )
+
+    prepared = get_prepared_job_read(
+        session,
+        job_id=application.job_id,
+        candidate_profile_slug=candidate.slug,
+    )
+    if prepared is None:
+        raise ValueError("prepared_outputs_not_found")
+
+    startup_payload = startup_event.payload or {}
+    startup_dir = Path(str(startup_payload.get("startup_dir") or _execution_startup_dir(candidate.slug, application.job_id, attempt.id)))
+    startup_dir.mkdir(parents=True, exist_ok=True)
+
+    session.query(FieldMapping).filter(FieldMapping.attempt_id == attempt.id).delete()
+    session.flush()
+
+    entries = _build_field_plan_entries(candidate, prepared)
+    mappings: list[FieldMapping] = []
+    for entry in entries:
+        mapping = FieldMapping(
+            attempt_id=attempt.id,
+            field_key=entry["field_key"],
+            raw_label=entry.get("raw_label"),
+            raw_dom_signature=entry.get("raw_dom_signature"),
+            inferred_type=entry.get("inferred_type"),
+            confidence=entry.get("confidence"),
+            answer_id=entry.get("answer_id"),
+            truth_tier=entry.get("truth_tier"),
+            chosen_answer=entry.get("chosen_answer"),
+            answer_source=entry.get("answer_source"),
+        )
+        session.add(mapping)
+        session.flush()
+        mappings.append(mapping)
+
+    artifact_path = startup_dir / "draft_field_plan.json"
+    artifact_payload = {
+        "application_id": application.id,
+        "attempt_id": attempt.id,
+        "job_id": application.job_id,
+        "candidate_profile_slug": candidate.slug,
+        "readiness_state": eligibility.readiness_state,
+        "entries": [
+            {
+                "field_mapping_id": mapping.id,
+                "field_key": mapping.field_key,
+                "inferred_type": mapping.inferred_type,
+                "confidence": mapping.confidence,
+                "answer_id": mapping.answer_id,
+                "truth_tier": (mapping.truth_tier.value if mapping.truth_tier else None),
+                "chosen_answer": mapping.chosen_answer,
+                "answer_source": mapping.answer_source,
+            }
+            for mapping in mappings
+        ],
+    }
+    artifact_path.write_text(
+        json.dumps(artifact_payload, indent=2, ensure_ascii=True),
+        encoding="utf-8",
+    )
+    now = utcnow()
+    artifact = Artifact(
+        attempt_id=attempt.id,
+        artifact_type=ArtifactType.MODEL_IO,
+        path=str(artifact_path),
+        size_bytes=artifact_path.stat().st_size,
+        retention_days=get_settings().artifact_retention_days,
+        created_at=now,
+    )
+    session.add(artifact)
+    session.flush()
+
+    event = ApplicationEvent(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_type="draft_field_plan_created",
+        message="Deterministic draft field plan created from staged startup bundle.",
+        payload={
+            "artifact_id": artifact.id,
+            "artifact_path": str(artifact_path),
+            "field_count": len(mappings),
+        },
+        created_at=now,
+    )
+    session.add(event)
+    application.updated_at = now
+    session.commit()
+    session.refresh(event)
+
+    return DraftFieldPlanRead(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_id=event.id,
+        job_id=application.job_id,
+        candidate_profile_slug=candidate.slug,
+        field_count=len(mappings),
+        artifact_id=artifact.id,
+        artifact_path=str(artifact_path),
+        entries=[
+            DraftFieldPlanEntryRead(
+                field_mapping_id=mapping.id,
+                field_key=mapping.field_key,
+                inferred_type=mapping.inferred_type,
+                confidence=mapping.confidence,
+                answer_id=mapping.answer_id,
+                truth_tier=(mapping.truth_tier.value if mapping.truth_tier else None),
+                chosen_answer=mapping.chosen_answer,
+                answer_source=mapping.answer_source,
+            )
+            for mapping in mappings
+        ],
+    )
+
+
+def build_site_field_overlay(
+    session: Session,
+    *,
+    attempt_id: int,
+) -> DraftSiteFieldPlanRead:
+    """Build a site-aware selector overlay on top of the generic draft field plan."""
+
+    row = session.execute(
+        select(ApplicationAttempt, Application, CandidateProfile, Job)
+        .join(Application, Application.id == ApplicationAttempt.application_id)
+        .join(CandidateProfile, CandidateProfile.id == Application.candidate_profile_id)
+        .join(Job, Job.id == Application.job_id)
+        .where(ApplicationAttempt.id == attempt_id)
+    ).first()
+    if row is None:
+        raise ValueError("application_attempt_not_found")
+
+    attempt, application, candidate, job = row
+    if attempt.mode != ApplicationMode.DRAFT:
+        raise ValueError("application_attempt_not_draft")
+
+    field_plan_event = session.scalar(
+        select(ApplicationEvent).where(
+            ApplicationEvent.attempt_id == attempt.id,
+            ApplicationEvent.event_type == "draft_field_plan_created",
+        )
+    )
+    if field_plan_event is None:
+        raise ValueError("draft_field_plan_not_created")
+
+    site_vendor = str(job.ats_vendor or "unknown").lower()
+    if site_vendor != "greenhouse":
+        raise ValueError("site_overlay_not_supported")
+
+    existing_event = session.scalar(
+        select(ApplicationEvent).where(
+            ApplicationEvent.attempt_id == attempt.id,
+            ApplicationEvent.event_type == "draft_site_field_overlay_created",
+        )
+    )
+    if existing_event is not None:
+        return _build_site_field_plan_read(
+            session,
+            application=application,
+            attempt=attempt,
+            candidate=candidate,
+            job=job,
+            event=existing_event,
+        )
+
+    mappings = session.scalars(
+        select(FieldMapping)
+        .where(FieldMapping.attempt_id == attempt.id)
+        .order_by(FieldMapping.id)
+    ).all()
+    if not mappings:
+        raise ValueError("draft_field_plan_empty")
+
+    startup_dir = _execution_startup_dir(candidate.slug, application.job_id, attempt.id)
+    startup_dir.mkdir(parents=True, exist_ok=True)
+    entries: list[DraftSiteFieldPlanEntryRead] = []
+    for mapping in mappings:
+        selectors, confidence_gate, manual_review_required = _greenhouse_selector_overlay(mapping.field_key)
+        mapping.raw_dom_signature = json.dumps(
+            {
+                "site_vendor": site_vendor,
+                "selectors": selectors,
+                "confidence_gate": confidence_gate,
+                "manual_review_required": manual_review_required,
+            },
+            ensure_ascii=True,
+        )
+        mapping.raw_label = _label_for_field_key(mapping.field_key)
+        entries.append(
+            DraftSiteFieldPlanEntryRead(
+                field_mapping_id=mapping.id,
+                field_key=mapping.field_key,
+                site_vendor=site_vendor,
+                selector_candidates=selectors,
+                confidence_gate=confidence_gate,
+                manual_review_required=manual_review_required,
+            )
+        )
+
+    artifact_path = startup_dir / f"{site_vendor}_site_field_overlay.json"
+    artifact_payload = {
+        "application_id": application.id,
+        "attempt_id": attempt.id,
+        "job_id": application.job_id,
+        "candidate_profile_slug": candidate.slug,
+        "site_vendor": site_vendor,
+        "entries": [entry.model_dump() for entry in entries],
+    }
+    artifact_path.write_text(
+        json.dumps(artifact_payload, indent=2, ensure_ascii=True),
+        encoding="utf-8",
+    )
+    now = utcnow()
+    artifact = Artifact(
+        attempt_id=attempt.id,
+        artifact_type=ArtifactType.MODEL_IO,
+        path=str(artifact_path),
+        size_bytes=artifact_path.stat().st_size,
+        retention_days=get_settings().artifact_retention_days,
+        created_at=now,
+    )
+    session.add(artifact)
+    session.flush()
+
+    event = ApplicationEvent(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_type="draft_site_field_overlay_created",
+        message="Site-aware field overlay created for deterministic draft execution.",
+        payload={
+            "site_vendor": site_vendor,
+            "artifact_id": artifact.id,
+            "artifact_path": str(artifact_path),
+            "entry_count": len(entries),
+        },
+        created_at=now,
+    )
+    session.add(event)
+    application.updated_at = now
+    session.commit()
+    session.refresh(event)
+
+    return DraftSiteFieldPlanRead(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_id=event.id,
+        job_id=application.job_id,
+        candidate_profile_slug=candidate.slug,
+        site_vendor=site_vendor,
+        entry_count=len(entries),
+        artifact_id=artifact.id,
+        artifact_path=str(artifact_path),
+        entries=entries,
+    )
+
+
+def open_site_target_page(
+    session: Session,
+    *,
+    attempt_id: int,
+) -> DraftTargetOpenRead:
+    """Create a non-submitting page-open and field-resolution bundle for a site-aware draft attempt."""
+
+    row = session.execute(
+        select(ApplicationAttempt, Application, CandidateProfile, Job)
+        .join(Application, Application.id == ApplicationAttempt.application_id)
+        .join(CandidateProfile, CandidateProfile.id == Application.candidate_profile_id)
+        .join(Job, Job.id == Application.job_id)
+        .where(ApplicationAttempt.id == attempt_id)
+    ).first()
+    if row is None:
+        raise ValueError("application_attempt_not_found")
+
+    attempt, application, candidate, job = row
+    if attempt.mode != ApplicationMode.DRAFT:
+        raise ValueError("application_attempt_not_draft")
+    if not attempt.browser_profile_key:
+        raise ValueError("browser_profile_required_for_page_open")
+
+    startup_event = session.scalar(
+        select(ApplicationEvent).where(
+            ApplicationEvent.attempt_id == attempt.id,
+            ApplicationEvent.event_type == "draft_execution_started",
+        )
+    )
+    if startup_event is None:
+        raise ValueError("draft_execution_not_started")
+
+    overlay_event = session.scalar(
+        select(ApplicationEvent).where(
+            ApplicationEvent.attempt_id == attempt.id,
+            ApplicationEvent.event_type == "draft_site_field_overlay_created",
+        )
+    )
+    if overlay_event is None:
+        raise ValueError("draft_site_overlay_not_created")
+
+    profile = session.scalar(
+        select(BrowserProfile).where(BrowserProfile.profile_key == attempt.browser_profile_key)
+    )
+    if profile is None:
+        raise ValueError("browser_profile_not_found")
+    if profile.profile_type != BrowserProfileType.APPLICATION:
+        raise ValueError("browser_profile_not_application_type")
+    policy = get_browser_profile_policy(session, attempt.browser_profile_key)
+    if not policy.allow_application:
+        raise ValueError("browser_profile_not_ready_for_application")
+    attempt.session_health = profile.session_health
+
+    existing_event = session.scalar(
+        select(ApplicationEvent).where(
+            ApplicationEvent.attempt_id == attempt.id,
+            ApplicationEvent.event_type == "draft_target_opened",
+        )
+    )
+    if existing_event is not None:
+        return _build_target_open_read(
+            session,
+            application=application,
+            attempt=attempt,
+            candidate=candidate,
+            job=job,
+            event=existing_event,
+        )
+
+    if str(job.ats_vendor or "").lower() != "greenhouse":
+        raise ValueError("page_open_not_supported_for_site")
+
+    startup_payload = startup_event.payload or {}
+    startup_dir = Path(str(startup_payload.get("startup_dir") or _execution_startup_dir(candidate.slug, application.job_id, attempt.id)))
+    startup_dir.mkdir(parents=True, exist_ok=True)
+    target_url = str(startup_payload.get("target_url") or _target_url(application.job_id, session))
+
+    mappings = session.scalars(
+        select(FieldMapping)
+        .where(FieldMapping.attempt_id == attempt.id)
+        .order_by(FieldMapping.id)
+    ).all()
+    if not mappings:
+        raise ValueError("draft_field_plan_empty")
+
+    resolved_entries: list[DraftResolvedFieldRead] = []
+    for mapping in mappings:
+        parsed = {}
+        if mapping.raw_dom_signature:
+            try:
+                parsed = json.loads(mapping.raw_dom_signature)
+            except json.JSONDecodeError:
+                parsed = {}
+        selectors = list(parsed.get("selectors") or [])
+        confidence_gate = float(parsed.get("confidence_gate") or 0.0)
+        manual_review_required = bool(parsed.get("manual_review_required"))
+        resolved_selector = selectors[0] if selectors and confidence_gate >= 0.85 else None
+        resolution_status = "resolved" if resolved_selector and not manual_review_required else "manual_review"
+        if not selectors:
+            resolution_status = "unresolved"
+        updated_signature = dict(parsed)
+        updated_signature["resolved_selector"] = resolved_selector
+        updated_signature["resolution_status"] = resolution_status
+        mapping.raw_dom_signature = json.dumps(updated_signature, ensure_ascii=True)
+        resolved_entries.append(
+            DraftResolvedFieldRead(
+                field_mapping_id=mapping.id,
+                field_key=mapping.field_key,
+                resolved_selector=resolved_selector,
+                resolution_status=resolution_status,
+                confidence_gate=confidence_gate,
+                manual_review_required=manual_review_required,
+            )
+        )
+
+    opened_page_html, capture_metadata = _capture_target_page_html(
+        target_url=target_url,
+        job_title=job.title,
+        browser_profile_key=attempt.browser_profile_key,
+        candidate_profile_slug=candidate.slug,
+    )
+    opened_page_path = startup_dir / f"{job.ats_vendor}_opened_target.html"
+    opened_page_path.write_text(opened_page_html, encoding="utf-8")
+    resolution_path = startup_dir / f"{job.ats_vendor}_field_resolution.json"
+    resolution_path.write_text(
+        json.dumps(
+            {
+                "application_id": application.id,
+                "attempt_id": attempt.id,
+                "job_id": application.job_id,
+                "candidate_profile_slug": candidate.slug,
+                "site_vendor": job.ats_vendor,
+                "resolved": [entry.model_dump() for entry in resolved_entries],
+            },
+            indent=2,
+            ensure_ascii=True,
+        ),
+        encoding="utf-8",
+    )
+    now = utcnow()
+    opened_artifact = Artifact(
+        attempt_id=attempt.id,
+        artifact_type=ArtifactType.HTML_SNAPSHOT,
+        path=str(opened_page_path),
+        size_bytes=opened_page_path.stat().st_size,
+        retention_days=get_settings().artifact_retention_days,
+        created_at=now,
+    )
+    resolution_artifact = Artifact(
+        attempt_id=attempt.id,
+        artifact_type=ArtifactType.MODEL_IO,
+        path=str(resolution_path),
+        size_bytes=resolution_path.stat().st_size,
+        retention_days=get_settings().artifact_retention_days,
+        created_at=now,
+    )
+    session.add_all([opened_artifact, resolution_artifact])
+    session.flush()
+
+    resolved_count = sum(1 for entry in resolved_entries if entry.resolution_status == "resolved")
+    unresolved_count = len(resolved_entries) - resolved_count
+    event = ApplicationEvent(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_type="draft_target_opened",
+        message="Non-submitting target open and field resolution completed.",
+        payload={
+            "site_vendor": str(job.ats_vendor or ""),
+            "target_url": target_url,
+            "target_capture": capture_metadata,
+            "opened_page_artifact_id": opened_artifact.id,
+            "resolution_artifact_id": resolution_artifact.id,
+            "resolved_count": resolved_count,
+            "unresolved_count": unresolved_count,
+        },
+        created_at=now,
+    )
+    session.add(event)
+    attempt.notes = (
+        f"Target opened via {capture_metadata.get('capture_method', 'unknown')}; "
+        f"resolved={resolved_count} unresolved={unresolved_count}."
+    )
+    application.updated_at = now
+    session.commit()
+    session.refresh(event)
+
+    return DraftTargetOpenRead(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_id=event.id,
+        job_id=application.job_id,
+        candidate_profile_slug=candidate.slug,
+        site_vendor=str(job.ats_vendor or ""),
+        browser_profile_key=attempt.browser_profile_key,
+        target_url=target_url,
+        capture_method=str(capture_metadata.get("capture_method") or "unknown"),
+        capture_error=capture_metadata.get("error"),
+        opened_page_artifact_id=opened_artifact.id,
+        resolution_artifact_id=resolution_artifact.id,
+        resolved_count=resolved_count,
+        unresolved_count=unresolved_count,
+        entries=resolved_entries,
+    )
+
+
+def evaluate_submit_gate(
+    session: Session,
+    *,
+    attempt_id: int,
+) -> DraftSubmitGateRead:
+    """Evaluate guarded submit confidence from resolved field outcomes."""
+
+    row = session.execute(
+        select(ApplicationAttempt, Application, CandidateProfile, Job)
+        .join(Application, Application.id == ApplicationAttempt.application_id)
+        .join(CandidateProfile, CandidateProfile.id == Application.candidate_profile_id)
+        .join(Job, Job.id == Application.job_id)
+        .where(ApplicationAttempt.id == attempt_id)
+    ).first()
+    if row is None:
+        raise ValueError("application_attempt_not_found")
+
+    attempt, application, candidate, job = row
+    if attempt.mode != ApplicationMode.DRAFT:
+        raise ValueError("application_attempt_not_draft")
+
+    target_event = session.scalar(
+        select(ApplicationEvent).where(
+            ApplicationEvent.attempt_id == attempt.id,
+            ApplicationEvent.event_type == "draft_target_opened",
+        )
+    )
+    if target_event is None:
+        raise ValueError("draft_target_not_opened")
+
+    existing_event = session.scalar(
+        select(ApplicationEvent).where(
+            ApplicationEvent.attempt_id == attempt.id,
+            ApplicationEvent.event_type == "draft_submit_gate_evaluated",
+        )
+    )
+    if existing_event is not None:
+        return _build_submit_gate_read(
+            session,
+            application=application,
+            attempt=attempt,
+            candidate=candidate,
+            job=job,
+            event=existing_event,
+        )
+
+    site_vendor = str(job.ats_vendor or "").lower()
+    if site_vendor != "greenhouse":
+        raise ValueError("submit_gate_not_supported_for_site")
+
+    mappings = session.scalars(
+        select(FieldMapping)
+        .where(FieldMapping.attempt_id == attempt.id)
+        .order_by(FieldMapping.id)
+    ).all()
+    if not mappings:
+        raise ValueError("draft_field_plan_empty")
+
+    required_fields = _required_fields_for_site(site_vendor)
+    resolved_required_fields: list[str] = []
+    manual_review_fields: list[str] = []
+    unresolved_fields: list[str] = []
+
+    for mapping in mappings:
+        parsed = {}
+        if mapping.raw_dom_signature:
+            try:
+                parsed = json.loads(mapping.raw_dom_signature)
+            except json.JSONDecodeError:
+                parsed = {}
+        resolution_status = str(parsed.get("resolution_status") or "unresolved")
+        manual_review_required = bool(parsed.get("manual_review_required"))
+        if mapping.field_key in required_fields and resolution_status == "resolved":
+            resolved_required_fields.append(mapping.field_key)
+        if resolution_status != "resolved":
+            unresolved_fields.append(mapping.field_key)
+        if manual_review_required or (
+            manual_review_required is False and mapping.field_key.startswith("why_")
+        ):
+            manual_review_fields.append(mapping.field_key)
+
+    stop_reasons: list[str] = []
+    missing_required = [field for field in required_fields if field not in resolved_required_fields]
+    if missing_required:
+        stop_reasons.extend(f"missing_required_field:{field}" for field in missing_required)
+    for field in manual_review_fields:
+        stop_reasons.append(f"manual_review_required:{field}")
+    for field in unresolved_fields:
+        if field not in manual_review_fields and field not in missing_required:
+            stop_reasons.append(f"unresolved_field:{field}")
+
+    confidence_score = _compute_submit_confidence(
+        required_fields=required_fields,
+        resolved_required_fields=resolved_required_fields,
+        manual_review_fields=manual_review_fields,
+        unresolved_fields=unresolved_fields,
+    )
+    allow_submit = len(stop_reasons) == 0 and confidence_score >= get_settings().auto_submit_threshold
+    attempt.submit_confidence = confidence_score
+    if allow_submit:
+        attempt.result = None
+        attempt.failure_code = None
+        attempt.notes = "Submit gate passed; ready for guarded submit execution."
+    else:
+        attempt.result = AttemptResult.BLOCKED.value
+        attempt.failure_code = "submit_gate_blocked"
+        attempt.notes = (
+            "Submit gate blocked guarded submit execution: "
+            + ", ".join(stop_reasons[:5])
+        )
+        application.current_state = ApplicationState.REVIEW.value
+
+    startup_dir = _execution_startup_dir(candidate.slug, application.job_id, attempt.id)
+    startup_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = startup_dir / f"{site_vendor}_submit_gate.json"
+    artifact_payload = {
+        "application_id": application.id,
+        "attempt_id": attempt.id,
+        "job_id": application.job_id,
+        "candidate_profile_slug": candidate.slug,
+        "site_vendor": site_vendor,
+        "confidence_score": confidence_score,
+        "allow_submit": allow_submit,
+        "stop_reasons": stop_reasons,
+        "required_fields": required_fields,
+        "resolved_required_fields": resolved_required_fields,
+        "manual_review_fields": manual_review_fields,
+    }
+    artifact_path.write_text(
+        json.dumps(artifact_payload, indent=2, ensure_ascii=True),
+        encoding="utf-8",
+    )
+    now = utcnow()
+    artifact = Artifact(
+        attempt_id=attempt.id,
+        artifact_type=ArtifactType.MODEL_IO,
+        path=str(artifact_path),
+        size_bytes=artifact_path.stat().st_size,
+        retention_days=get_settings().artifact_retention_days,
+        created_at=now,
+    )
+    session.add(artifact)
+    session.flush()
+
+    event = ApplicationEvent(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_type="draft_submit_gate_evaluated",
+        message="Guarded submit gate evaluated from resolved field outcomes.",
+        payload={
+            "site_vendor": site_vendor,
+            "artifact_id": artifact.id,
+            "artifact_path": str(artifact_path),
+            "confidence_score": confidence_score,
+            "allow_submit": allow_submit,
+            "stop_reasons": stop_reasons,
+            "required_fields": required_fields,
+            "resolved_required_fields": resolved_required_fields,
+            "manual_review_fields": manual_review_fields,
+        },
+        created_at=now,
+    )
+    session.add(event)
+    application.updated_at = now
+    session.commit()
+    session.refresh(event)
+    session.refresh(attempt)
+    session.refresh(application)
+
+    return DraftSubmitGateRead(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_id=event.id,
+        job_id=application.job_id,
+        candidate_profile_slug=candidate.slug,
+        site_vendor=site_vendor,
+        application_state=application.current_state,
+        attempt_result=attempt.result,
+        failure_code=attempt.failure_code,
+        confidence_score=confidence_score,
+        allow_submit=allow_submit,
+        stop_reasons=stop_reasons,
+        required_fields=required_fields,
+        resolved_required_fields=resolved_required_fields,
+        manual_review_fields=manual_review_fields,
+        artifact_id=artifact.id,
+        artifact_path=str(artifact_path),
+    )
+
+
+def _execution_startup_dir(candidate_slug: str, job_id: int, attempt_id: int) -> Path:
+    """Build the filesystem path for a staged execution startup bundle."""
+
+    settings = get_settings()
+    return settings.artifacts_dir / "execution" / candidate_slug / str(job_id) / str(attempt_id)
+
+
+def _build_field_plan_entries(candidate: CandidateProfile, prepared) -> list[dict]:
+    """Create deterministic plan entries from candidate details and prepared outputs."""
+
+    entries: list[dict] = []
+    personal = candidate.personal_details or {}
+    full_name = candidate.name.strip()
+    first_name, last_name = _split_name(full_name)
+
+    entries.append(
+        {
+            "field_key": "full_name",
+            "inferred_type": "full_name",
+            "confidence": 0.99,
+            "truth_tier": TruthTier.OBSERVED,
+            "chosen_answer": full_name,
+            "answer_source": "candidate_profile",
+        }
+    )
+    if first_name:
+        entries.append(
+            {
+                "field_key": "first_name",
+                "inferred_type": "text",
+                "confidence": 0.99,
+                "truth_tier": TruthTier.OBSERVED,
+                "chosen_answer": first_name,
+                "answer_source": "candidate_profile",
+            }
+        )
+    if last_name:
+        entries.append(
+            {
+                "field_key": "last_name",
+                "inferred_type": "text",
+                "confidence": 0.99,
+                "truth_tier": TruthTier.OBSERVED,
+                "chosen_answer": last_name,
+                "answer_source": "candidate_profile",
+            }
+        )
+
+    for field_key, source_key, inferred_type in (
+        ("email", "email", "email"),
+        ("phone", "phone", "phone"),
+        ("linkedin_url", "linkedin_url", "url"),
+        ("location", "location", "location"),
+        ("work_authorization", "work_authorization", "text"),
+    ):
+        value = personal.get(source_key)
+        if value:
+            entries.append(
+                {
+                    "field_key": field_key,
+                    "inferred_type": inferred_type,
+                    "confidence": 0.98,
+                    "truth_tier": TruthTier.OBSERVED,
+                    "chosen_answer": str(value),
+                    "answer_source": "candidate_profile",
+                }
+            )
+
+    if prepared.documents:
+        document = prepared.documents[0]
+        if document.content_path:
+            entries.append(
+                {
+                    "field_key": "resume_upload",
+                    "inferred_type": "file_upload",
+                    "confidence": 0.99,
+                    "truth_tier": TruthTier.OBSERVED,
+                    "chosen_answer": document.content_path,
+                    "answer_source": "generated_document",
+                }
+            )
+
+    for index, answer in enumerate(prepared.answers, start=1):
+        entries.append(
+            {
+                "field_key": _answer_field_key(answer.normalized_question_text, index),
+                "inferred_type": "textarea",
+                "confidence": 0.82 if answer.truth_tier == TruthTier.INFERENCE.value else 0.95,
+                "answer_id": answer.answer_id,
+                "truth_tier": (TruthTier(answer.truth_tier) if answer.truth_tier else None),
+                "chosen_answer": answer.answer_text,
+                "answer_source": "prepared_answer",
+            }
+        )
+
+    return entries
+
+
+def _greenhouse_selector_overlay(field_key: str) -> tuple[list[str], float, bool]:
+    """Return deterministic Greenhouse selector candidates and confidence gates."""
+
+    overlays = {
+        "full_name": (["input[name='name']"], 0.98, False),
+        "first_name": (["input[name='first_name']"], 0.99, False),
+        "last_name": (["input[name='last_name']"], 0.99, False),
+        "email": (["input[name='email']"], 0.99, False),
+        "phone": (["input[name='phone']"], 0.97, False),
+        "location": (["input[name='location']"], 0.94, False),
+        "linkedin_url": (["input[name='urls[LinkedIn]']", "input[name*='linkedin']"], 0.9, True),
+        "work_authorization": (["select[name*='work_authorization']", "input[name*='work_authorization']"], 0.86, True),
+        "resume_upload": (["input[type='file'][name='resume']", "input[type='file']"], 0.99, False),
+        "why_this_role": (["textarea[name='cover_letter']", "textarea[name*='question']"], 0.88, True),
+        "relevant_skills": (["textarea[name*='question']"], 0.8, True),
+        "fit_gap_clarification": (["textarea[name*='question']"], 0.75, True),
+    }
+    return overlays.get(field_key, ([f"[data-jobbot-field='{field_key}']"], 0.7, True))
+
+
+def _required_fields_for_site(site_vendor: str) -> list[str]:
+    """Return the deterministic required field list for a supported site."""
+
+    if site_vendor == "greenhouse":
+        return ["first_name", "last_name", "email", "resume_upload"]
+    return []
+
+
+def _compute_submit_confidence(
+    *,
+    required_fields: list[str],
+    resolved_required_fields: list[str],
+    manual_review_fields: list[str],
+    unresolved_fields: list[str],
+) -> float:
+    """Compute a conservative submit-confidence score."""
+
+    confidence = 0.4
+    if required_fields:
+        confidence += 0.4 * (len(resolved_required_fields) / len(required_fields))
+    if not manual_review_fields:
+        confidence += 0.1
+    if not unresolved_fields:
+        confidence += 0.1
+    else:
+        confidence -= min(len(unresolved_fields) * 0.05, 0.2)
+    if manual_review_fields:
+        confidence -= min(len(manual_review_fields) * 0.08, 0.24)
+    return round(max(0.0, min(confidence, 1.0)), 4)
+
+
+def _label_for_field_key(field_key: str) -> str:
+    """Create a human-readable label for a deterministic field key."""
+
+    return field_key.replace("_", " ").title()
+
+
+def _split_name(full_name: str) -> tuple[str, str]:
+    """Split a full name into first/last components conservatively."""
+
+    parts = [part for part in full_name.split() if part]
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], " ".join(parts[1:])
+
+
+def _answer_field_key(question: str, index: int) -> str:
+    """Map common prepared questions to stable field keys."""
+
+    normalized = re.sub(r"[^a-z0-9]+", "_", question.lower()).strip("_")
+    if "interested" in normalized or "why" in normalized:
+        return "why_this_role"
+    if "relevant_skills" in normalized or "skills" in normalized:
+        return "relevant_skills"
+    if "clarify" in normalized:
+        return "fit_gap_clarification"
+    return f"prepared_answer_{index:02d}"
+
+
+def _target_url(job_id: int, session: Session) -> str:
+    """Return the best known application target URL for the job."""
+
+    from jobbot.db.models import Job
+
+    job = session.scalar(select(Job).where(Job.id == job_id))
+    if job is None:
+        raise ValueError("job_not_found")
+    return job.application_url or job.canonical_url
+
+
+def _render_target_page_stub(*, job_title: str, target_url: str, candidate_profile_slug: str) -> str:
+    """Render a local HTML stub representing the next execution target."""
+
+    return (
+        "<!doctype html>\n"
+        "<html lang='en'>\n"
+        "  <head><meta charset='utf-8'><title>Draft Execution Target</title></head>\n"
+        "  <body>\n"
+        f"    <h1>{job_title}</h1>\n"
+        f"    <p>Candidate: {candidate_profile_slug}</p>\n"
+        f"    <p>Target URL: <a href='{target_url}'>{target_url}</a></p>\n"
+        "    <p>This file records the intended target for a non-submitting staged draft attempt.</p>\n"
+        "  </body>\n"
+        "</html>\n"
+    )
+
+
+def _render_opened_target_stub(
+    *,
+    job_title: str,
+    target_url: str,
+    browser_profile_key: str,
+    candidate_profile_slug: str,
+) -> str:
+    """Render a local HTML stub representing a non-submitting page-open result."""
+
+    return (
+        "<!doctype html>\n"
+        "<html lang='en'>\n"
+        "  <head><meta charset='utf-8'><title>Opened Draft Target</title></head>\n"
+        "  <body>\n"
+        f"    <h1>{job_title}</h1>\n"
+        f"    <p>Candidate: {candidate_profile_slug}</p>\n"
+        f"    <p>Browser profile: {browser_profile_key}</p>\n"
+        f"    <p>Opened target URL: <a href='{target_url}'>{target_url}</a></p>\n"
+        "    <p>This file records a non-submitting deterministic page-open pass.</p>\n"
+        "  </body>\n"
+        "</html>\n"
+    )
+
+
+def _capture_target_page_html(
+    *,
+    target_url: str,
+    job_title: str,
+    browser_profile_key: str,
+    candidate_profile_slug: str,
+) -> tuple[str, dict]:
+    """Capture the live target page HTML with deterministic fallback when unavailable."""
+
+    request = Request(
+        target_url,
+        headers={
+            "User-Agent": "jobbot-draft-runner/0.1 (+https://local.jobbot)",
+            "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5",
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            status_code = int(getattr(response, "status", 200))
+            final_url = str(getattr(response, "url", target_url))
+            content_type = str(response.headers.get("Content-Type", ""))
+            raw = response.read(2_000_000)
+            text = raw.decode("utf-8", errors="replace")
+            capture_metadata = {
+                "capture_method": "http_get",
+                "status_code": status_code,
+                "final_url": final_url,
+                "content_type": content_type,
+                "byte_length": len(raw),
+            }
+            return text, capture_metadata
+    except HTTPError as exc:
+        error_code = f"http_error:{exc.code}"
+    except URLError as exc:
+        error_code = f"url_error:{exc.reason}"
+    except TimeoutError:
+        error_code = "timeout"
+    except OSError as exc:
+        error_code = f"os_error:{exc.__class__.__name__}"
+
+    fallback_html = _render_opened_target_stub(
+        job_title=job_title,
+        target_url=target_url,
+        browser_profile_key=browser_profile_key,
+        candidate_profile_slug=candidate_profile_slug,
+    )
+    capture_metadata = {
+        "capture_method": "stub_fallback",
+        "error": error_code,
+    }
+    return fallback_html, capture_metadata
+
+
+def _build_artifact_preview(
+    *,
+    path: Path,
+    artifact_type: ArtifactType,
+    max_chars: int = 4000,
+) -> tuple[str, str | None, bool]:
+    """Return a bounded preview for text-like artifacts and suppress binary payloads."""
+
+    if artifact_type == ArtifactType.SCREENSHOT:
+        return "binary_image", None, False
+    if artifact_type == ArtifactType.TRACE:
+        return "binary_trace", None, False
+
+    preview_kind = "text"
+    suffix = path.suffix.lower()
+    if suffix in {".html", ".htm"} or artifact_type == ArtifactType.HTML_SNAPSHOT:
+        preview_kind = "html"
+    elif suffix == ".json" or artifact_type in {ArtifactType.MODEL_IO, ArtifactType.ANSWER_PACK}:
+        preview_kind = "json"
+
+    text = path.read_text(encoding="utf-8", errors="replace")
+    truncated = len(text) > max_chars
+    if truncated:
+        text = text[:max_chars]
+    return preview_kind, text, truncated
+
+
+def _event_by_type(events: list[ApplicationEvent], event_type: str) -> ApplicationEvent | None:
+    """Return the latest event of one type from an ordered event list."""
+
+    for event in reversed(events):
+        if event.event_type == event_type:
+            return event
+    return None
+
+
+def _artifact_by_filename(artifacts: list[Artifact], filename: str) -> Artifact | None:
+    """Return the latest artifact whose basename matches the given filename."""
+
+    for artifact in reversed(artifacts):
+        if Path(artifact.path).name == filename:
+            return artifact
+    return None
+
+
+def _artifact_from_event_payload(
+    artifacts: list[Artifact],
+    event: ApplicationEvent | None,
+    key: str,
+) -> Artifact | None:
+    """Resolve an artifact from an event payload artifact id key."""
+
+    if event is None or not event.payload:
+        return None
+    artifact_id = event.payload.get(key)
+    if artifact_id is None:
+        return None
+    for artifact in artifacts:
+        if artifact.id == artifact_id:
+            return artifact
+    return None
+
+
+def _payload_value(event: ApplicationEvent | None, key: str) -> str | None:
+    """Extract one payload value as string when present."""
+
+    if event is None or not event.payload:
+        return None
+    value = event.payload.get(key)
+    return None if value is None else str(value)
+
+
+def _build_replay_asset(
+    *,
+    attempt_id: int,
+    label: str,
+    artifact: Artifact | None,
+    fallback_path: str | None = None,
+) -> DraftExecutionReplayAssetRead:
+    """Build a replay asset row from an artifact or fallback event path."""
+
+    path = artifact.path if artifact is not None else fallback_path
+    exists = Path(path).exists() if path else False
+    inspect_route = f"/execution/artifacts/{artifact.id}" if artifact is not None else None
+    raw_route = None
+    if artifact is not None and exists:
+        raw_route = f"/execution/artifacts/{artifact.id}/raw"
+    elif fallback_path and exists:
+        raw_route = f"/execution/replay/{attempt_id}/assets/{label}/raw"
+    openable_locally, open_hint = _determine_replay_openability(
+        artifact_type=(artifact.artifact_type.value if artifact is not None else None),
+        path=path,
+        exists=exists,
+    )
+    launch_route, launch_label = _determine_launch_action(
+        raw_route=raw_route,
+        open_hint=open_hint,
+        artifact_id=(artifact.id if artifact is not None else None),
+        attempt_id=attempt_id,
+        label=label,
+    )
+    return DraftExecutionReplayAssetRead(
+        label=label,
+        artifact_id=(artifact.id if artifact is not None else None),
+        artifact_type=(artifact.artifact_type.value if artifact is not None else None),
+        path=path,
+        exists=exists,
+        inspect_route=inspect_route,
+        raw_route=raw_route,
+        launch_route=launch_route,
+        launch_label=launch_label,
+        openable_locally=openable_locally,
+        open_hint=open_hint,
+    )
+
+
+def get_execution_artifact_file(
+    session: Session,
+    *,
+    artifact_id: int,
+) -> tuple[Path, str, str | None]:
+    """Resolve one persisted execution artifact into a downloadable local file."""
+
+    artifact = session.get(Artifact, artifact_id)
+    if artifact is None:
+        raise ValueError("execution_artifact_not_found")
+
+    path = Path(artifact.path)
+    if not path.exists():
+        raise ValueError("execution_artifact_missing")
+
+    media_type, _ = mimetypes.guess_type(str(path))
+    return path, path.name, media_type
+
+
+def get_execution_replay_asset_file(
+    session: Session,
+    *,
+    attempt_id: int,
+    label: str,
+) -> tuple[Path, str, str | None]:
+    """Resolve one replay asset label into a downloadable local file."""
+
+    replay = get_execution_replay_bundle(session, attempt_id=attempt_id)
+    asset = next((item for item in replay.assets if item.label == label), None)
+    if asset is None:
+        raise ValueError("execution_replay_asset_not_found")
+    if not asset.path:
+        raise ValueError("execution_replay_asset_missing")
+
+    path = Path(asset.path)
+    if not path.exists():
+        raise ValueError("execution_replay_asset_missing")
+
+    media_type, _ = mimetypes.guess_type(str(path))
+    return path, path.name, media_type
+
+
+def _determine_replay_openability(
+    *,
+    artifact_type: str | None,
+    path: str | None,
+    exists: bool,
+) -> tuple[bool, str | None]:
+    """Classify whether a replay asset is directly openable from local disk."""
+
+    if not exists or not path:
+        return False, None
+
+    suffix = Path(path).suffix.lower()
+    if artifact_type == ArtifactType.SCREENSHOT.value or suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+        return True, "open_image"
+    if artifact_type == ArtifactType.HTML_SNAPSHOT.value or suffix in {".html", ".htm"}:
+        return True, "open_html"
+    if artifact_type in {ArtifactType.MODEL_IO.value, ArtifactType.ANSWER_PACK.value} or suffix in {
+        ".json",
+        ".txt",
+        ".log",
+    }:
+        return True, "open_text"
+    if artifact_type == ArtifactType.TRACE.value or suffix in {".zip", ".trace"}:
+        return True, "open_trace"
+    return True, "open_path"
+
+
+def _determine_launch_action(
+    *,
+    raw_route: str | None,
+    open_hint: str | None,
+    artifact_id: int | None = None,
+    attempt_id: int | None = None,
+    label: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Map one raw route plus open hint into an operator-facing launch action."""
+
+    if raw_route is None or open_hint is None:
+        return None, None
+
+    if artifact_id is not None:
+        launch_route = f"/execution/artifacts/{artifact_id}/launch"
+    elif attempt_id is not None and label is not None:
+        launch_route = f"/execution/replay/{attempt_id}/assets/{label}/launch"
+    else:
+        launch_route = raw_route
+
+    launch_label_map = {
+        "open_image": "View image",
+        "open_html": "Open HTML",
+        "open_text": "Open text",
+        "open_trace": "Download trace",
+        "open_path": "Open file",
+    }
+    return launch_route, launch_label_map.get(open_hint, "Open file")
+
+
+def _build_startup_read(
+    session: Session,
+    *,
+    application: Application,
+    attempt: ApplicationAttempt,
+    candidate: CandidateProfile,
+    eligibility: ApplicationEligibility,
+    event: ApplicationEvent,
+) -> DraftExecutionStartupRead:
+    """Build a read model from an existing startup event."""
+
+    payload = event.payload or {}
+    prepared = get_prepared_job_read(
+        session,
+        job_id=application.job_id,
+        candidate_profile_slug=candidate.slug,
+    )
+    artifact_ids = [int(value) for value in payload.get("artifact_ids", [])]
+    return DraftExecutionStartupRead(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_id=event.id,
+        job_id=application.job_id,
+        candidate_profile_slug=candidate.slug,
+        browser_profile_key=attempt.browser_profile_key,
+        readiness_state=eligibility.readiness_state,
+        target_url=str(payload.get("target_url") or _target_url(application.job_id, session)),
+        startup_dir=str(payload.get("startup_dir") or _execution_startup_dir(candidate.slug, application.job_id, attempt.id)),
+        prepared_document_count=(len(prepared.documents) if prepared else 0),
+        prepared_answer_count=(len(prepared.answers) if prepared else 0),
+        startup_artifact_ids=artifact_ids,
+        started_at=attempt.started_at,
+    )
+
+
+def _build_field_plan_read(
+    session: Session,
+    *,
+    application: Application,
+    attempt: ApplicationAttempt,
+    candidate: CandidateProfile,
+    event: ApplicationEvent,
+) -> DraftFieldPlanRead:
+    """Build a field-plan read model from persisted mappings and event payload."""
+
+    payload = event.payload or {}
+    mappings = session.scalars(
+        select(FieldMapping)
+        .where(FieldMapping.attempt_id == attempt.id)
+        .order_by(FieldMapping.id)
+    ).all()
+    return DraftFieldPlanRead(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_id=event.id,
+        job_id=application.job_id,
+        candidate_profile_slug=candidate.slug,
+        field_count=int(payload.get("field_count") or len(mappings)),
+        artifact_id=int(payload.get("artifact_id") or 0),
+        artifact_path=str(payload.get("artifact_path") or ""),
+        entries=[
+            DraftFieldPlanEntryRead(
+                field_mapping_id=mapping.id,
+                field_key=mapping.field_key,
+                inferred_type=mapping.inferred_type,
+                confidence=mapping.confidence,
+                answer_id=mapping.answer_id,
+                truth_tier=(mapping.truth_tier.value if mapping.truth_tier else None),
+                chosen_answer=mapping.chosen_answer,
+                answer_source=mapping.answer_source,
+            )
+            for mapping in mappings
+        ],
+    )
+
+
+def _build_site_field_plan_read(
+    session: Session,
+    *,
+    application: Application,
+    attempt: ApplicationAttempt,
+    candidate: CandidateProfile,
+    job: Job,
+    event: ApplicationEvent,
+) -> DraftSiteFieldPlanRead:
+    """Build a site-aware field-plan read model from persisted mappings and event payload."""
+
+    payload = event.payload or {}
+    site_vendor = str(payload.get("site_vendor") or job.ats_vendor or "unknown").lower()
+    mappings = session.scalars(
+        select(FieldMapping)
+        .where(FieldMapping.attempt_id == attempt.id)
+        .order_by(FieldMapping.id)
+    ).all()
+    entries: list[DraftSiteFieldPlanEntryRead] = []
+    for mapping in mappings:
+        parsed = {}
+        if mapping.raw_dom_signature:
+            try:
+                parsed = json.loads(mapping.raw_dom_signature)
+            except json.JSONDecodeError:
+                parsed = {}
+        entries.append(
+            DraftSiteFieldPlanEntryRead(
+                field_mapping_id=mapping.id,
+                field_key=mapping.field_key,
+                site_vendor=str(parsed.get("site_vendor") or site_vendor),
+                selector_candidates=list(parsed.get("selectors") or []),
+                confidence_gate=float(parsed.get("confidence_gate") or 0.0),
+                manual_review_required=bool(parsed.get("manual_review_required")),
+            )
+        )
+
+    return DraftSiteFieldPlanRead(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_id=event.id,
+        job_id=application.job_id,
+        candidate_profile_slug=candidate.slug,
+        site_vendor=site_vendor,
+        entry_count=int(payload.get("entry_count") or len(entries)),
+        artifact_id=int(payload.get("artifact_id") or 0),
+        artifact_path=str(payload.get("artifact_path") or ""),
+        entries=entries,
+    )
+
+
+def _build_target_open_read(
+    session: Session,
+    *,
+    application: Application,
+    attempt: ApplicationAttempt,
+    candidate: CandidateProfile,
+    job: Job,
+    event: ApplicationEvent,
+) -> DraftTargetOpenRead:
+    """Build a target-open read model from persisted mappings and event payload."""
+
+    payload = event.payload or {}
+    mappings = session.scalars(
+        select(FieldMapping)
+        .where(FieldMapping.attempt_id == attempt.id)
+        .order_by(FieldMapping.id)
+    ).all()
+    entries: list[DraftResolvedFieldRead] = []
+    for mapping in mappings:
+        parsed = {}
+        if mapping.raw_dom_signature:
+            try:
+                parsed = json.loads(mapping.raw_dom_signature)
+            except json.JSONDecodeError:
+                parsed = {}
+        entries.append(
+            DraftResolvedFieldRead(
+                field_mapping_id=mapping.id,
+                field_key=mapping.field_key,
+                resolved_selector=parsed.get("resolved_selector"),
+                resolution_status=str(parsed.get("resolution_status") or "unresolved"),
+                confidence_gate=float(parsed.get("confidence_gate") or 0.0),
+                manual_review_required=bool(parsed.get("manual_review_required")),
+            )
+        )
+
+    return DraftTargetOpenRead(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_id=event.id,
+        job_id=application.job_id,
+        candidate_profile_slug=candidate.slug,
+        site_vendor=str(payload.get("site_vendor") or job.ats_vendor or ""),
+        browser_profile_key=str(attempt.browser_profile_key),
+        target_url=str(payload.get("target_url") or _target_url(application.job_id, session)),
+        capture_method=str((payload.get("target_capture") or {}).get("capture_method") or "unknown"),
+        capture_error=(payload.get("target_capture") or {}).get("error"),
+        opened_page_artifact_id=int(payload.get("opened_page_artifact_id") or 0),
+        resolution_artifact_id=int(payload.get("resolution_artifact_id") or 0),
+        resolved_count=int(payload.get("resolved_count") or 0),
+        unresolved_count=int(payload.get("unresolved_count") or 0),
+        entries=entries,
+    )
+
+
+def _build_submit_gate_read(
+    session: Session,
+    *,
+    application: Application,
+    attempt: ApplicationAttempt,
+    candidate: CandidateProfile,
+    job: Job,
+    event: ApplicationEvent,
+) -> DraftSubmitGateRead:
+    """Build a submit-gate read model from persisted event payload."""
+
+    payload = event.payload or {}
+    return DraftSubmitGateRead(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_id=event.id,
+        job_id=application.job_id,
+        candidate_profile_slug=candidate.slug,
+        site_vendor=str(payload.get("site_vendor") or job.ats_vendor or ""),
+        application_state=application.current_state,
+        attempt_result=attempt.result,
+        failure_code=attempt.failure_code,
+        confidence_score=float(payload.get("confidence_score") or 0.0),
+        allow_submit=bool(payload.get("allow_submit")),
+        stop_reasons=list(payload.get("stop_reasons") or []),
+        required_fields=list(payload.get("required_fields") or []),
+        resolved_required_fields=list(payload.get("resolved_required_fields") or []),
+        manual_review_fields=list(payload.get("manual_review_fields") or []),
+        artifact_id=int(payload.get("artifact_id") or 0),
+        artifact_path=str(payload.get("artifact_path") or ""),
+    )

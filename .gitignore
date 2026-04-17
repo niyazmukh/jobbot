@@ -1,0 +1,14 @@
+﻿.venv/
+.pytest_cache/
+.pytest_tmp/
+pytest_temp_root/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+*.db
+*.egg-info/
+graphify-out/
+.coverage
+htmlcov/

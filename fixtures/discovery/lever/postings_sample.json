@@ -1,0 +1,26 @@
+[
+  {
+    "id": "lever-001",
+    "text": "Senior Platform Engineer",
+    "hostedUrl": "https://jobs.lever.co/example/lever-001?lever-source=website",
+    "categories": {
+      "location": "NYC",
+      "commitment": "Full-time",
+      "team": "Platform",
+      "department": "Engineering",
+      "workplaceType": "Hybrid"
+    }
+  },
+  {
+    "id": "lever-002",
+    "text": "Backend Engineer",
+    "hostedUrl": "https://jobs.lever.co/example/lever-002",
+    "categories": {
+      "location": "Remote - Canada",
+      "commitment": "Full-time",
+      "team": "Core Services",
+      "department": "Engineering",
+      "workplaceType": "Remote"
+    }
+  }
+]

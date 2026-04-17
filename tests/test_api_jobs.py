@@ -1,0 +1,2061 @@
+import json
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
+from sqlalchemy.orm import sessionmaker
+
+from jobbot.api.app import app, get_db_session
+from jobbot.db.base import Base
+from jobbot.db import models  # noqa: F401
+from jobbot.db.models import CandidateFact, CandidateProfile
+from jobbot.discovery.greenhouse.adapter import parse_greenhouse_board_payload
+from jobbot.discovery.ingestion import ingest_discovery_batch
+from jobbot.models.enums import BrowserProfileType
+from jobbot.preparation.service import prepare_job_for_candidate
+from jobbot.scoring.service import score_job_for_candidate
+
+
+def make_session():
+    engine = create_engine(
+        "sqlite://",
+        future=True,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    return sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)()
+
+
+def load_greenhouse_batch():
+    payload = json.loads(
+        Path("fixtures/discovery/greenhouse/board_jobs_sample.json").read_text(encoding="utf-8")
+    )
+    return parse_greenhouse_board_payload(
+        company_name="Example Corp",
+        board_url="https://boards.greenhouse.io/example",
+        payload=payload,
+    )
+
+
+def test_list_jobs_endpoint_returns_inbox_rows():
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.get("/api/jobs?limit=10")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 2
+    assert payload[0]["company_name"] == "example corp"
+
+
+def test_health_endpoint_returns_ok():
+    client = TestClient(app)
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
+def test_job_detail_endpoint_returns_sources():
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        list_response = client.get("/api/jobs?limit=1")
+        job_id = list_response.json()[0]["job_id"]
+        response = client.get(f"/api/jobs/{job_id}")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["job_id"] == job_id
+    assert len(payload["sources"]) == 1
+    assert "board_url" in payload["sources"][0]["metadata_json"]
+
+
+def test_list_jobs_endpoint_filters_by_remote_type():
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.get("/api/jobs?limit=10&ats_vendor=greenhouse&remote_type=remote")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["remote_type"] == "remote"
+
+
+def test_list_jobs_endpoint_supports_offset_and_sorting():
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.get("/api/jobs?limit=1&offset=1&sort_by=title&descending=false")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["title"] == "Senior Backend Engineer"
+
+
+def test_job_score_endpoint_returns_persisted_score():
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add(
+        CandidateFact(
+            candidate_profile_id=candidate.id,
+            fact_key="skills-001",
+            category="skills",
+            content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+        )
+    )
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.get(f"/api/jobs/{first_job.id}/scores/alex-doe")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["job_id"] == first_job.id
+    assert payload["candidate_profile_slug"] == "alex-doe"
+    assert payload["score_json"]["blocked"] is False
+
+
+def test_job_list_and_detail_endpoints_can_include_score_summary():
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add(
+        CandidateFact(
+            candidate_profile_id=candidate.id,
+            fact_key="skills-001",
+            category="skills",
+            content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+        )
+    )
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        list_response = client.get("/api/jobs?candidate_profile_slug=alex-doe")
+        detail_response = client.get(f"/api/jobs/{first_job.id}?candidate_profile_slug=alex-doe")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert list_response.status_code == 200
+    scored_row = next(item for item in list_response.json() if item["job_id"] == first_job.id)
+    assert scored_row["score_summary"]["candidate_profile_slug"] == "alex-doe"
+    assert detail_response.status_code == 200
+    assert detail_response.json()["score_summary"]["blocked"] is False
+
+
+def test_inbox_ui_routes_render_html():
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        inbox_response = client.get("/inbox")
+        detail_response = client.get("/inbox/jobs/1")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert inbox_response.status_code == 200
+    assert "JobBot Inbox" in inbox_response.text
+    assert detail_response.status_code == 200
+    assert "Sources" in detail_response.text
+
+
+def test_review_queue_api_and_ui_routes_work():
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        target_preferences={"preferred_locations": ["Toronto"], "remote": False},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add(
+        CandidateFact(
+            candidate_profile_id=candidate.id,
+            fact_key="skills-001",
+            category="skills",
+            content="Customer support specialist with Excel and CRM experience",
+        )
+    )
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "machine learning", "aws"],
+        "seniority_signals": ["principal"],
+        "required_years_experience": 8,
+    }
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        create_response = client.post(f"/api/review-queue/jobs/{first_job.id}/scores/alex-doe")
+        list_response = client.get("/api/review-queue")
+        ui_response = client.get("/review-queue")
+        status_response = client.post(f"/api/review-queue/{create_response.json()['id']}/status/approved")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert create_response.status_code == 200
+    assert create_response.json()["entity_type"] == "job_score"
+    assert list_response.status_code == 200
+    assert len(list_response.json()) == 1
+    assert ui_response.status_code == 200
+    assert "JobBot Review Queue" in ui_response.text
+    assert status_response.status_code == 200
+    assert status_response.json()["status"] == "approved"
+
+
+def test_prepared_job_endpoint_returns_persisted_outputs(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.get(f"/api/jobs/{first_job.id}/prepared/alex-doe")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["job_id"] == first_job.id
+    assert payload["candidate_profile_slug"] == "alex-doe"
+    assert len(payload["documents"]) == 1
+    assert len(payload["answers"]) >= 2
+
+
+def test_inbox_ui_surfaces_prepared_summary(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        inbox_response = client.get("/inbox?candidate_profile_slug=alex-doe")
+        detail_response = client.get(f"/inbox/jobs/{first_job.id}?candidate_profile_slug=alex-doe")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert inbox_response.status_code == 200
+    assert "Prepared docs: 1" in inbox_response.text
+    assert detail_response.status_code == 200
+    assert "Prepared Outputs" in detail_response.text
+
+
+def test_api_jobs_can_filter_by_preparation_state(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    jobs = session.query(models.Job).order_by(models.Job.id).all()
+    for job in jobs:
+        job.requirements_structured = {
+            "required_skills": ["python", "sql", "aws"],
+            "seniority_signals": ["senior"],
+            "required_years_experience": 5,
+        }
+    session.commit()
+    score_job_for_candidate(session, jobs[0].id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=jobs[0].id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.get(
+            "/api/jobs?candidate_profile_slug=alex-doe&preparation_state=pending_review&sort_by=preparation_state"
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["prepared_summary"]["preparation_state"] == "pending_review"
+
+
+def test_api_jobs_can_filter_by_application_readiness(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    jobs = session.query(models.Job).order_by(models.Job.id).all()
+    for job in jobs:
+        job.requirements_structured = {
+            "required_skills": ["python", "sql", "aws"],
+            "seniority_signals": ["senior"],
+            "required_years_experience": 5,
+        }
+    session.commit()
+    score_job_for_candidate(session, jobs[0].id, "alex-doe")
+    score_job_for_candidate(session, jobs[1].id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=jobs[0].id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.get(
+            "/api/jobs?candidate_profile_slug=alex-doe&application_readiness=pending_review&sort_by=application_readiness"
+        )
+        detail_response = client.get(f"/inbox/jobs/{jobs[0].id}?candidate_profile_slug=alex-doe")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["application_readiness"]["state"] == "pending_review"
+    assert detail_response.status_code == 200
+    assert "Application Readiness" in detail_response.text
+
+
+def test_ready_to_apply_api_and_html_helpers_return_only_ready_jobs(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    jobs = session.query(models.Job).order_by(models.Job.id).all()
+    for job in jobs:
+        job.requirements_structured = {
+            "required_skills": ["python", "sql", "aws"],
+            "seniority_signals": ["senior"],
+            "required_years_experience": 5,
+        }
+    session.commit()
+    score_job_for_candidate(session, jobs[0].id, "alex-doe")
+    score_job_for_candidate(session, jobs[1].id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=jobs[0].id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    generated_document = session.query(models.GeneratedDocument).one()
+    generated_document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        list_response = client.get("/api/jobs/ready-to-apply/alex-doe")
+        detail_response = client.get(f"/api/jobs/{jobs[0].id}/ready-to-apply/alex-doe")
+        html_response = client.get("/ready-to-apply/alex-doe")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert list_response.status_code == 200
+    payload = list_response.json()
+    assert len(payload) == 1
+    assert payload[0]["application_readiness"]["state"] == "ready_to_apply"
+    assert detail_response.status_code == 200
+    assert detail_response.json()["application_readiness"]["state"] == "ready_to_apply"
+    assert html_response.status_code == 200
+    assert "ready_to_apply" in html_response.text
+
+
+def test_eligibility_api_endpoints_materialize_and_list(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        materialize_response = client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+        detail_response = client.get(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+        list_response = client.get("/api/eligibility/alex-doe?ready_only=true")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert materialize_response.status_code == 200
+    assert materialize_response.json()["readiness_state"] == "ready_to_apply"
+    assert detail_response.status_code == 200
+    assert detail_response.json()["ready"] is True
+    assert list_response.status_code == 200
+    assert len(list_response.json()) == 1
+
+
+def test_execution_api_bootstraps_and_lists_draft_attempts(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        materialize_response = client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+        bootstrap_response = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe"
+        )
+        list_response = client.get("/api/execution/draft-attempts/alex-doe")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert materialize_response.status_code == 200
+    assert bootstrap_response.status_code == 200
+    assert bootstrap_response.json()["attempt_mode"] == "draft"
+    assert bootstrap_response.json()["readiness_state"] == "ready_to_apply"
+    assert list_response.status_code == 200
+    assert len(list_response.json()) == 1
+    assert list_response.json()[0]["job_id"] == first_job.id
+
+
+def test_execution_api_can_start_draft_attempt_and_return_startup_bundle(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        materialize_response = client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+        bootstrap_response = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe"
+        )
+        attempt_id = bootstrap_response.json()["attempt_id"]
+        start_response = client.post(f"/api/execution/draft-attempts/{attempt_id}/start")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert materialize_response.status_code == 200
+    assert bootstrap_response.status_code == 200
+    assert start_response.status_code == 200
+    assert start_response.json()["attempt_id"] == attempt_id
+    assert start_response.json()["prepared_document_count"] == 1
+    assert len(start_response.json()["startup_artifact_ids"]) >= 3
+
+
+def test_execution_api_can_build_field_plan_from_started_attempt(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={
+            "email": "alex@example.com",
+            "phone": "+1-555-0100",
+            "location": "Remote",
+        },
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+        bootstrap_response = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe"
+        )
+        attempt_id = bootstrap_response.json()["attempt_id"]
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/start")
+        plan_response = client.post(f"/api/execution/draft-attempts/{attempt_id}/field-plan")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert bootstrap_response.status_code == 200
+    assert plan_response.status_code == 200
+    assert plan_response.json()["attempt_id"] == attempt_id
+    assert plan_response.json()["field_count"] >= 4
+    assert any(entry["field_key"] == "resume_upload" for entry in plan_response.json()["entries"])
+
+
+def test_execution_api_can_build_greenhouse_site_overlay(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={
+            "email": "alex@example.com",
+            "phone": "+1-555-0100",
+            "location": "Remote",
+            "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+        },
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    first_job.ats_vendor = "greenhouse"
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+        bootstrap_response = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe"
+        )
+        attempt_id = bootstrap_response.json()["attempt_id"]
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/start")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/field-plan")
+        overlay_response = client.post(f"/api/execution/draft-attempts/{attempt_id}/site-overlay")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert bootstrap_response.status_code == 200
+    assert overlay_response.status_code == 200
+    assert overlay_response.json()["site_vendor"] == "greenhouse"
+    assert overlay_response.json()["entry_count"] >= 4
+    assert any(
+        entry["field_key"] == "resume_upload" and "input[type='file'][name='resume']" in entry["selector_candidates"]
+        for entry in overlay_response.json()["entries"]
+    )
+
+
+def test_execution_api_can_open_greenhouse_target_and_return_resolutions(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={
+            "email": "alex@example.com",
+            "phone": "+1-555-0100",
+            "location": "Remote",
+            "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+        },
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    browser = models.BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    first_job.ats_vendor = "greenhouse"
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+        bootstrap_response = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe?browser_profile_key=apply-main"
+        )
+        attempt_id = bootstrap_response.json()["attempt_id"]
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/start")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/field-plan")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/site-overlay")
+        open_response = client.post(f"/api/execution/draft-attempts/{attempt_id}/open-target")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert bootstrap_response.status_code == 200
+    assert open_response.status_code == 200
+    assert open_response.json()["site_vendor"] == "greenhouse"
+    assert open_response.json()["browser_profile_key"] == "apply-main"
+    assert open_response.json()["capture_method"] in {"http_get", "stub_fallback"}
+    assert open_response.json()["resolved_count"] > 0
+    assert any(
+        entry["field_key"] == "why_this_role" and entry["resolution_status"] == "manual_review"
+        for entry in open_response.json()["entries"]
+    )
+
+
+def test_execution_api_can_evaluate_submit_gate_for_greenhouse(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={
+            "email": "alex@example.com",
+            "phone": "+1-555-0100",
+            "location": "Remote",
+            "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+        },
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    browser = models.BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    first_job.ats_vendor = "greenhouse"
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+        bootstrap_response = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe?browser_profile_key=apply-main"
+        )
+        attempt_id = bootstrap_response.json()["attempt_id"]
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/start")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/field-plan")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/site-overlay")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/open-target")
+        gate_response = client.post(f"/api/execution/draft-attempts/{attempt_id}/submit-gate")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert bootstrap_response.status_code == 200
+    assert gate_response.status_code == 200
+    assert gate_response.json()["site_vendor"] == "greenhouse"
+    assert gate_response.json()["application_state"] == "review"
+    assert gate_response.json()["attempt_result"] == "blocked"
+    assert gate_response.json()["failure_code"] == "submit_gate_blocked"
+    assert gate_response.json()["allow_submit"] is False
+    assert "manual_review_required:why_this_role" in gate_response.json()["stop_reasons"]
+
+
+def test_inbox_api_and_html_surface_blocked_execution_summary(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={
+            "email": "alex@example.com",
+            "phone": "+1-555-0100",
+            "location": "Remote",
+            "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+        },
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    browser = models.BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    first_job.ats_vendor = "greenhouse"
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+        bootstrap_response = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe?browser_profile_key=apply-main"
+        )
+        attempt_id = bootstrap_response.json()["attempt_id"]
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/start")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/field-plan")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/site-overlay")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/open-target")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/submit-gate")
+        list_response = client.get("/api/jobs?candidate_profile_slug=alex-doe")
+        detail_response = client.get(f"/api/jobs/{first_job.id}?candidate_profile_slug=alex-doe")
+        html_response = client.get(f"/inbox/jobs/{first_job.id}?candidate_profile_slug=alex-doe")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert list_response.status_code == 200
+    assert list_response.json()[0]["execution_summary"]["attempt_result"] == "blocked"
+    assert list_response.json()[0]["application_readiness"]["state"] == "execution_blocked"
+    assert detail_response.status_code == 200
+    assert detail_response.json()["execution_summary"]["failure_code"] == "submit_gate_blocked"
+    assert html_response.status_code == 200
+    assert "Execution Summary" in html_response.text
+    assert "submit_gate_blocked" in html_response.text
+
+
+def test_jobs_api_can_filter_and_sort_by_execution_state(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={
+            "email": "alex@example.com",
+            "phone": "+1-555-0100",
+            "location": "Remote",
+            "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+        },
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    browser = models.BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    jobs = session.query(models.Job).order_by(models.Job.id).all()
+    for job in jobs:
+        job.requirements_structured = {
+            "required_skills": ["python", "sql", "aws"],
+            "seniority_signals": ["senior"],
+            "required_years_experience": 5,
+        }
+    jobs[0].ats_vendor = "greenhouse"
+    session.commit()
+    score_job_for_candidate(session, jobs[0].id, "alex-doe")
+    score_job_for_candidate(session, jobs[1].id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=jobs[0].id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        client.post(f"/api/eligibility/jobs/{jobs[0].id}/alex-doe")
+        bootstrap_response = client.post(
+            f"/api/execution/draft-attempts/jobs/{jobs[0].id}/alex-doe?browser_profile_key=apply-main"
+        )
+        attempt_id = bootstrap_response.json()["attempt_id"]
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/start")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/field-plan")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/site-overlay")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/open-target")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/submit-gate")
+        filter_response = client.get("/api/jobs?candidate_profile_slug=alex-doe&execution_state=blocked")
+        sort_response = client.get("/api/jobs?candidate_profile_slug=alex-doe&sort_by=execution_state&descending=true")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert filter_response.status_code == 200
+    assert len(filter_response.json()) == 1
+    assert filter_response.json()[0]["execution_summary"]["attempt_result"] == "blocked"
+    assert sort_response.status_code == 200
+    assert sort_response.json()[0]["job_id"] == jobs[0].id
+
+
+def test_execution_overview_api_and_html_surface_blocked_attempts(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={
+            "email": "alex@example.com",
+            "phone": "+1-555-0100",
+            "location": "Remote",
+            "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+        },
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    browser = models.BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    first_job.ats_vendor = "greenhouse"
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+        bootstrap_response = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe?browser_profile_key=apply-main"
+        )
+        attempt_id = bootstrap_response.json()["attempt_id"]
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/start")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/field-plan")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/site-overlay")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/open-target")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/submit-gate")
+        api_response = client.get("/api/execution/overview/alex-doe?blocked_only=true")
+        html_response = client.get("/execution/overview/alex-doe?blocked_only=true")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert api_response.status_code == 200
+    assert len(api_response.json()) == 1
+    assert api_response.json()[0]["attempt_result"] == "blocked"
+    assert api_response.json()[0]["failure_code"] == "submit_gate_blocked"
+    assert api_response.json()[0]["latest_event_type"] == "draft_submit_gate_evaluated"
+    assert api_response.json()[0]["artifact_count"] >= 6
+    assert html_response.status_code == 200
+    assert "Execution Overview" in html_response.text
+    assert "submit_gate_blocked" in html_response.text
+    assert "Latest stage: draft_submit_gate_evaluated" in html_response.text
+
+
+def test_execution_attempt_detail_api_and_html_surface_events_and_artifacts(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={
+            "email": "alex@example.com",
+            "phone": "+1-555-0100",
+            "location": "Remote",
+            "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+        },
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    browser = models.BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    first_job.ats_vendor = "greenhouse"
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+        bootstrap_response = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe?browser_profile_key=apply-main"
+        )
+        attempt_id = bootstrap_response.json()["attempt_id"]
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/start")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/field-plan")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/site-overlay")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/open-target")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/submit-gate")
+        api_response = client.get(f"/api/execution/attempts/{attempt_id}")
+        html_response = client.get(f"/execution/attempts/{attempt_id}")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert api_response.status_code == 200
+    assert api_response.json()["attempt_result"] == "blocked"
+    assert api_response.json()["events"][-1]["event_type"] == "draft_submit_gate_evaluated"
+    assert any(artifact["artifact_type"] == "html_snapshot" for artifact in api_response.json()["artifacts"])
+    assert html_response.status_code == 200
+    assert "Execution Events" in html_response.text
+    assert "Execution Artifacts" in html_response.text
+    assert "draft_submit_gate_evaluated" in html_response.text
+
+
+def test_execution_artifact_detail_api_and_html_surface_safe_preview(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={
+            "email": "alex@example.com",
+            "phone": "+1-555-0100",
+            "location": "Remote",
+            "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+        },
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    browser = models.BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    first_job.ats_vendor = "greenhouse"
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+        bootstrap_response = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe?browser_profile_key=apply-main"
+        )
+        attempt_id = bootstrap_response.json()["attempt_id"]
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/start")
+        attempt_response = client.get(f"/api/execution/attempts/{attempt_id}")
+        artifact_id = next(
+            artifact["artifact_id"]
+            for artifact in attempt_response.json()["artifacts"]
+            if artifact["artifact_type"] == "model_io"
+        )
+        api_response = client.get(f"/api/execution/artifacts/{artifact_id}")
+        html_response = client.get(f"/execution/artifacts/{artifact_id}")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert api_response.status_code == 200
+    assert api_response.json()["artifact_id"] == artifact_id
+    assert api_response.json()["raw_route"] == f"/execution/artifacts/{artifact_id}/raw"
+    assert api_response.json()["launch_route"] == f"/execution/artifacts/{artifact_id}/launch"
+    assert api_response.json()["launch_label"] == "Open text"
+    assert api_response.json()["preview_kind"] == "json"
+    assert "candidate_profile_slug" in api_response.json()["preview_text"]
+    assert html_response.status_code == 200
+    assert "Artifact #" in html_response.text
+    assert "Preview" in html_response.text
+    assert "candidate_profile_slug" in html_response.text
+
+
+def test_execution_replay_bundle_api_and_html_surface_assets_and_actions(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={
+            "email": "alex@example.com",
+            "phone": "+1-555-0100",
+            "location": "Remote",
+            "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+        },
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    browser = models.BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    first_job.ats_vendor = "greenhouse"
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+        bootstrap_response = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe?browser_profile_key=apply-main"
+        )
+        attempt_id = bootstrap_response.json()["attempt_id"]
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/start")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/field-plan")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/site-overlay")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/open-target")
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/submit-gate")
+        api_response = client.get(f"/api/execution/replay/{attempt_id}")
+        html_response = client.get(f"/execution/replay/{attempt_id}")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert api_response.status_code == 200
+    assert api_response.json()["attempt_id"] == attempt_id
+    assert api_response.json()["attempt_result"] == "blocked"
+    assert api_response.json()["latest_event_type"] == "draft_submit_gate_evaluated"
+    assert any(asset["label"] == "submit_gate" for asset in api_response.json()["assets"])
+    assert any(
+        asset["label"] == "startup_context"
+        and asset["inspect_route"] is not None
+        and asset["raw_route"] is not None
+        and asset["launch_route"] is not None
+        and asset["launch_label"] == "Open text"
+        and asset["openable_locally"] is True
+        and asset["open_hint"] == "open_text"
+        for asset in api_response.json()["assets"]
+    )
+    assert any("Resolve manual-review" in action for action in api_response.json()["recommended_actions"])
+    assert html_response.status_code == 200
+    assert "Replay Bundle" in html_response.text
+    assert "Replay Assets" in html_response.text
+    assert "Recommended Actions" in html_response.text
+    assert "openable=True" in html_response.text
+
+
+def test_execution_raw_artifact_and_replay_asset_routes_serve_persisted_files(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={
+            "email": "alex@example.com",
+            "phone": "+1-555-0100",
+            "location": "Remote",
+            "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+        },
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    browser = models.BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    first_job.ats_vendor = "greenhouse"
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+        bootstrap_response = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe?browser_profile_key=apply-main"
+        )
+        attempt_id = bootstrap_response.json()["attempt_id"]
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/start")
+        attempt_response = client.get(f"/api/execution/attempts/{attempt_id}")
+        artifact_id = next(
+            artifact["artifact_id"]
+            for artifact in attempt_response.json()["artifacts"]
+            if artifact["artifact_type"] == "model_io"
+        )
+        artifact_raw = client.get(f"/api/execution/artifacts/{artifact_id}/raw")
+        artifact_launch = client.get(
+            f"/api/execution/artifacts/{artifact_id}/launch",
+            follow_redirects=False,
+        )
+        replay_raw = client.get(f"/api/execution/replay/{attempt_id}/assets/startup_context/raw")
+        replay_launch = client.get(
+            f"/api/execution/replay/{attempt_id}/assets/startup_context/launch",
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert artifact_raw.status_code == 200
+    assert "candidate_profile_slug" in artifact_raw.text
+    assert artifact_launch.status_code in {302, 307}
+    assert artifact_launch.headers["location"].endswith(f"/execution/artifacts/{artifact_id}/raw")
+    assert replay_raw.status_code == 200
+    assert "candidate_profile_slug" in replay_raw.text
+    assert replay_launch.status_code in {302, 307}
+    assert replay_launch.headers["location"].endswith(f"/execution/artifacts/{artifact_id}/raw")
+
+
+def test_execution_dashboard_api_and_html_surface_summary_and_links(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={
+            "email": "alex@example.com",
+            "phone": "+1-555-0100",
+            "location": "Remote",
+            "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+        },
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    browser = models.BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    first_job.ats_vendor = "greenhouse"
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+        blocked_response = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe?browser_profile_key=apply-main"
+        )
+        blocked_attempt_id = blocked_response.json()["attempt_id"]
+        client.post(f"/api/execution/draft-attempts/{blocked_attempt_id}/start")
+        client.post(f"/api/execution/draft-attempts/{blocked_attempt_id}/field-plan")
+        client.post(f"/api/execution/draft-attempts/{blocked_attempt_id}/site-overlay")
+        client.post(f"/api/execution/draft-attempts/{blocked_attempt_id}/open-target")
+        client.post(f"/api/execution/draft-attempts/{blocked_attempt_id}/submit-gate")
+        pending_response = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe?browser_profile_key=apply-main"
+        )
+        pending_attempt_id = pending_response.json()["attempt_id"]
+        api_response = client.get("/api/execution/dashboard/alex-doe")
+        html_response = client.get("/execution/dashboard/alex-doe")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert api_response.status_code == 200
+    payload = api_response.json()
+    assert payload["candidate_profile_slug"] == "alex-doe"
+    assert payload["total_attempts"] == 2
+    assert payload["blocked_attempts"] == 1
+    assert payload["pending_attempts"] == 1
+    assert payload["review_state_attempts"] == 1
+    assert payload["replay_ready_attempts"] == 1
+    assert payload["blocked_recent_attempts"][0]["attempt_id"] == blocked_attempt_id
+    assert any(row["attempt_id"] == pending_attempt_id for row in payload["recent_attempts"])
+    assert any("Resolve blocked guarded attempts" in action for action in payload["recommended_actions"])
+
+    assert html_response.status_code == 200
+    assert "Execution Dashboard" in html_response.text
+    assert "Blocked Attempts" in html_response.text
+    assert "Recent Attempts" in html_response.text
+    assert f"/execution/replay/{blocked_attempt_id}" in html_response.text
+    assert f"/execution/attempts/{blocked_attempt_id}" in html_response.text
