@@ -474,6 +474,7 @@ def list_draft_attempts_cmd(
 def list_execution_overview_cmd(
     candidate_profile: str = typer.Option(..., "--candidate-profile"),
     blocked_only: bool = typer.Option(False, "--blocked-only"),
+    manual_review_only: bool = typer.Option(False, "--manual-review-only"),
     failure_code: str | None = typer.Option(None, "--failure-code"),
     max_submit_confidence: float | None = typer.Option(
         None,
@@ -491,6 +492,7 @@ def list_execution_overview_cmd(
             session,
             candidate_profile_slug=candidate_profile,
             blocked_only=blocked_only,
+            manual_review_only=manual_review_only,
             failure_code=failure_code,
             max_submit_confidence=max_submit_confidence,
             limit=limit,
@@ -532,6 +534,7 @@ def list_execution_overview_cmd(
 @app.command("show-execution-dashboard")
 def show_execution_dashboard_cmd(
     candidate_profile: str = typer.Option(..., "--candidate-profile"),
+    manual_review_only: bool = typer.Option(False, "--manual-review-only"),
     failure_code: str | None = typer.Option(None, "--failure-code"),
     max_submit_confidence: float | None = typer.Option(
         None,
@@ -548,6 +551,7 @@ def show_execution_dashboard_cmd(
         detail = get_execution_dashboard(
             session,
             candidate_profile_slug=candidate_profile,
+            manual_review_only=manual_review_only,
             failure_code=failure_code,
             max_submit_confidence=max_submit_confidence,
             limit=limit,

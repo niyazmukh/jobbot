@@ -172,6 +172,7 @@ def create_app() -> FastAPI:
         candidate_profile_slug: str,
         db: DbSession,
         blocked_only: bool = False,
+        manual_review_only: bool = False,
         failure_code: str | None = None,
         max_submit_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
         limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -183,6 +184,7 @@ def create_app() -> FastAPI:
                 db,
                 candidate_profile_slug=candidate_profile_slug,
                 blocked_only=blocked_only,
+                manual_review_only=manual_review_only,
                 failure_code=failure_code,
                 max_submit_confidence=max_submit_confidence,
                 limit=limit,
@@ -203,6 +205,7 @@ def create_app() -> FastAPI:
     def execution_dashboard_page(
         candidate_profile_slug: str,
         db: DbSession,
+        manual_review_only: bool = False,
         failure_code: str | None = None,
         max_submit_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
         limit: Annotated[int, Query(ge=1, le=50)] = 10,
@@ -213,6 +216,7 @@ def create_app() -> FastAPI:
             detail = get_execution_dashboard(
                 db,
                 candidate_profile_slug=candidate_profile_slug,
+                manual_review_only=manual_review_only,
                 failure_code=failure_code,
                 max_submit_confidence=max_submit_confidence,
                 limit=limit,
@@ -600,6 +604,7 @@ def create_app() -> FastAPI:
         candidate_profile_slug: str,
         db: DbSession,
         blocked_only: bool = False,
+        manual_review_only: bool = False,
         failure_code: str | None = None,
         max_submit_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
         limit: Annotated[int, Query(ge=1, le=500)] = 50,
@@ -611,6 +616,7 @@ def create_app() -> FastAPI:
                 db,
                 candidate_profile_slug=candidate_profile_slug,
                 blocked_only=blocked_only,
+                manual_review_only=manual_review_only,
                 failure_code=failure_code,
                 max_submit_confidence=max_submit_confidence,
                 limit=limit,
@@ -627,6 +633,7 @@ def create_app() -> FastAPI:
     def execution_dashboard_endpoint(
         candidate_profile_slug: str,
         db: DbSession,
+        manual_review_only: bool = False,
         failure_code: str | None = None,
         max_submit_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
         limit: Annotated[int, Query(ge=1, le=50)] = 10,
@@ -637,6 +644,7 @@ def create_app() -> FastAPI:
             return get_execution_dashboard(
                 db,
                 candidate_profile_slug=candidate_profile_slug,
+                manual_review_only=manual_review_only,
                 failure_code=failure_code,
                 max_submit_confidence=max_submit_confidence,
                 limit=limit,

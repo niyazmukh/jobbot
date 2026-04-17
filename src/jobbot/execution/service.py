@@ -256,6 +256,7 @@ def list_execution_overview(
     *,
     candidate_profile_slug: str,
     blocked_only: bool = False,
+    manual_review_only: bool = False,
     failure_code: str | None = None,
     max_submit_confidence: float | None = None,
     limit: int = 50,
@@ -382,6 +383,12 @@ def list_execution_overview(
         )
     if blocked_only:
         items = [item for item in items if item.attempt_result == AttemptResult.BLOCKED.value]
+    if manual_review_only:
+        items = [
+            item
+            for item in items
+            if (item.failure_code or "").startswith("manual_review_required:")
+        ]
     if failure_code is not None:
         normalized = failure_code.strip().lower()
         items = [
@@ -402,6 +409,7 @@ def get_execution_dashboard(
     session: Session,
     *,
     candidate_profile_slug: str,
+    manual_review_only: bool = False,
     failure_code: str | None = None,
     max_submit_confidence: float | None = None,
     limit: int = 10,
@@ -412,6 +420,7 @@ def get_execution_dashboard(
         session,
         candidate_profile_slug=candidate_profile_slug,
         blocked_only=False,
+        manual_review_only=manual_review_only,
         failure_code=failure_code,
         max_submit_confidence=max_submit_confidence,
         limit=max(limit, 50),
@@ -450,6 +459,8 @@ def get_execution_dashboard(
         )
     if failure_code:
         recommended_actions.append(f"Execution view is scoped to failure_code={failure_code}.")
+    if manual_review_only:
+        recommended_actions.append("Execution view is scoped to manual-review-required failures only.")
     if max_submit_confidence is not None:
         recommended_actions.append(
             f"Execution view is scoped to submit_confidence <= {max_submit_confidence}."
