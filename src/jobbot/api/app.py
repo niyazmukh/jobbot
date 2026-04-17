@@ -1631,9 +1631,9 @@ def _render_execution_attempt_detail_page(detail: DraftExecutionAttemptDetailRea
             "<li>"
             f"<strong>{escape(artifact.artifact_type)}</strong> | {escape(artifact.path)}"
             f"<br><small>size={escape(str(artifact.size_bytes))} created={escape(artifact.created_at.isoformat())}</small>"
-            f"<br><a href='/execution/artifacts/{artifact.artifact_id}'>Inspect artifact</a>"
-            f" | <a href='/execution/artifacts/{artifact.artifact_id}/launch'>{escape(_artifact_launch_label(artifact.artifact_type))}</a>"
-            f" | <a href='/execution/artifacts/{artifact.artifact_id}/raw'>Open raw file</a>"
+            f"<br><a href='{escape(artifact.inspect_route)}'>Inspect artifact</a>"
+            f" | <a href='{escape(str(artifact.launch_route or '#'))}'>{escape(str(artifact.launch_label or _artifact_launch_label(artifact.artifact_type)))}</a>"
+            f" | <a href='{escape(str(artifact.raw_route or '#'))}'>Open raw file</a>"
             "</li>"
         )
         for artifact in detail.artifacts

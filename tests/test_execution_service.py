@@ -644,6 +644,11 @@ def test_get_execution_attempt_detail_returns_events_and_artifacts(tmp_path: Pat
     assert detail.events[-1].event_type == "draft_submit_gate_evaluated"
     assert len(detail.artifacts) >= 6
     assert any(artifact.artifact_type == "html_snapshot" for artifact in detail.artifacts)
+    html_artifact = next(artifact for artifact in detail.artifacts if artifact.artifact_type == "html_snapshot")
+    assert html_artifact.inspect_route == f"/execution/artifacts/{html_artifact.artifact_id}"
+    assert html_artifact.raw_route == f"/execution/artifacts/{html_artifact.artifact_id}/raw"
+    assert html_artifact.launch_route == f"/execution/artifacts/{html_artifact.artifact_id}/launch"
+    assert html_artifact.launch_label == "Open HTML"
 
 
 def test_get_execution_replay_bundle_returns_replay_assets_and_actions(tmp_path: Path):

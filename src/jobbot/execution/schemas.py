@@ -95,6 +95,10 @@ class DraftExecutionArtifactRead(BaseModel):
     path: str
     size_bytes: int | None = None
     created_at: datetime
+    inspect_route: str
+    raw_route: str | None = None
+    launch_route: str | None = None
+    launch_label: str | None = None
 
 
 class DraftExecutionArtifactDetailRead(BaseModel):

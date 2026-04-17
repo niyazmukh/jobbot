@@ -493,13 +493,7 @@ def get_execution_attempt_detail(
             for event in events
         ],
         artifacts=[
-            DraftExecutionArtifactRead(
-                artifact_id=artifact.id,
-                artifact_type=artifact.artifact_type.value,
-                path=artifact.path,
-                size_bytes=artifact.size_bytes,
-                created_at=artifact.created_at,
-            )
+            _build_attempt_artifact_read(artifact)
             for artifact in artifacts
         ],
     )
@@ -551,6 +545,33 @@ def get_execution_artifact_detail(
         preview_kind=preview_kind,
         preview_text=preview_text,
         preview_truncated=preview_truncated,
+    )
+
+
+def _build_attempt_artifact_read(artifact: Artifact) -> DraftExecutionArtifactRead:
+    """Build an actionable artifact row for execution-attempt detail reads."""
+
+    exists = Path(artifact.path).exists()
+    raw_route = f"/execution/artifacts/{artifact.id}/raw" if exists else None
+    launch_route, launch_label = _determine_launch_action(
+        raw_route=raw_route,
+        open_hint=_determine_replay_openability(
+            artifact_type=artifact.artifact_type.value,
+            path=artifact.path,
+            exists=exists,
+        )[1],
+        artifact_id=artifact.id,
+    )
+    return DraftExecutionArtifactRead(
+        artifact_id=artifact.id,
+        artifact_type=artifact.artifact_type.value,
+        path=artifact.path,
+        size_bytes=artifact.size_bytes,
+        created_at=artifact.created_at,
+        inspect_route=f"/execution/artifacts/{artifact.id}",
+        raw_route=raw_route,
+        launch_route=launch_route,
+        launch_label=launch_label,
     )
 
 

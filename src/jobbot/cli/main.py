@@ -624,12 +624,18 @@ def show_execution_attempt_cmd(
     artifact_table = Table(title="Execution Artifacts", show_header=True, header_style="bold cyan")
     artifact_table.add_column("ID", justify="right")
     artifact_table.add_column("Type")
+    artifact_table.add_column("Inspect")
+    artifact_table.add_column("Launch")
+    artifact_table.add_column("Raw")
     artifact_table.add_column("Path")
     artifact_table.add_column("Size")
     for artifact in detail.artifacts:
         artifact_table.add_row(
             str(artifact.artifact_id),
             artifact.artifact_type,
+            artifact.inspect_route,
+            artifact.launch_route or "",
+            artifact.raw_route or "",
             artifact.path,
             "" if artifact.size_bytes is None else str(artifact.size_bytes),
         )

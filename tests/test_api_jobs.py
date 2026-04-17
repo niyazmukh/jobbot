@@ -1631,10 +1631,18 @@ def test_execution_attempt_detail_api_and_html_surface_events_and_artifacts(tmp_
     assert api_response.json()["attempt_result"] == "blocked"
     assert api_response.json()["events"][-1]["event_type"] == "draft_submit_gate_evaluated"
     assert any(artifact["artifact_type"] == "html_snapshot" for artifact in api_response.json()["artifacts"])
+    html_artifact = next(
+        artifact for artifact in api_response.json()["artifacts"] if artifact["artifact_type"] == "html_snapshot"
+    )
+    assert html_artifact["inspect_route"].endswith(f"/execution/artifacts/{html_artifact['artifact_id']}")
+    assert html_artifact["raw_route"].endswith(f"/execution/artifacts/{html_artifact['artifact_id']}/raw")
+    assert html_artifact["launch_route"].endswith(f"/execution/artifacts/{html_artifact['artifact_id']}/launch")
+    assert html_artifact["launch_label"] == "Open HTML"
     assert html_response.status_code == 200
     assert "Execution Events" in html_response.text
     assert "Execution Artifacts" in html_response.text
     assert "draft_submit_gate_evaluated" in html_response.text
+    assert "Open HTML" in html_response.text
 
 
 def test_execution_artifact_detail_api_and_html_surface_safe_preview(tmp_path):
