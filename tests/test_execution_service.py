@@ -511,6 +511,14 @@ def test_list_execution_overview_returns_blocked_attempts_with_job_context(tmp_p
     assert rows[0].job_title == "Senior Backend Engineer"
     assert rows[0].site_vendor == "greenhouse"
     assert rows[0].attempt_result == "blocked"
+    assert rows[0].attempt_route == f"/execution/attempts/{attempt.attempt_id}"
+    assert rows[0].replay_route == f"/execution/replay/{attempt.attempt_id}"
+    assert rows[0].primary_action_route == f"/execution/replay/{attempt.attempt_id}"
+    assert rows[0].primary_action_label == "Open replay bundle"
+    assert rows[0].latest_artifact_route is not None
+    assert rows[0].latest_artifact_label is not None
+    assert rows[0].visual_evidence_route is not None
+    assert rows[0].visual_evidence_label == "Open HTML"
 
 
 def test_get_execution_artifact_detail_returns_safe_json_preview(tmp_path: Path):

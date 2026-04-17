@@ -88,6 +88,7 @@
 - Added open/inspect metadata to replay bundle assets so operators can tell which persisted artifacts are directly openable from local disk and which inspection route to use.
 - Added a candidate-scoped execution dashboard across service/API/HTML/CLI for blocked, pending, review-state, and replay-ready draft execution triage.
 - Added raw artifact and replay-asset file routes across service/API/HTML/CLI so persisted execution evidence can be opened directly instead of only previewed.
+- Added overview/dashboard evidence jump routes so execution rows can link directly to latest artifacts and visual evidence without requiring a separate drill-down first.
 - Added a repo-local `.venv` workflow for JobBot development and validation without relying on global Python packages.
 - Added missing dev test dependency coverage (`httpx`) and repo-scoped `pytest` configuration so `pytest` targets JobBot tests instead of bundled comparison bots.
 - Fixed draft execution startup artifact serialization for JSON-safe answer packs.
@@ -114,7 +115,7 @@
 1. Decide whether review approval/rejection should automatically rematerialize eligibility or if that should stay explicit.
 2. Add Playwright-backed page-open startup with real session capture on top of the current HTTP-backed Greenhouse target-open flow.
 3. Convert the current Greenhouse target-open and submit-gate layers into a real guarded submit handler with attempt-level screenshots/traces.
-4. Add screenshot/trace-specific launch helpers on top of the new raw artifact and replay-asset file routes.
+4. Add screenshot/trace-specific launch helpers on top of the new raw artifact, replay-asset, and overview evidence routes.
 5. Add Playwright-specific tests once browser-backed execution replaces the current HTTP/stub target-open flow.
 6. Promote the replay bundle and dashboard into a broader multi-ATS execution control center once multiple handlers exist.
 

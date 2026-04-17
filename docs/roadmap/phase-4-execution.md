@@ -27,6 +27,7 @@ Execute applications safely on deterministic ATS flows with explicit confidence 
 - actionable open/inspect metadata on replay bundle assets
 - candidate-scoped execution dashboard across service/API/HTML/CLI
 - raw artifact and replay-asset file routes across service/API/HTML/CLI
+- overview/dashboard evidence jump routes for latest artifacts and visual evidence
 - review-state preservation across later draft attempts so blocked applications stay triageable
 - green repo-scoped JobBot validation pass in `.venv` (`pytest`: 98 passed)
 

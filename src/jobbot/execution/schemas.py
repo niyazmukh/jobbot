@@ -59,6 +59,10 @@ class DraftExecutionOverviewRead(BaseModel):
     replay_route: str
     primary_action_route: str
     primary_action_label: str
+    latest_artifact_route: str | None = None
+    latest_artifact_label: str | None = None
+    visual_evidence_route: str | None = None
+    visual_evidence_label: str | None = None
     artifact_count: int = 0
     screenshot_count: int = 0
     html_snapshot_count: int = 0

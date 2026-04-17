@@ -1522,11 +1522,21 @@ def test_execution_overview_api_and_html_surface_blocked_attempts(tmp_path):
     assert api_response.json()[0]["attempt_result"] == "blocked"
     assert api_response.json()[0]["failure_code"] == "submit_gate_blocked"
     assert api_response.json()[0]["latest_event_type"] == "draft_submit_gate_evaluated"
+    assert api_response.json()[0]["attempt_route"].endswith(
+        f"/execution/attempts/{api_response.json()[0]['attempt_id']}"
+    )
+    assert api_response.json()[0]["replay_route"].endswith(
+        f"/execution/replay/{api_response.json()[0]['attempt_id']}"
+    )
+    assert api_response.json()[0]["primary_action_label"] == "Open replay bundle"
+    assert api_response.json()[0]["visual_evidence_route"] is not None
+    assert api_response.json()[0]["visual_evidence_label"] == "Open HTML"
     assert api_response.json()[0]["artifact_count"] >= 6
     assert html_response.status_code == 200
     assert "Execution Overview" in html_response.text
     assert "submit_gate_blocked" in html_response.text
     assert "Latest stage: draft_submit_gate_evaluated" in html_response.text
+    assert "Open HTML" in html_response.text
 
 
 def test_execution_attempt_detail_api_and_html_surface_events_and_artifacts(tmp_path):
@@ -2050,6 +2060,8 @@ def test_execution_dashboard_api_and_html_surface_summary_and_links(tmp_path):
     assert payload["review_state_attempts"] == 1
     assert payload["replay_ready_attempts"] == 1
     assert payload["blocked_recent_attempts"][0]["attempt_id"] == blocked_attempt_id
+    assert payload["blocked_recent_attempts"][0]["visual_evidence_route"] is not None
+    assert payload["blocked_recent_attempts"][0]["visual_evidence_label"] == "Open HTML"
     assert any(row["attempt_id"] == pending_attempt_id for row in payload["recent_attempts"])
     assert any("Resolve blocked guarded attempts" in action for action in payload["recommended_actions"])
 
@@ -2059,3 +2071,4 @@ def test_execution_dashboard_api_and_html_surface_summary_and_links(tmp_path):
     assert "Recent Attempts" in html_response.text
     assert f"/execution/replay/{blocked_attempt_id}" in html_response.text
     assert f"/execution/attempts/{blocked_attempt_id}" in html_response.text
+    assert "Open HTML" in html_response.text

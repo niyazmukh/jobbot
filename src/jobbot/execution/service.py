@@ -314,6 +314,31 @@ def list_execution_overview(
         else:
             primary_action_route = attempt_route
             primary_action_label = "Open attempt detail"
+        latest_artifact = artifacts[-1] if artifacts else None
+        latest_artifact_route = (
+            f"/execution/artifacts/{latest_artifact.id}" if latest_artifact is not None else None
+        )
+        latest_artifact_label = (
+            f"Inspect latest {latest_artifact.artifact_type.value.replace('_', ' ')}"
+            if latest_artifact is not None
+            else None
+        )
+        visual_artifact = next(
+            (
+                artifact
+                for artifact in artifacts
+                if artifact.artifact_type in {ArtifactType.SCREENSHOT, ArtifactType.HTML_SNAPSHOT, ArtifactType.TRACE}
+            ),
+            None,
+        )
+        visual_evidence_route = (
+            f"/execution/artifacts/{visual_artifact.id}/launch" if visual_artifact is not None else None
+        )
+        visual_evidence_label = (
+            _artifact_type_action_label(visual_artifact.artifact_type.value)
+            if visual_artifact is not None
+            else None
+        )
 
         items.append(
             DraftExecutionOverviewRead(
@@ -339,6 +364,10 @@ def list_execution_overview(
                 replay_route=replay_route,
                 primary_action_route=primary_action_route,
                 primary_action_label=primary_action_label,
+                latest_artifact_route=latest_artifact_route,
+                latest_artifact_label=latest_artifact_label,
+                visual_evidence_route=visual_evidence_route,
+                visual_evidence_label=visual_evidence_label,
                 artifact_count=len(artifacts),
                 screenshot_count=artifact_type_counts.get(ArtifactType.SCREENSHOT.value, 0),
                 html_snapshot_count=artifact_type_counts.get(ArtifactType.HTML_SNAPSHOT.value, 0),
@@ -1992,6 +2021,21 @@ def _determine_replay_openability(
     if artifact_type == ArtifactType.TRACE.value or suffix in {".zip", ".trace"}:
         return True, "open_trace"
     return True, "open_path"
+
+
+def _artifact_type_action_label(artifact_type: str) -> str:
+    """Map an artifact type string to a launch-oriented action label."""
+
+    lowered = artifact_type.lower()
+    if lowered == ArtifactType.SCREENSHOT.value:
+        return "View image"
+    if lowered == ArtifactType.TRACE.value:
+        return "Download trace"
+    if lowered == ArtifactType.HTML_SNAPSHOT.value:
+        return "Open HTML"
+    if lowered in {ArtifactType.MODEL_IO.value, ArtifactType.ANSWER_PACK.value}:
+        return "Open text"
+    return "Open file"
 
 
 def _determine_launch_action(

@@ -1399,6 +1399,18 @@ def _render_execution_overview_page(
         reasons_block = ""
         if row.reasons:
             reasons_block = f"<div class='reasons'>Reasons: {escape(', '.join(row.reasons))}</div>"
+        evidence_links: list[str] = []
+        if row.latest_artifact_route and row.latest_artifact_label:
+            evidence_links.append(
+                f"<a href='{escape(row.latest_artifact_route)}'>{escape(row.latest_artifact_label)}</a>"
+            )
+        if row.visual_evidence_route and row.visual_evidence_label:
+            evidence_links.append(
+                f"<a href='{escape(row.visual_evidence_route)}'>{escape(row.visual_evidence_label)}</a>"
+            )
+        evidence_block = ""
+        if evidence_links:
+            evidence_block = f"<div class='status'>{' | '.join(evidence_links)}</div>"
         card_items.append(
             "<article class='card'>"
             f"<h2>{escape(row.job_title)}</h2>"
@@ -1419,6 +1431,7 @@ def _render_execution_overview_page(
             f"<div class='status'><a href='{escape(row.primary_action_route)}'>{escape(row.primary_action_label)}</a> | "
             f"<a href='{escape(row.attempt_route)}'>Inspect attempt</a> | "
             f"<a href='{escape(row.replay_route)}'>Replay bundle</a></div>"
+            f"{evidence_block}"
             f"{reasons_block}"
             "</article>"
         )
@@ -1497,12 +1510,18 @@ def _render_execution_dashboard_page(detail: DraftExecutionDashboardRead) -> str
         ]
     )
 
+    def _dashboard_evidence_link(row: DraftExecutionOverviewRead) -> str:
+        if row.visual_evidence_route and row.visual_evidence_label:
+            return f" | <a href='{escape(row.visual_evidence_route)}'>{escape(row.visual_evidence_label)}</a>"
+        return ""
+
     recent_html = "\n".join(
         (
             "<li>"
             f"Attempt #{row.attempt_id} | {escape(row.job_title)} | {escape(str(row.attempt_result or 'pending'))}"
             f" | <a href='{escape(row.primary_action_route)}'>{escape(row.primary_action_label)}</a>"
             f" | <a href='{escape(row.replay_route)}'>replay</a>"
+            f"{_dashboard_evidence_link(row)}"
             "</li>"
         )
         for row in detail.recent_attempts
@@ -1514,6 +1533,7 @@ def _render_execution_dashboard_page(detail: DraftExecutionDashboardRead) -> str
             f"Attempt #{row.attempt_id} | {escape(row.failure_code or 'none')} | {escape(row.job_title)}"
             f" | <a href='{escape(row.primary_action_route)}'>{escape(row.primary_action_label)}</a>"
             f" | <a href='{escape(row.attempt_route)}'>attempt</a>"
+            f"{_dashboard_evidence_link(row)}"
             "</li>"
         )
         for row in detail.blocked_recent_attempts
