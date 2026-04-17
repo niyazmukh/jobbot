@@ -259,6 +259,8 @@ def list_execution_overview(
     manual_review_only: bool = False,
     failure_code: str | None = None,
     max_submit_confidence: float | None = None,
+    sort_by: str = "started_at",
+    descending: bool = True,
     limit: int = 50,
 ) -> list[DraftExecutionOverviewRead]:
     """Return operator-facing draft execution rows with job context and attempt outcome."""
@@ -402,6 +404,22 @@ def list_execution_overview(
             for item in items
             if item.submit_confidence is not None and item.submit_confidence <= max_submit_confidence
         ]
+    if sort_by == "started_at":
+        items.sort(key=lambda item: item.started_at, reverse=descending)
+    elif sort_by == "artifact_count":
+        items.sort(key=lambda item: item.artifact_count, reverse=descending)
+    elif sort_by == "submit_confidence":
+        non_null = [item for item in items if item.submit_confidence is not None]
+        null_items = [item for item in items if item.submit_confidence is None]
+        non_null.sort(key=lambda item: item.submit_confidence or 0.0, reverse=descending)
+        items = non_null + null_items
+    elif sort_by == "failure_code":
+        non_null = [item for item in items if item.failure_code is not None]
+        null_items = [item for item in items if item.failure_code is None]
+        non_null.sort(key=lambda item: item.failure_code or "", reverse=descending)
+        items = non_null + null_items
+    else:
+        raise ValueError("invalid_execution_overview_sort")
     return items
 
 
@@ -412,6 +430,8 @@ def get_execution_dashboard(
     manual_review_only: bool = False,
     failure_code: str | None = None,
     max_submit_confidence: float | None = None,
+    sort_by: str = "started_at",
+    descending: bool = True,
     limit: int = 10,
 ) -> DraftExecutionDashboardRead:
     """Return one candidate-scoped execution dashboard summary."""
@@ -423,6 +443,8 @@ def get_execution_dashboard(
         manual_review_only=manual_review_only,
         failure_code=failure_code,
         max_submit_confidence=max_submit_confidence,
+        sort_by=sort_by,
+        descending=descending,
         limit=max(limit, 50),
     )
     blocked_rows = [row for row in rows if row.attempt_result == AttemptResult.BLOCKED.value]
@@ -465,6 +487,9 @@ def get_execution_dashboard(
         recommended_actions.append(
             f"Execution view is scoped to submit_confidence <= {max_submit_confidence}."
         )
+    if sort_by != "started_at" or not descending:
+        order = "descending" if descending else "ascending"
+        recommended_actions.append(f"Execution view is sorted by {sort_by} ({order}).")
 
     return DraftExecutionDashboardRead(
         candidate_profile_slug=candidate_profile_slug,

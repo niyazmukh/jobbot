@@ -670,6 +670,75 @@ def test_execution_overview_and_dashboard_support_manual_review_only_filter(tmp_
     assert any("manual-review-required failures only" in action for action in dashboard.recommended_actions)
 
 
+def test_execution_overview_supports_submit_confidence_sort_and_invalid_sort(tmp_path: Path):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "greenhouse"
+    browser = BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+
+    blocked_attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+    start_draft_execution_attempt(session, attempt_id=blocked_attempt.attempt_id)
+    build_draft_field_plan(session, attempt_id=blocked_attempt.attempt_id)
+    build_site_field_overlay(session, attempt_id=blocked_attempt.attempt_id)
+    open_site_target_page(session, attempt_id=blocked_attempt.attempt_id)
+    gate = evaluate_submit_gate(session, attempt_id=blocked_attempt.attempt_id)
+    assert gate.confidence_score is not None
+
+    pending_attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+
+    rows = list_execution_overview(
+        session,
+        candidate_profile_slug="alex-doe",
+        sort_by="submit_confidence",
+        descending=False,
+        limit=10,
+    )
+    assert len(rows) == 2
+    assert rows[0].attempt_id == blocked_attempt.attempt_id
+    assert rows[1].attempt_id == pending_attempt.attempt_id
+    assert rows[0].submit_confidence == gate.confidence_score
+    assert rows[1].submit_confidence is None
+
+    try:
+        _ = list_execution_overview(
+            session,
+            candidate_profile_slug="alex-doe",
+            sort_by="not_a_real_sort_key",
+            limit=10,
+        )
+    except ValueError as exc:
+        assert str(exc) == "invalid_execution_overview_sort"
+    else:
+        raise AssertionError("invalid sort key should raise ValueError")
+
+
 def test_get_execution_artifact_detail_returns_safe_json_preview(tmp_path: Path):
     session = make_session()
     job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)

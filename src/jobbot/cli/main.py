@@ -482,6 +482,8 @@ def list_execution_overview_cmd(
         min=0.0,
         max=1.0,
     ),
+    sort_by: str = typer.Option("started_at", "--sort-by"),
+    descending: bool = typer.Option(True, "--descending/--ascending"),
     limit: int = typer.Option(50, "--limit", min=1, max=500),
 ) -> None:
     """List operator-facing draft execution rows for one candidate."""
@@ -495,6 +497,8 @@ def list_execution_overview_cmd(
             manual_review_only=manual_review_only,
             failure_code=failure_code,
             max_submit_confidence=max_submit_confidence,
+            sort_by=sort_by,
+            descending=descending,
             limit=limit,
         )
     finally:
@@ -542,6 +546,8 @@ def show_execution_dashboard_cmd(
         min=0.0,
         max=1.0,
     ),
+    sort_by: str = typer.Option("started_at", "--sort-by"),
+    descending: bool = typer.Option(True, "--descending/--ascending"),
     limit: int = typer.Option(10, "--limit", min=1, max=100),
 ) -> None:
     """Show a candidate-scoped execution dashboard summary."""
@@ -554,6 +560,8 @@ def show_execution_dashboard_cmd(
             manual_review_only=manual_review_only,
             failure_code=failure_code,
             max_submit_confidence=max_submit_confidence,
+            sort_by=sort_by,
+            descending=descending,
             limit=limit,
         )
     finally:

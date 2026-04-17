@@ -95,13 +95,14 @@
 - Added deterministic execution overview/dashboard filtering by `failure_code` and max submit confidence across service/API/HTML/CLI surfaces for targeted blocked-attempt triage.
 - Added blocked-failure breakdown metrics (`blocked_failure_counts`, `manual_review_blocked_attempts`) to execution dashboard service/API/HTML/CLI surfaces for deterministic triage prioritization.
 - Added `manual_review_only` filtering across execution overview/dashboard service/API/HTML/CLI surfaces so unresolved-manual-review failures can be isolated in one deterministic operations view.
+- Added deterministic execution sort controls (`sort_by`, `descending`) across execution overview/dashboard service/API/HTML/CLI surfaces with invalid-sort guardrails.
 - Added a repo-local `.venv` workflow for JobBot development and validation without relying on global Python packages.
 - Added missing dev test dependency coverage (`httpx`) and repo-scoped `pytest` configuration so `pytest` targets JobBot tests instead of bundled comparison bots.
 - Fixed draft execution startup artifact serialization for JSON-safe answer packs.
 - Fixed guarded submit stop-reason classification so unresolved manual-review fields remain explicit `manual_review_required:*` blockers.
 - Fixed execution bootstrap/dashboard state handling so blocked applications preserve `review` state across later draft attempts and dashboard review counts aggregate by application instead of double-counting attempts.
 - Tightened deterministic enrichment/scoring rules for preferred-skill extraction and location mismatch detection.
-- Brought the scoped JobBot test suite to green in `.venv` with `103 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `105 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.
