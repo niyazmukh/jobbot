@@ -1615,11 +1615,21 @@ def _render_execution_dashboard_page(detail: DraftExecutionDashboardRead) -> str
 def _render_execution_attempt_detail_page(detail: DraftExecutionAttemptDetailRead) -> str:
     """Render one execution attempt detail page with ordered events and artifacts."""
 
+    def _event_artifact_links(event: DraftExecutionEventRead) -> str:
+        if not event.artifact_routes:
+            return ""
+        links = " | ".join(
+            f"<a href='{escape(route)}'>artifact</a>"
+            for route in event.artifact_routes
+        )
+        return f"<br><small>{links}</small>"
+
     events_html = "\n".join(
         (
             "<li>"
             f"<strong>{escape(event.event_type)}</strong> | {escape(event.created_at.isoformat())}"
             f"<br>{escape(event.message)}"
+            f"{_event_artifact_links(event)}"
             f"{f'<br><small>{escape(str(event.payload))}</small>' if event.payload else ''}"
             "</li>"
         )

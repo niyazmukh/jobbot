@@ -90,6 +90,7 @@
 - Added raw artifact and replay-asset file routes across service/API/HTML/CLI so persisted execution evidence can be opened directly instead of only previewed.
 - Added overview/dashboard evidence jump routes so execution rows can link directly to latest artifacts and visual evidence without requiring a separate drill-down first.
 - Added actionable route metadata onto execution attempt-detail artifact rows so inspect/raw/launch actions are available consistently across APIs and operator views.
+- Added event-level artifact inspect routes onto execution attempt-detail event rows so operators can jump from an execution timeline event directly into the referenced persisted artifact.
 - Added a repo-local `.venv` workflow for JobBot development and validation without relying on global Python packages.
 - Added missing dev test dependency coverage (`httpx`) and repo-scoped `pytest` configuration so `pytest` targets JobBot tests instead of bundled comparison bots.
 - Fixed draft execution startup artifact serialization for JSON-safe answer packs.

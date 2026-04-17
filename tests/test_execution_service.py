@@ -642,6 +642,8 @@ def test_get_execution_attempt_detail_returns_events_and_artifacts(tmp_path: Pat
     assert detail.failure_code == "submit_gate_blocked"
     assert len(detail.events) >= 6
     assert detail.events[-1].event_type == "draft_submit_gate_evaluated"
+    assert detail.events[-1].artifact_routes
+    assert all("/execution/artifacts/" in route for route in detail.events[-1].artifact_routes)
     assert len(detail.artifacts) >= 6
     assert any(artifact.artifact_type == "html_snapshot" for artifact in detail.artifacts)
     html_artifact = next(artifact for artifact in detail.artifacts if artifact.artifact_type == "html_snapshot")

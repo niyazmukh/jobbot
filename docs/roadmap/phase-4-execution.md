@@ -29,6 +29,7 @@ Execute applications safely on deterministic ATS flows with explicit confidence 
 - raw artifact and replay-asset file routes across service/API/HTML/CLI
 - overview/dashboard evidence jump routes for latest artifacts and visual evidence
 - actionable route metadata on execution attempt-detail artifact rows
+- event-level artifact inspect routes on execution attempt-detail event rows
 - review-state preservation across later draft attempts so blocked applications stay triageable
 - green repo-scoped JobBot validation pass in `.venv` (`pytest`: 98 passed)
 

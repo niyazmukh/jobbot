@@ -489,6 +489,7 @@ def get_execution_attempt_detail(
                 message=event.message,
                 created_at=event.created_at,
                 payload=(event.payload or {}),
+                artifact_routes=_event_artifact_routes(event),
             )
             for event in events
         ],
@@ -573,6 +574,27 @@ def _build_attempt_artifact_read(artifact: Artifact) -> DraftExecutionArtifactRe
         launch_route=launch_route,
         launch_label=launch_label,
     )
+
+
+def _event_artifact_routes(event: ApplicationEvent) -> list[str]:
+    """Extract inspect routes for artifact ids referenced by an execution event payload."""
+
+    payload = event.payload or {}
+    routes: list[str] = []
+    for key, value in payload.items():
+        if not key.endswith("artifact_id"):
+            continue
+        artifact_id: int | None = None
+        if isinstance(value, int):
+            artifact_id = value
+        elif isinstance(value, str) and value.isdigit():
+            artifact_id = int(value)
+        if artifact_id is None or artifact_id <= 0:
+            continue
+        route = f"/execution/artifacts/{artifact_id}"
+        if route not in routes:
+            routes.append(route)
+    return routes
 
 
 def get_execution_replay_bundle(

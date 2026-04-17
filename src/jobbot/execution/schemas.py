@@ -83,6 +83,7 @@ class DraftExecutionEventRead(BaseModel):
     message: str
     created_at: datetime
     payload: dict
+    artifact_routes: list[str] = []
 
 
 class DraftExecutionArtifactRead(BaseModel):

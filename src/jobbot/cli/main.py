@@ -611,12 +611,14 @@ def show_execution_attempt_cmd(
     event_table.add_column("ID", justify="right")
     event_table.add_column("Type")
     event_table.add_column("Message")
+    event_table.add_column("Artifacts")
     event_table.add_column("Created")
     for event in detail.events:
         event_table.add_row(
             str(event.event_id),
             event.event_type,
             event.message,
+            ", ".join(event.artifact_routes),
             event.created_at.isoformat(),
         )
     console.print(event_table)
