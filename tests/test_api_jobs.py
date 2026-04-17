@@ -1539,6 +1539,120 @@ def test_execution_overview_api_and_html_surface_blocked_attempts(tmp_path):
     assert "Open HTML" in html_response.text
 
 
+def test_execution_overview_and_dashboard_api_support_failure_and_confidence_filters(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={
+            "email": "alex@example.com",
+            "phone": "+1-555-0100",
+            "location": "Remote",
+            "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+        },
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    browser = models.BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    first_job.ats_vendor = "greenhouse"
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+        blocked_bootstrap = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe?browser_profile_key=apply-main"
+        )
+        blocked_attempt_id = blocked_bootstrap.json()["attempt_id"]
+        client.post(f"/api/execution/draft-attempts/{blocked_attempt_id}/start")
+        client.post(f"/api/execution/draft-attempts/{blocked_attempt_id}/field-plan")
+        client.post(f"/api/execution/draft-attempts/{blocked_attempt_id}/site-overlay")
+        client.post(f"/api/execution/draft-attempts/{blocked_attempt_id}/open-target")
+        gate_response = client.post(f"/api/execution/draft-attempts/{blocked_attempt_id}/submit-gate")
+        confidence = gate_response.json()["confidence_score"]
+        client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe?browser_profile_key=apply-main"
+        )
+
+        overview_response = client.get(
+            "/api/execution/overview/alex-doe"
+            f"?failure_code=submit_gate_blocked&max_submit_confidence={confidence + 0.01}"
+        )
+        dashboard_response = client.get(
+            "/api/execution/dashboard/alex-doe"
+            f"?failure_code=submit_gate_blocked&max_submit_confidence={confidence + 0.01}"
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert overview_response.status_code == 200
+    assert len(overview_response.json()) == 1
+    assert overview_response.json()[0]["attempt_id"] == blocked_attempt_id
+    assert overview_response.json()[0]["failure_code"] == "submit_gate_blocked"
+    assert overview_response.json()[0]["submit_confidence"] == confidence
+
+    assert dashboard_response.status_code == 200
+    payload = dashboard_response.json()
+    assert payload["total_attempts"] == 1
+    assert payload["blocked_attempts"] == 1
+    assert payload["pending_attempts"] == 0
+    assert payload["recent_attempts"][0]["attempt_id"] == blocked_attempt_id
+    assert any("failure_code=submit_gate_blocked" in action for action in payload["recommended_actions"])
+
+
 def test_execution_attempt_detail_api_and_html_surface_events_and_artifacts(tmp_path):
     session = make_session()
     ingest_discovery_batch(session, load_greenhouse_batch())

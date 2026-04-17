@@ -474,6 +474,13 @@ def list_draft_attempts_cmd(
 def list_execution_overview_cmd(
     candidate_profile: str = typer.Option(..., "--candidate-profile"),
     blocked_only: bool = typer.Option(False, "--blocked-only"),
+    failure_code: str | None = typer.Option(None, "--failure-code"),
+    max_submit_confidence: float | None = typer.Option(
+        None,
+        "--max-submit-confidence",
+        min=0.0,
+        max=1.0,
+    ),
     limit: int = typer.Option(50, "--limit", min=1, max=500),
 ) -> None:
     """List operator-facing draft execution rows for one candidate."""
@@ -484,6 +491,8 @@ def list_execution_overview_cmd(
             session,
             candidate_profile_slug=candidate_profile,
             blocked_only=blocked_only,
+            failure_code=failure_code,
+            max_submit_confidence=max_submit_confidence,
             limit=limit,
         )
     finally:
@@ -523,6 +532,13 @@ def list_execution_overview_cmd(
 @app.command("show-execution-dashboard")
 def show_execution_dashboard_cmd(
     candidate_profile: str = typer.Option(..., "--candidate-profile"),
+    failure_code: str | None = typer.Option(None, "--failure-code"),
+    max_submit_confidence: float | None = typer.Option(
+        None,
+        "--max-submit-confidence",
+        min=0.0,
+        max=1.0,
+    ),
     limit: int = typer.Option(10, "--limit", min=1, max=100),
 ) -> None:
     """Show a candidate-scoped execution dashboard summary."""
@@ -532,6 +548,8 @@ def show_execution_dashboard_cmd(
         detail = get_execution_dashboard(
             session,
             candidate_profile_slug=candidate_profile,
+            failure_code=failure_code,
+            max_submit_confidence=max_submit_confidence,
             limit=limit,
         )
     finally:

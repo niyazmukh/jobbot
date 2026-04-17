@@ -92,13 +92,14 @@
 - Added actionable route metadata onto execution attempt-detail artifact rows so inspect/raw/launch actions are available consistently across APIs and operator views.
 - Added event-level artifact inspect routes onto execution attempt-detail event rows so operators can jump from an execution timeline event directly into the referenced persisted artifact.
 - Added explicit execution `launch_target` metadata and image-aware launch handling so screenshot artifacts open into inspect/view pages while HTML/text/trace assets keep type-appropriate launch semantics.
+- Added deterministic execution overview/dashboard filtering by `failure_code` and max submit confidence across service/API/HTML/CLI surfaces for targeted blocked-attempt triage.
 - Added a repo-local `.venv` workflow for JobBot development and validation without relying on global Python packages.
 - Added missing dev test dependency coverage (`httpx`) and repo-scoped `pytest` configuration so `pytest` targets JobBot tests instead of bundled comparison bots.
 - Fixed draft execution startup artifact serialization for JSON-safe answer packs.
 - Fixed guarded submit stop-reason classification so unresolved manual-review fields remain explicit `manual_review_required:*` blockers.
 - Fixed execution bootstrap/dashboard state handling so blocked applications preserve `review` state across later draft attempts and dashboard review counts aggregate by application instead of double-counting attempts.
 - Tightened deterministic enrichment/scoring rules for preferred-skill extraction and location mismatch detection.
-- Brought the scoped JobBot test suite to green in `.venv` with `98 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `101 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.
@@ -119,7 +120,7 @@
 1. Decide whether review approval/rejection should automatically rematerialize eligibility or if that should stay explicit.
 2. Add Playwright-backed page-open startup with real session capture on top of the current HTTP-backed Greenhouse target-open flow.
 3. Convert the current Greenhouse target-open and submit-gate layers into a real guarded submit handler with attempt-level screenshots/traces.
-4. Add screenshot/trace-specific launch helpers on top of the new raw artifact, replay-asset, overview evidence, and attempt-detail artifact routes.
+4. Expand screenshot/trace launch handling from inspect/download routing into richer browser-assisted replay actions.
 5. Add Playwright-specific tests once browser-backed execution replaces the current HTTP/stub target-open flow.
 6. Promote the replay bundle and dashboard into a broader multi-ATS execution control center once multiple handlers exist.
 

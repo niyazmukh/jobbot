@@ -256,6 +256,8 @@ def list_execution_overview(
     *,
     candidate_profile_slug: str,
     blocked_only: bool = False,
+    failure_code: str | None = None,
+    max_submit_confidence: float | None = None,
     limit: int = 50,
 ) -> list[DraftExecutionOverviewRead]:
     """Return operator-facing draft execution rows with job context and attempt outcome."""
@@ -380,6 +382,19 @@ def list_execution_overview(
         )
     if blocked_only:
         items = [item for item in items if item.attempt_result == AttemptResult.BLOCKED.value]
+    if failure_code is not None:
+        normalized = failure_code.strip().lower()
+        items = [
+            item
+            for item in items
+            if (item.failure_code or "").strip().lower() == normalized
+        ]
+    if max_submit_confidence is not None:
+        items = [
+            item
+            for item in items
+            if item.submit_confidence is not None and item.submit_confidence <= max_submit_confidence
+        ]
     return items
 
 
@@ -387,6 +402,8 @@ def get_execution_dashboard(
     session: Session,
     *,
     candidate_profile_slug: str,
+    failure_code: str | None = None,
+    max_submit_confidence: float | None = None,
     limit: int = 10,
 ) -> DraftExecutionDashboardRead:
     """Return one candidate-scoped execution dashboard summary."""
@@ -395,6 +412,8 @@ def get_execution_dashboard(
         session,
         candidate_profile_slug=candidate_profile_slug,
         blocked_only=False,
+        failure_code=failure_code,
+        max_submit_confidence=max_submit_confidence,
         limit=max(limit, 50),
     )
     blocked_rows = [row for row in rows if row.attempt_result == AttemptResult.BLOCKED.value]
@@ -413,6 +432,12 @@ def get_execution_dashboard(
     ]
     if blocked_rows:
         recommended_actions.append("Prioritize attempts with submit_gate_blocked failure codes and manual-review stop reasons.")
+    if failure_code:
+        recommended_actions.append(f"Execution view is scoped to failure_code={failure_code}.")
+    if max_submit_confidence is not None:
+        recommended_actions.append(
+            f"Execution view is scoped to submit_confidence <= {max_submit_confidence}."
+        )
 
     return DraftExecutionDashboardRead(
         candidate_profile_slug=candidate_profile_slug,

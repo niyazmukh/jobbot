@@ -521,6 +521,83 @@ def test_list_execution_overview_returns_blocked_attempts_with_job_context(tmp_p
     assert rows[0].visual_evidence_label == "Open HTML"
 
 
+def test_list_execution_overview_and_dashboard_support_failure_and_confidence_filters(tmp_path: Path):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "greenhouse"
+    browser = BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+
+    blocked_attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+    start_draft_execution_attempt(session, attempt_id=blocked_attempt.attempt_id)
+    build_draft_field_plan(session, attempt_id=blocked_attempt.attempt_id)
+    build_site_field_overlay(session, attempt_id=blocked_attempt.attempt_id)
+    open_site_target_page(session, attempt_id=blocked_attempt.attempt_id)
+    gate = evaluate_submit_gate(session, attempt_id=blocked_attempt.attempt_id)
+
+    _ = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+
+    filtered_rows = list_execution_overview(
+        session,
+        candidate_profile_slug="alex-doe",
+        failure_code="submit_gate_blocked",
+        max_submit_confidence=gate.confidence_score + 0.01,
+        limit=10,
+    )
+    assert len(filtered_rows) == 1
+    assert filtered_rows[0].attempt_id == blocked_attempt.attempt_id
+    assert filtered_rows[0].failure_code == "submit_gate_blocked"
+    assert filtered_rows[0].submit_confidence == gate.confidence_score
+
+    empty_rows = list_execution_overview(
+        session,
+        candidate_profile_slug="alex-doe",
+        failure_code="submit_gate_blocked",
+        max_submit_confidence=max(gate.confidence_score - 0.2, 0.0),
+        limit=10,
+    )
+    assert empty_rows == []
+
+    dashboard = get_execution_dashboard(
+        session,
+        candidate_profile_slug="alex-doe",
+        failure_code="submit_gate_blocked",
+        max_submit_confidence=gate.confidence_score + 0.01,
+        limit=10,
+    )
+    assert dashboard.total_attempts == 1
+    assert dashboard.blocked_attempts == 1
+    assert dashboard.pending_attempts == 0
+    assert dashboard.recent_attempts[0].attempt_id == blocked_attempt.attempt_id
+    assert any("failure_code=submit_gate_blocked" in action for action in dashboard.recommended_actions)
+
+
 def test_get_execution_artifact_detail_returns_safe_json_preview(tmp_path: Path):
     session = make_session()
     job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)

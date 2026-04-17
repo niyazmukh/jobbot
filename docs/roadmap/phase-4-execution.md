@@ -31,8 +31,9 @@ Execute applications safely on deterministic ATS flows with explicit confidence 
 - actionable route metadata on execution attempt-detail artifact rows
 - event-level artifact inspect routes on execution attempt-detail event rows
 - explicit launch-target metadata with image-aware screenshot launch handling
+- deterministic failure-code and submit-confidence filters on execution overview/dashboard surfaces
 - review-state preservation across later draft attempts so blocked applications stay triageable
-- green repo-scoped JobBot validation pass in `.venv` (`pytest`: 98 passed)
+- green repo-scoped JobBot validation pass in `.venv` (`pytest`: 101 passed)
 
 ## Checklist
 - [x] Add browser profile registry
