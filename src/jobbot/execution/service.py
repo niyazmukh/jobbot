@@ -417,6 +417,15 @@ def get_execution_dashboard(
         limit=max(limit, 50),
     )
     blocked_rows = [row for row in rows if row.attempt_result == AttemptResult.BLOCKED.value]
+    blocked_failure_counts: dict[str, int] = {}
+    for row in blocked_rows:
+        key = row.failure_code or "unknown_failure"
+        blocked_failure_counts[key] = blocked_failure_counts.get(key, 0) + 1
+    manual_review_blocked_attempts = sum(
+        count
+        for code, count in blocked_failure_counts.items()
+        if code.startswith("manual_review_required:")
+    )
     pending_rows = [row for row in rows if row.attempt_result is None]
     review_application_ids = {
         row.application_id
@@ -432,6 +441,13 @@ def get_execution_dashboard(
     ]
     if blocked_rows:
         recommended_actions.append("Prioritize attempts with submit_gate_blocked failure codes and manual-review stop reasons.")
+        top_failure_code, top_failure_count = max(
+            blocked_failure_counts.items(),
+            key=lambda item: item[1],
+        )
+        recommended_actions.append(
+            f"Top blocked failure code is {top_failure_code} ({top_failure_count} attempts)."
+        )
     if failure_code:
         recommended_actions.append(f"Execution view is scoped to failure_code={failure_code}.")
     if max_submit_confidence is not None:
@@ -443,9 +459,11 @@ def get_execution_dashboard(
         candidate_profile_slug=candidate_profile_slug,
         total_attempts=len(rows),
         blocked_attempts=len(blocked_rows),
+        manual_review_blocked_attempts=manual_review_blocked_attempts,
         pending_attempts=len(pending_rows),
         review_state_attempts=len(review_application_ids),
         replay_ready_attempts=len(replay_ready_rows),
+        blocked_failure_counts=blocked_failure_counts,
         recent_attempts=rows[:limit],
         blocked_recent_attempts=blocked_rows[:limit],
         recommended_actions=recommended_actions,

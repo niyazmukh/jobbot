@@ -173,9 +173,11 @@ class DraftExecutionDashboardRead(BaseModel):
     candidate_profile_slug: str
     total_attempts: int
     blocked_attempts: int
+    manual_review_blocked_attempts: int
     pending_attempts: int
     review_state_attempts: int
     replay_ready_attempts: int
+    blocked_failure_counts: dict[str, int]
     recent_attempts: list[DraftExecutionOverviewRead]
     blocked_recent_attempts: list[DraftExecutionOverviewRead]
     recommended_actions: list[str]

@@ -93,6 +93,7 @@
 - Added event-level artifact inspect routes onto execution attempt-detail event rows so operators can jump from an execution timeline event directly into the referenced persisted artifact.
 - Added explicit execution `launch_target` metadata and image-aware launch handling so screenshot artifacts open into inspect/view pages while HTML/text/trace assets keep type-appropriate launch semantics.
 - Added deterministic execution overview/dashboard filtering by `failure_code` and max submit confidence across service/API/HTML/CLI surfaces for targeted blocked-attempt triage.
+- Added blocked-failure breakdown metrics (`blocked_failure_counts`, `manual_review_blocked_attempts`) to execution dashboard service/API/HTML/CLI surfaces for deterministic triage prioritization.
 - Added a repo-local `.venv` workflow for JobBot development and validation without relying on global Python packages.
 - Added missing dev test dependency coverage (`httpx`) and repo-scoped `pytest` configuration so `pytest` targets JobBot tests instead of bundled comparison bots.
 - Fixed draft execution startup artifact serialization for JSON-safe answer packs.

@@ -560,10 +560,21 @@ def show_execution_dashboard_cmd(
         "Attempts: "
         f"total={detail.total_attempts} "
         f"blocked={detail.blocked_attempts} "
+        f"manual_review_blocked={detail.manual_review_blocked_attempts} "
         f"pending={detail.pending_attempts} "
         f"review={detail.review_state_attempts} "
         f"replay_ready={detail.replay_ready_attempts}"
     )
+
+    if detail.blocked_failure_counts:
+        breakdown = ", ".join(
+            f"{code}={count}"
+            for code, count in sorted(
+                detail.blocked_failure_counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+        )
+        console.print(f"Blocked failure breakdown: {breakdown}")
 
     blocked_table = Table(title="Blocked Attempts", show_header=True, header_style="bold cyan")
     blocked_table.add_column("Attempt", justify="right")

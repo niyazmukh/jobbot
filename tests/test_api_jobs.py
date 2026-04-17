@@ -1648,7 +1648,9 @@ def test_execution_overview_and_dashboard_api_support_failure_and_confidence_fil
     payload = dashboard_response.json()
     assert payload["total_attempts"] == 1
     assert payload["blocked_attempts"] == 1
+    assert payload["manual_review_blocked_attempts"] == 0
     assert payload["pending_attempts"] == 0
+    assert payload["blocked_failure_counts"] == {"submit_gate_blocked": 1}
     assert payload["recent_attempts"][0]["attempt_id"] == blocked_attempt_id
     assert any("failure_code=submit_gate_blocked" in action for action in payload["recommended_actions"])
 
@@ -2292,9 +2294,11 @@ def test_execution_dashboard_api_and_html_surface_summary_and_links(tmp_path):
     assert payload["candidate_profile_slug"] == "alex-doe"
     assert payload["total_attempts"] == 2
     assert payload["blocked_attempts"] == 1
+    assert payload["manual_review_blocked_attempts"] == 0
     assert payload["pending_attempts"] == 1
     assert payload["review_state_attempts"] == 1
     assert payload["replay_ready_attempts"] == 1
+    assert payload["blocked_failure_counts"] == {"submit_gate_blocked": 1}
     assert payload["blocked_recent_attempts"][0]["attempt_id"] == blocked_attempt_id
     assert payload["blocked_recent_attempts"][0]["visual_evidence_route"] is not None
     assert payload["blocked_recent_attempts"][0]["visual_evidence_label"] == "Open HTML"
@@ -2304,6 +2308,7 @@ def test_execution_dashboard_api_and_html_surface_summary_and_links(tmp_path):
     assert html_response.status_code == 200
     assert "Execution Dashboard" in html_response.text
     assert "Blocked Attempts" in html_response.text
+    assert "Blocked Failure Breakdown" in html_response.text
     assert "Recent Attempts" in html_response.text
     assert f"/execution/replay/{blocked_attempt_id}" in html_response.text
     assert f"/execution/attempts/{blocked_attempt_id}" in html_response.text

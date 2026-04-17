@@ -593,7 +593,9 @@ def test_list_execution_overview_and_dashboard_support_failure_and_confidence_fi
     )
     assert dashboard.total_attempts == 1
     assert dashboard.blocked_attempts == 1
+    assert dashboard.manual_review_blocked_attempts == 0
     assert dashboard.pending_attempts == 0
+    assert dashboard.blocked_failure_counts == {"submit_gate_blocked": 1}
     assert dashboard.recent_attempts[0].attempt_id == blocked_attempt.attempt_id
     assert any("failure_code=submit_gate_blocked" in action for action in dashboard.recommended_actions)
 
@@ -844,9 +846,11 @@ def test_get_execution_dashboard_returns_summary_counts(tmp_path: Path):
     assert dashboard.candidate_profile_slug == "alex-doe"
     assert dashboard.total_attempts == 2
     assert dashboard.blocked_attempts == 1
+    assert dashboard.manual_review_blocked_attempts == 0
     assert dashboard.pending_attempts == 1
     assert dashboard.review_state_attempts == 1
     assert dashboard.replay_ready_attempts == 1
+    assert dashboard.blocked_failure_counts == {"submit_gate_blocked": 1}
     assert dashboard.blocked_recent_attempts[0].attempt_id == blocked_attempt.attempt_id
     assert any(row.attempt_id == pending_attempt.attempt_id for row in dashboard.recent_attempts)
     assert any("Resolve blocked guarded attempts" in action for action in dashboard.recommended_actions)

@@ -1528,6 +1528,7 @@ def _render_execution_dashboard_page(detail: DraftExecutionDashboardRead) -> str
         [
             f"<article class='card'><h2>Total</h2><div>{detail.total_attempts}</div></article>",
             f"<article class='card'><h2>Blocked</h2><div>{detail.blocked_attempts}</div></article>",
+            f"<article class='card'><h2>Manual-Review Blocked</h2><div>{detail.manual_review_blocked_attempts}</div></article>",
             f"<article class='card'><h2>Pending</h2><div>{detail.pending_attempts}</div></article>",
             f"<article class='card'><h2>Review State</h2><div>{detail.review_state_attempts}</div></article>",
             f"<article class='card'><h2>Replay Ready</h2><div>{detail.replay_ready_attempts}</div></article>",
@@ -1562,6 +1563,14 @@ def _render_execution_dashboard_page(detail: DraftExecutionDashboardRead) -> str
         )
         for row in detail.blocked_recent_attempts
     ) or "<li>No blocked attempts recorded.</li>"
+
+    blocked_failure_html = "\n".join(
+        f"<li>{escape(code)}: {count}</li>"
+        for code, count in sorted(
+            detail.blocked_failure_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    ) or "<li>No blocked failures recorded.</li>"
 
     actions_html = "\n".join(f"<li>{escape(action)}</li>" for action in detail.recommended_actions)
 
@@ -1622,6 +1631,10 @@ def _render_execution_dashboard_page(detail: DraftExecutionDashboardRead) -> str
       <section class="panel">
         <h2>Blocked Attempts</h2>
         <ul>{blocked_html}</ul>
+      </section>
+      <section class="panel">
+        <h2>Blocked Failure Breakdown</h2>
+        <ul>{blocked_failure_html}</ul>
       </section>
       <section class="panel">
         <h2>Recent Attempts</h2>
