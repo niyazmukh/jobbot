@@ -100,6 +100,7 @@ class DraftExecutionArtifactRead(BaseModel):
     raw_route: str | None = None
     launch_route: str | None = None
     launch_label: str | None = None
+    launch_target: str | None = None
 
 
 class DraftExecutionArtifactDetailRead(BaseModel):
@@ -117,6 +118,7 @@ class DraftExecutionArtifactDetailRead(BaseModel):
     raw_route: str | None = None
     launch_route: str | None = None
     launch_label: str | None = None
+    launch_target: str | None = None
     preview_kind: str
     preview_text: str | None = None
     preview_truncated: bool = False
@@ -136,6 +138,7 @@ class DraftExecutionReplayAssetRead(BaseModel):
     raw_route: str | None = None
     launch_route: str | None = None
     launch_label: str | None = None
+    launch_target: str | None = None
     openable_locally: bool = False
     open_hint: str | None = None
 

@@ -91,6 +91,7 @@
 - Added overview/dashboard evidence jump routes so execution rows can link directly to latest artifacts and visual evidence without requiring a separate drill-down first.
 - Added actionable route metadata onto execution attempt-detail artifact rows so inspect/raw/launch actions are available consistently across APIs and operator views.
 - Added event-level artifact inspect routes onto execution attempt-detail event rows so operators can jump from an execution timeline event directly into the referenced persisted artifact.
+- Added explicit execution `launch_target` metadata and image-aware launch handling so screenshot artifacts open into inspect/view pages while HTML/text/trace assets keep type-appropriate launch semantics.
 - Added a repo-local `.venv` workflow for JobBot development and validation without relying on global Python packages.
 - Added missing dev test dependency coverage (`httpx`) and repo-scoped `pytest` configuration so `pytest` targets JobBot tests instead of bundled comparison bots.
 - Fixed draft execution startup artifact serialization for JSON-safe answer packs.
@@ -109,6 +110,7 @@
 - Extending execution checkpoint state into broader operational filters and dashboards beyond inbox/detail reads.
 - Extending the replay bundle into direct artifact opening and browser replay actions beyond bounded preview reads.
 - Converting the new green `.venv` test workflow into routine validation for each major Phase 4 iteration.
+- Investigating a local Windows temp-directory ACL issue that is currently breaking fresh pytest temp-root cleanup despite the repo code remaining importable and manually verifiable.
 
 ## Blocked
 - None currently.

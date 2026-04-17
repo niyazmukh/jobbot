@@ -628,6 +628,7 @@ def show_execution_attempt_cmd(
     artifact_table.add_column("Type")
     artifact_table.add_column("Inspect")
     artifact_table.add_column("Launch")
+    artifact_table.add_column("Target")
     artifact_table.add_column("Raw")
     artifact_table.add_column("Path")
     artifact_table.add_column("Size")
@@ -637,6 +638,7 @@ def show_execution_attempt_cmd(
             artifact.artifact_type,
             artifact.inspect_route,
             artifact.launch_route or "",
+            artifact.launch_target or "",
             artifact.raw_route or "",
             artifact.path,
             "" if artifact.size_bytes is None else str(artifact.size_bytes),
@@ -661,7 +663,10 @@ def show_execution_artifact_cmd(
     console.print(f"Path: {detail.path}")
     console.print(f"Exists: {detail.exists} | Preview: {detail.preview_kind}")
     console.print(f"Raw route: {detail.raw_route or 'unavailable'}")
-    console.print(f"Launch: {detail.launch_label or 'unavailable'} | {detail.launch_route or 'unavailable'}")
+    console.print(
+        f"Launch: {detail.launch_label or 'unavailable'} | "
+        f"{detail.launch_route or 'unavailable'} | target={detail.launch_target or 'unavailable'}"
+    )
     console.print(f"Size: {detail.size_bytes} | Created: {detail.created_at.isoformat()}")
     if detail.preview_truncated:
         console.print("[yellow]Preview truncated for safety.[/yellow]")
@@ -699,6 +704,7 @@ def show_execution_replay_cmd(
     asset_table.add_column("Openable")
     asset_table.add_column("Hint")
     asset_table.add_column("Launch")
+    asset_table.add_column("Target")
     asset_table.add_column("Raw route")
     asset_table.add_column("Path")
     for asset in detail.assets:
@@ -710,6 +716,7 @@ def show_execution_replay_cmd(
             str(asset.openable_locally),
             asset.open_hint or "",
             asset.launch_label or "",
+            asset.launch_target or "",
             asset.raw_route or "",
             asset.path or "",
         )

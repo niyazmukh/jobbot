@@ -1746,6 +1746,7 @@ def test_execution_artifact_detail_api_and_html_surface_safe_preview(tmp_path):
     assert api_response.json()["raw_route"] == f"/execution/artifacts/{artifact_id}/raw"
     assert api_response.json()["launch_route"] == f"/execution/artifacts/{artifact_id}/launch"
     assert api_response.json()["launch_label"] == "Open text"
+    assert api_response.json()["launch_target"] == "open_text"
     assert api_response.json()["preview_kind"] == "json"
     assert "candidate_profile_slug" in api_response.json()["preview_text"]
     assert html_response.status_code == 200
@@ -1853,6 +1854,7 @@ def test_execution_replay_bundle_api_and_html_surface_assets_and_actions(tmp_pat
         and asset["raw_route"] is not None
         and asset["launch_route"] is not None
         and asset["launch_label"] == "Open text"
+        and asset["launch_target"] == "open_text"
         and asset["openable_locally"] is True
         and asset["open_hint"] == "open_text"
         for asset in api_response.json()["assets"]
@@ -1971,6 +1973,112 @@ def test_execution_raw_artifact_and_replay_asset_routes_serve_persisted_files(tm
     assert "candidate_profile_slug" in replay_raw.text
     assert replay_launch.status_code in {302, 307}
     assert replay_launch.headers["location"].endswith(f"/execution/artifacts/{artifact_id}/raw")
+
+
+def test_execution_screenshot_launch_redirects_to_inspect_view(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={
+            "email": "alex@example.com",
+            "phone": "+1-555-0100",
+            "location": "Remote",
+            "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+        },
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    browser = models.BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    first_job.ats_vendor = "greenhouse"
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+        bootstrap_response = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe?browser_profile_key=apply-main"
+        )
+        attempt_id = bootstrap_response.json()["attempt_id"]
+        screenshot_path = tmp_path / "capture.png"
+        screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+        artifact = models.Artifact(
+            attempt_id=attempt_id,
+            artifact_type=models.ArtifactType.SCREENSHOT,
+            path=str(screenshot_path),
+            size_bytes=screenshot_path.stat().st_size,
+        )
+        session.add(artifact)
+        session.commit()
+        api_response = client.get(f"/api/execution/artifacts/{artifact.id}")
+        html_response = client.get(f"/execution/artifacts/{artifact.id}")
+        launch_response = client.get(
+            f"/api/execution/artifacts/{artifact.id}/launch",
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert api_response.status_code == 200
+    assert api_response.json()["launch_label"] == "View image"
+    assert api_response.json()["launch_target"] == "inspect_image"
+    assert html_response.status_code == 200
+    assert "<img src=" in html_response.text
+    assert launch_response.status_code in {302, 307}
+    assert launch_response.headers["location"].endswith(f"/execution/artifacts/{artifact.id}")
 
 
 def test_execution_dashboard_api_and_html_surface_summary_and_links(tmp_path):

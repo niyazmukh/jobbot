@@ -568,6 +568,7 @@ def test_get_execution_artifact_detail_returns_safe_json_preview(tmp_path: Path)
     assert detail.raw_route == f"/execution/artifacts/{artifact.id}/raw"
     assert detail.launch_route == f"/execution/artifacts/{artifact.id}/launch"
     assert detail.launch_label == "Open text"
+    assert detail.launch_target == "open_text"
     assert detail.preview_kind == "json"
     assert detail.preview_text is not None
     assert "candidate_profile_slug" in detail.preview_text
@@ -598,6 +599,9 @@ def test_get_execution_artifact_detail_suppresses_binary_preview(tmp_path: Path)
     assert detail.preview_kind == "binary_image"
     assert detail.preview_text is None
     assert detail.preview_truncated is False
+    assert detail.launch_route == f"/execution/artifacts/{artifact.id}/launch"
+    assert detail.launch_label == "View image"
+    assert detail.launch_target == "inspect_image"
 
 
 def test_get_execution_attempt_detail_returns_events_and_artifacts(tmp_path: Path):
@@ -651,6 +655,7 @@ def test_get_execution_attempt_detail_returns_events_and_artifacts(tmp_path: Pat
     assert html_artifact.raw_route == f"/execution/artifacts/{html_artifact.artifact_id}/raw"
     assert html_artifact.launch_route == f"/execution/artifacts/{html_artifact.artifact_id}/launch"
     assert html_artifact.launch_label == "Open HTML"
+    assert html_artifact.launch_target == "open_html"
 
 
 def test_get_execution_replay_bundle_returns_replay_assets_and_actions(tmp_path: Path):
@@ -703,6 +708,7 @@ def test_get_execution_replay_bundle_returns_replay_assets_and_actions(tmp_path:
         and asset.raw_route == f"/execution/artifacts/{asset.artifact_id}/raw"
         and asset.launch_route == f"/execution/artifacts/{asset.artifact_id}/launch"
         and asset.launch_label == "Open text"
+        and asset.launch_target == "open_text"
         and asset.openable_locally
         and asset.open_hint == "open_text"
         for asset in replay.assets

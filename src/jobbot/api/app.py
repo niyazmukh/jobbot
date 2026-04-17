@@ -292,6 +292,8 @@ def create_app() -> FastAPI:
             raise
         if detail.launch_route is None:
             raise HTTPException(status_code=404, detail="execution_artifact_not_launchable")
+        if detail.launch_target == "inspect_image":
+            return RedirectResponse(url=f"/execution/artifacts/{artifact_id}")
         return RedirectResponse(url=detail.raw_route or detail.launch_route)
 
     @app.get("/execution/replay/{attempt_id}/assets/{label}/raw", response_class=FileResponse)
@@ -339,6 +341,8 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="execution_replay_asset_not_found")
         if asset.launch_route is None:
             raise HTTPException(status_code=404, detail="execution_replay_asset_not_launchable")
+        if asset.launch_target == "inspect_image" and asset.inspect_route is not None:
+            return RedirectResponse(url=asset.inspect_route)
         return RedirectResponse(url=asset.raw_route or asset.launch_route)
 
     @app.get("/ready-to-apply/{candidate_profile_slug}", response_class=HTMLResponse)
@@ -692,6 +696,8 @@ def create_app() -> FastAPI:
             raise
         if detail.launch_route is None:
             raise HTTPException(status_code=404, detail="execution_artifact_not_launchable")
+        if detail.launch_target == "inspect_image":
+            return RedirectResponse(url=f"/execution/artifacts/{artifact_id}")
         return RedirectResponse(url=detail.raw_route or detail.launch_route)
 
     @app.get(
@@ -756,6 +762,8 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="execution_replay_asset_not_found")
         if asset.launch_route is None:
             raise HTTPException(status_code=404, detail="execution_replay_asset_not_launchable")
+        if asset.launch_target == "inspect_image" and asset.inspect_route is not None:
+            return RedirectResponse(url=asset.inspect_route)
         return RedirectResponse(url=asset.raw_route or asset.launch_route)
 
     @app.post(
@@ -1811,11 +1819,24 @@ def _render_execution_replay_bundle_page(detail: DraftExecutionReplayBundleRead)
 def _render_execution_artifact_detail_page(detail: DraftExecutionArtifactDetailRead) -> str:
     """Render one execution artifact detail page with a bounded preview."""
 
-    preview_block = (
-        "<p>No preview available for this artifact type.</p>"
-        if detail.preview_text is None
-        else f"<pre>{escape(detail.preview_text)}</pre>"
-    )
+    if detail.preview_kind == "binary_image" and detail.raw_route is not None:
+        preview_block = (
+            f"<figure><img src=\"{escape(detail.raw_route)}\" "
+            "alt=\"Execution artifact preview\" style=\"max-width: 100%; border-radius: 14px; "
+            "border: 1px solid #ddd4c8; background: #f6f2ea;\"></figure>"
+        )
+    elif detail.preview_kind == "html" and detail.raw_route is not None:
+        preview_block = (
+            f"<iframe src=\"{escape(detail.raw_route)}\" title=\"Execution HTML preview\" "
+            "style=\"width: 100%; min-height: 480px; border: 1px solid #ddd4c8; "
+            "border-radius: 14px; background: white;\"></iframe>"
+        )
+    else:
+        preview_block = (
+            "<p>No preview available for this artifact type.</p>"
+            if detail.preview_text is None
+            else f"<pre>{escape(detail.preview_text)}</pre>"
+        )
     truncated_note = (
         "<p><small>Preview truncated for safety.</small></p>" if detail.preview_truncated else ""
     )

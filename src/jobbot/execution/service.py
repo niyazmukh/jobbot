@@ -522,7 +522,7 @@ def get_execution_artifact_detail(
             artifact_type=artifact.artifact_type,
         )
     raw_route = f"/execution/artifacts/{artifact.id}/raw" if exists else None
-    launch_route, launch_label = _determine_launch_action(
+    launch_route, launch_label, launch_target = _determine_launch_action(
         raw_route=raw_route,
         open_hint=_determine_replay_openability(
             artifact_type=artifact.artifact_type.value,
@@ -543,6 +543,7 @@ def get_execution_artifact_detail(
         raw_route=raw_route,
         launch_route=launch_route,
         launch_label=launch_label,
+        launch_target=launch_target,
         preview_kind=preview_kind,
         preview_text=preview_text,
         preview_truncated=preview_truncated,
@@ -554,7 +555,7 @@ def _build_attempt_artifact_read(artifact: Artifact) -> DraftExecutionArtifactRe
 
     exists = Path(artifact.path).exists()
     raw_route = f"/execution/artifacts/{artifact.id}/raw" if exists else None
-    launch_route, launch_label = _determine_launch_action(
+    launch_route, launch_label, launch_target = _determine_launch_action(
         raw_route=raw_route,
         open_hint=_determine_replay_openability(
             artifact_type=artifact.artifact_type.value,
@@ -573,6 +574,7 @@ def _build_attempt_artifact_read(artifact: Artifact) -> DraftExecutionArtifactRe
         raw_route=raw_route,
         launch_route=launch_route,
         launch_label=launch_label,
+        launch_target=launch_target,
     )
 
 
@@ -1975,7 +1977,7 @@ def _build_replay_asset(
         path=path,
         exists=exists,
     )
-    launch_route, launch_label = _determine_launch_action(
+    launch_route, launch_label, launch_target = _determine_launch_action(
         raw_route=raw_route,
         open_hint=open_hint,
         artifact_id=(artifact.id if artifact is not None else None),
@@ -1992,6 +1994,7 @@ def _build_replay_asset(
         raw_route=raw_route,
         launch_route=launch_route,
         launch_label=launch_label,
+        launch_target=launch_target,
         openable_locally=openable_locally,
         open_hint=open_hint,
     )
@@ -2088,11 +2091,11 @@ def _determine_launch_action(
     artifact_id: int | None = None,
     attempt_id: int | None = None,
     label: str | None = None,
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, str | None]:
     """Map one raw route plus open hint into an operator-facing launch action."""
 
     if raw_route is None or open_hint is None:
-        return None, None
+        return None, None, None
 
     if artifact_id is not None:
         launch_route = f"/execution/artifacts/{artifact_id}/launch"
@@ -2108,7 +2111,18 @@ def _determine_launch_action(
         "open_trace": "Download trace",
         "open_path": "Open file",
     }
-    return launch_route, launch_label_map.get(open_hint, "Open file")
+    launch_target_map = {
+        "open_image": "inspect_image",
+        "open_html": "open_html",
+        "open_text": "open_text",
+        "open_trace": "download_trace",
+        "open_path": "open_path",
+    }
+    return (
+        launch_route,
+        launch_label_map.get(open_hint, "Open file"),
+        launch_target_map.get(open_hint, "open_path"),
+    )
 
 
 def _build_startup_read(
