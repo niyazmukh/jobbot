@@ -23,6 +23,7 @@ from jobbot.execution import (
     DraftExecutionArtifactDetailRead,
     DraftExecutionDashboardRead,
     DraftExecutionDashboardRemediationHistoryRead,
+    DraftExecutionDashboardRemediationHistoryRetentionRead,
     DraftExecutionAttemptDetailRead,
     DraftExecutionOverviewRead,
     DraftExecutionReplayBundleRead,
@@ -49,7 +50,9 @@ from jobbot.execution import (
     list_execution_overview,
     list_draft_application_attempts,
     open_site_target_page,
+    prune_execution_dashboard_bulk_history,
     record_execution_dashboard_bulk_history,
+    set_execution_dashboard_bulk_history_limit,
     replay_execution_dashboard_bulk_history_by_id,
     run_dashboard_bulk_submit_remediation,
     run_submit_remediation_action,
@@ -847,6 +850,56 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
             if str(exc) == "invalid_execution_dashboard_history_sort":
                 raise HTTPException(status_code=400, detail="invalid_execution_dashboard_history_sort") from exc
+            raise
+
+    @app.post(
+        "/api/execution/dashboard/{candidate_profile_slug}/remediation-history/limit",
+        response_model=DraftExecutionDashboardRemediationHistoryRetentionRead,
+    )
+    def execution_dashboard_remediation_history_limit_endpoint(
+        candidate_profile_slug: str,
+        db: DbSession,
+        history_limit: Annotated[int, Query(ge=1, le=500)] = 10,
+    ) -> DraftExecutionDashboardRemediationHistoryRetentionRead:
+        """Set remediation-history retention limit and prune to the new bound."""
+
+        try:
+            return set_execution_dashboard_bulk_history_limit(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                history_limit=history_limit,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
+            if detail == "invalid_execution_dashboard_history_limit":
+                raise HTTPException(status_code=400, detail="invalid_execution_dashboard_history_limit") from exc
+            raise
+
+    @app.post(
+        "/api/execution/dashboard/{candidate_profile_slug}/remediation-history/prune",
+        response_model=DraftExecutionDashboardRemediationHistoryRetentionRead,
+    )
+    def execution_dashboard_remediation_history_prune_endpoint(
+        candidate_profile_slug: str,
+        db: DbSession,
+        keep_limit: Annotated[int | None, Query(ge=1, le=500)] = None,
+    ) -> DraftExecutionDashboardRemediationHistoryRetentionRead:
+        """Prune remediation-history rows to keep-limit or configured retention limit."""
+
+        try:
+            return prune_execution_dashboard_bulk_history(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                keep_limit=keep_limit,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
+            if detail == "invalid_execution_dashboard_history_limit":
+                raise HTTPException(status_code=400, detail="invalid_execution_dashboard_history_limit") from exc
             raise
 
     @app.post(

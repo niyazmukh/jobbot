@@ -40,7 +40,9 @@ from jobbot.execution.service import (
     list_execution_overview,
     list_draft_application_attempts,
     open_site_target_page,
+    prune_execution_dashboard_bulk_history,
     replay_execution_dashboard_bulk_history_by_id,
+    set_execution_dashboard_bulk_history_limit,
     start_draft_execution_attempt,
 )
 from jobbot.discovery.inbox import list_inbox_jobs, list_ready_to_apply_jobs
@@ -743,6 +745,60 @@ def replay_remediation_history_cmd(
     console.print(
         "[green]Replayed remediation scope:[/green] "
         f"targeted={batch.requested_count} remediated={batch.remediated_count} failed={batch.failed_count}"
+    )
+
+
+@app.command("set-remediation-history-limit")
+def set_remediation_history_limit_cmd(
+    candidate_profile: str = typer.Option(..., "--candidate-profile"),
+    history_limit: int = typer.Option(10, "--history-limit", min=1, max=500),
+) -> None:
+    """Set remediation-history retention limit and prune persisted rows to that bound."""
+
+    session = SessionLocal()
+    try:
+        result = set_execution_dashboard_bulk_history_limit(
+            session,
+            candidate_profile_slug=candidate_profile,
+            history_limit=history_limit,
+        )
+    except ValueError as exc:
+        session.close()
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        session.close()
+
+    console.print(
+        "[green]Updated remediation-history limit:[/green] "
+        f"configured_limit={result.configured_limit} "
+        f"before={result.before_count} after={result.after_count} removed={result.removed_count}"
+    )
+
+
+@app.command("prune-remediation-history")
+def prune_remediation_history_cmd(
+    candidate_profile: str = typer.Option(..., "--candidate-profile"),
+    keep_limit: int | None = typer.Option(None, "--keep-limit", min=1, max=500),
+) -> None:
+    """Prune remediation-history rows to keep-limit or configured retention limit."""
+
+    session = SessionLocal()
+    try:
+        result = prune_execution_dashboard_bulk_history(
+            session,
+            candidate_profile_slug=candidate_profile,
+            keep_limit=keep_limit,
+        )
+    except ValueError as exc:
+        session.close()
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        session.close()
+
+    console.print(
+        "[green]Pruned remediation-history:[/green] "
+        f"before={result.before_count} after={result.after_count} "
+        f"removed={result.removed_count} keep={result.keep_limit}"
     )
 
 

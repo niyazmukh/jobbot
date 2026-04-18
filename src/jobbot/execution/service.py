@@ -41,6 +41,7 @@ from jobbot.execution.schemas import (
     DraftExecutionEventRead,
     DraftGuardedSubmitRead,
     DraftExecutionDashboardRemediationHistoryRead,
+    DraftExecutionDashboardRemediationHistoryRetentionRead,
     DraftSubmitRemediationBatchRead,
     DraftSubmitRemediationActionRead,
     DraftSubmitRemediationFailureRead,
@@ -2362,7 +2363,7 @@ def record_execution_dashboard_bulk_history(
     sort_by: str = "started_at",
     descending: bool = True,
     limit: int = 25,
-    history_limit: int = 10,
+    history_limit: int | None = None,
 ) -> None:
     """Persist one dashboard bulk-remediation summary for candidate-level operator history."""
 
@@ -2374,6 +2375,10 @@ def record_execution_dashboard_bulk_history(
 
     source_profile_data = dict(candidate.source_profile_data or {})
     history = list(source_profile_data.get("execution_dashboard_bulk_history") or [])
+    effective_history_limit = _resolve_dashboard_history_limit(
+        source_profile_data=source_profile_data,
+        fallback=history_limit,
+    )
     first_failure = remediation_batch.failures[0] if remediation_batch.failures else None
     history.insert(
         0,
@@ -2396,10 +2401,86 @@ def record_execution_dashboard_bulk_history(
             "first_failure_code": (first_failure.error_code if first_failure is not None else None),
         },
     )
-    source_profile_data["execution_dashboard_bulk_history"] = history[:history_limit]
+    source_profile_data["execution_dashboard_bulk_history"] = history[:effective_history_limit]
     candidate.source_profile_data = source_profile_data
     candidate.updated_at = utcnow()
     session.commit()
+
+
+def set_execution_dashboard_bulk_history_limit(
+    session: Session,
+    *,
+    candidate_profile_slug: str,
+    history_limit: int,
+) -> DraftExecutionDashboardRemediationHistoryRetentionRead:
+    """Set persisted remediation-history limit and prune existing rows to that limit."""
+
+    if history_limit < 1:
+        raise ValueError("invalid_execution_dashboard_history_limit")
+    candidate = session.scalar(
+        select(CandidateProfile).where(CandidateProfile.slug == candidate_profile_slug)
+    )
+    if candidate is None:
+        raise ValueError("candidate_profile_not_found")
+
+    source_profile_data = dict(candidate.source_profile_data or {})
+    history = list(source_profile_data.get("execution_dashboard_bulk_history") or [])
+    before_count = len(history)
+    kept = history[:history_limit]
+    after_count = len(kept)
+    source_profile_data["execution_dashboard_bulk_history"] = kept
+    source_profile_data["execution_dashboard_bulk_history_limit"] = history_limit
+    candidate.source_profile_data = source_profile_data
+    candidate.updated_at = utcnow()
+    session.commit()
+    return DraftExecutionDashboardRemediationHistoryRetentionRead(
+        candidate_profile_slug=candidate_profile_slug,
+        configured_limit=history_limit,
+        keep_limit=history_limit,
+        before_count=before_count,
+        after_count=after_count,
+        removed_count=max(before_count - after_count, 0),
+    )
+
+
+def prune_execution_dashboard_bulk_history(
+    session: Session,
+    *,
+    candidate_profile_slug: str,
+    keep_limit: int | None = None,
+) -> DraftExecutionDashboardRemediationHistoryRetentionRead:
+    """Prune persisted remediation-history rows to a keep limit."""
+
+    if keep_limit is not None and keep_limit < 1:
+        raise ValueError("invalid_execution_dashboard_history_limit")
+    candidate = session.scalar(
+        select(CandidateProfile).where(CandidateProfile.slug == candidate_profile_slug)
+    )
+    if candidate is None:
+        raise ValueError("candidate_profile_not_found")
+
+    source_profile_data = dict(candidate.source_profile_data or {})
+    configured_limit = _resolve_dashboard_history_limit(
+        source_profile_data=source_profile_data,
+        fallback=None,
+    )
+    effective_keep_limit = keep_limit or configured_limit
+    history = list(source_profile_data.get("execution_dashboard_bulk_history") or [])
+    before_count = len(history)
+    kept = history[:effective_keep_limit]
+    after_count = len(kept)
+    source_profile_data["execution_dashboard_bulk_history"] = kept
+    candidate.source_profile_data = source_profile_data
+    candidate.updated_at = utcnow()
+    session.commit()
+    return DraftExecutionDashboardRemediationHistoryRetentionRead(
+        candidate_profile_slug=candidate_profile_slug,
+        configured_limit=configured_limit,
+        keep_limit=effective_keep_limit,
+        before_count=before_count,
+        after_count=after_count,
+        removed_count=max(before_count - after_count, 0),
+    )
 
 
 def list_execution_dashboard_bulk_history(
@@ -2576,6 +2657,23 @@ def _normalize_dashboard_history_row(row: dict) -> dict:
     )
     normalized["history_id"] = f"legacy-{sha1(legacy_payload.encode('utf-8')).hexdigest()[:16]}"
     return normalized
+
+
+def _resolve_dashboard_history_limit(
+    *,
+    source_profile_data: dict,
+    fallback: int | None,
+) -> int:
+    """Resolve one bounded remediation-history limit from candidate metadata and fallback."""
+
+    raw_value = source_profile_data.get("execution_dashboard_bulk_history_limit")
+    if raw_value is None:
+        raw_value = fallback
+    try:
+        value = int(raw_value) if raw_value is not None else 10
+    except (TypeError, ValueError):
+        value = 10
+    return max(1, min(value, 500))
 
 
 def _carry_forward_resolved_field_state(

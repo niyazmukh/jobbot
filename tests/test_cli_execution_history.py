@@ -127,3 +127,71 @@ def test_cli_replay_remediation_history_replays_scope(monkeypatch):
     check.close()
     assert len(history) >= 2
     assert history[0]["manual_review_only"] is True
+
+
+def test_cli_remediation_history_limit_and_prune(monkeypatch):
+    session_factory = make_session_factory()
+    session = session_factory()
+    session.add(
+        CandidateProfile(
+            name="Alex Doe",
+            slug="alex-doe",
+            personal_details={"email": "alex@example.com"},
+            target_preferences={"preferred_locations": ["Remote"], "remote": True},
+            source_profile_data={
+                "resume_path": "/profiles/alex-doe/resume.pdf",
+                "execution_dashboard_bulk_history": [
+                    {
+                        "history_id": "hist-limit-1",
+                        "created_at": "2026-04-18T08:00:00+00:00",
+                        "requested_count": 1,
+                        "remediated_count": 1,
+                        "failed_count": 0,
+                    },
+                    {
+                        "history_id": "hist-limit-2",
+                        "created_at": "2026-04-18T09:00:00+00:00",
+                        "requested_count": 1,
+                        "remediated_count": 1,
+                        "failed_count": 0,
+                    },
+                    {
+                        "history_id": "hist-limit-3",
+                        "created_at": "2026-04-18T10:00:00+00:00",
+                        "requested_count": 1,
+                        "remediated_count": 1,
+                        "failed_count": 0,
+                    },
+                ],
+            },
+        )
+    )
+    session.commit()
+    session.close()
+
+    monkeypatch.setattr(cli_main, "SessionLocal", session_factory)
+    runner = CliRunner()
+    set_limit = runner.invoke(
+        cli_main.app,
+        [
+            "set-remediation-history-limit",
+            "--candidate-profile",
+            "alex-doe",
+            "--history-limit",
+            "2",
+        ],
+    )
+    prune = runner.invoke(
+        cli_main.app,
+        [
+            "prune-remediation-history",
+            "--candidate-profile",
+            "alex-doe",
+        ],
+    )
+
+    assert set_limit.exit_code == 0
+    assert "configured_limit=2" in set_limit.stdout
+    assert "removed=1" in set_limit.stdout
+    assert prune.exit_code == 0
+    assert "before=2 after=2 removed=0 keep=2" in prune.stdout

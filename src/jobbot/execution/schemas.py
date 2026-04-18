@@ -476,3 +476,16 @@ class DraftExecutionDashboardRemediationHistoryRead(BaseModel):
     first_failure_attempt_id: int | None = None
     first_failure_code: str | None = None
     rerun_route: str
+
+
+class DraftExecutionDashboardRemediationHistoryRetentionRead(BaseModel):
+    """Read model for remediation-history retention/cleanup operations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_profile_slug: str
+    configured_limit: int
+    keep_limit: int
+    before_count: int
+    after_count: int
+    removed_count: int

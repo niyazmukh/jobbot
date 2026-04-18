@@ -4023,3 +4023,74 @@ def test_execution_dashboard_bulk_remediation_api_can_replay_history_by_id():
     assert payload["requested_count"] == 0
     assert payload["remediated_count"] == 0
     assert payload["failed_count"] == 0
+
+
+def test_execution_dashboard_remediation_history_api_can_set_limit_and_prune():
+    session = make_session()
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={"email": "alex@example.com"},
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={
+            "resume_path": "/profiles/alex-doe/resume.pdf",
+            "execution_dashboard_bulk_history": [
+                {
+                    "history_id": "hist-prune-1",
+                    "created_at": "2026-04-18T08:00:00+00:00",
+                    "requested_count": 3,
+                    "remediated_count": 2,
+                    "failed_count": 1,
+                },
+                {
+                    "history_id": "hist-prune-2",
+                    "created_at": "2026-04-18T09:00:00+00:00",
+                    "requested_count": 4,
+                    "remediated_count": 3,
+                    "failed_count": 1,
+                },
+                {
+                    "history_id": "hist-prune-3",
+                    "created_at": "2026-04-18T10:00:00+00:00",
+                    "requested_count": 5,
+                    "remediated_count": 4,
+                    "failed_count": 1,
+                },
+            ],
+        },
+    )
+    session.add(candidate)
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        set_limit_response = client.post(
+            "/api/execution/dashboard/alex-doe/remediation-history/limit?history_limit=2"
+        )
+        prune_response = client.post(
+            "/api/execution/dashboard/alex-doe/remediation-history/prune"
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert set_limit_response.status_code == 200
+    set_payload = set_limit_response.json()
+    assert set_payload["configured_limit"] == 2
+    assert set_payload["removed_count"] == 1
+    assert set_payload["after_count"] == 2
+
+    assert prune_response.status_code == 200
+    prune_payload = prune_response.json()
+    assert prune_payload["configured_limit"] == 2
+    assert prune_payload["keep_limit"] == 2
+    assert prune_payload["before_count"] == 2
+    assert prune_payload["after_count"] == 2
+    assert prune_payload["removed_count"] == 0
