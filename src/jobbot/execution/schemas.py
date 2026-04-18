@@ -539,6 +539,7 @@ class AutoApplyQueueRunRead(BaseModel):
 
     candidate_profile_slug: str
     requested_limit: int
+    reclaimed_count: int
     processed_count: int
     succeeded_count: int
     failed_count: int

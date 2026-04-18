@@ -537,6 +537,7 @@ def run_auto_apply_queue_cmd(
 
     console.print(
         "[green]Auto-apply run completed:[/green] "
+        f"reclaimed={result.reclaimed_count} "
         f"processed={result.processed_count} "
         f"succeeded={result.succeeded_count} "
         f"failed={result.failed_count} "

@@ -13,7 +13,7 @@ from jobbot.db import models  # noqa: F401
 from jobbot.db.models import CandidateFact, CandidateProfile
 from jobbot.discovery.greenhouse.adapter import parse_greenhouse_board_payload
 from jobbot.discovery.ingestion import ingest_discovery_batch
-from jobbot.models.enums import BrowserProfileType
+from jobbot.models.enums import AutoApplyQueueStatus, BrowserProfileType
 from jobbot.preparation.service import prepare_job_for_candidate
 from jobbot.scoring.service import score_job_for_candidate
 
@@ -143,6 +143,7 @@ def test_auto_apply_queue_api_enqueue_list_and_run(tmp_path, monkeypatch):
     assert list_response.status_code == 200
     assert len(list_response.json()) == 1
     assert run_response.status_code == 200
+    assert run_response.json()["reclaimed_count"] == 0
     assert run_response.json()["processed_count"] == 1
     assert run_response.json()["succeeded_count"] == 1
     assert run_response.json()["items"][0]["status"] == "succeeded"
@@ -187,6 +188,7 @@ def test_auto_apply_queue_api_rejects_simulated_submit_fallback(tmp_path, monkey
 
     assert enqueue_response.status_code == 200
     assert run_response.status_code == 200
+    assert run_response.json()["reclaimed_count"] == 0
     assert run_response.json()["processed_count"] == 1
     assert run_response.json()["succeeded_count"] == 0
     assert run_response.json()["failed_count"] == 1
@@ -195,3 +197,50 @@ def test_auto_apply_queue_api_rejects_simulated_submit_fallback(tmp_path, monkey
         run_response.json()["items"][0]["last_error_code"]
         == "guarded_submit_simulation_not_allowed_in_auto_apply"
     )
+
+
+def test_auto_apply_queue_api_reclaims_stale_running_lease(tmp_path, monkeypatch):
+    session = make_session()
+    job_id = _seed_ready_job(session, tmp_path)
+
+    monkeypatch.setattr(
+        "jobbot.execution.auto_apply.evaluate_submit_gate",
+        lambda *args, **kwargs: SimpleNamespace(allow_submit=True),
+    )
+    monkeypatch.setattr(
+        "jobbot.execution.auto_apply.execute_guarded_submit",
+        lambda *args, **kwargs: SimpleNamespace(attempt_id=kwargs["attempt_id"]),
+    )
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        enqueue_response = client.post(
+            "/api/auto-apply/alex-doe/enqueue?priority=120&max_attempts=2",
+            json={"job_ids": [job_id]},
+        )
+        queue_id = enqueue_response.json()["items"][0]["queue_id"]
+        row = session.query(models.AutoApplyQueueItem).filter_by(id=queue_id).one()
+        row.status = AutoApplyQueueStatus.RUNNING
+        row.lease_token = "stale-lease"
+        row.lease_expires_at = None
+        session.commit()
+
+        run_response = client.post(
+            "/api/auto-apply/alex-doe/run?browser_profile_key=apply-main&limit=5&lease_seconds=300"
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert run_response.status_code == 200
+    assert run_response.json()["reclaimed_count"] == 1
+    assert run_response.json()["processed_count"] == 1
+    assert run_response.json()["succeeded_count"] == 1
+    assert run_response.json()["items"][0]["status"] == "succeeded"

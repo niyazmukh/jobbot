@@ -156,6 +156,11 @@ def run_auto_apply_queue(
         raise ValueError("candidate_profile_not_found")
 
     now = utcnow()
+    reclaimed_count = _reclaim_stale_running_items(
+        session,
+        candidate_id=candidate.id,
+        now=now,
+    )
     rows = session.scalars(
         select(AutoApplyQueueItem)
         .where(
@@ -267,6 +272,7 @@ def run_auto_apply_queue(
     return AutoApplyQueueRunRead(
         candidate_profile_slug=candidate_profile_slug,
         requested_limit=limit,
+        reclaimed_count=reclaimed_count,
         processed_count=len(processed_items),
         succeeded_count=succeeded_count,
         failed_count=failed_count,
@@ -291,6 +297,38 @@ def _is_retryable_error(error_code: str) -> bool:
         "guarded_submit_simulation_not_allowed_in_auto_apply",
         "draft_target_not_opened",
     }
+
+
+def _reclaim_stale_running_items(
+    session: Session,
+    *,
+    candidate_id: int,
+    now,
+) -> int:
+    """Return stale RUNNING queue items to QUEUED for safe recovery."""
+
+    rows = session.scalars(
+        select(AutoApplyQueueItem).where(
+            AutoApplyQueueItem.candidate_profile_id == candidate_id,
+            AutoApplyQueueItem.status == AutoApplyQueueStatus.RUNNING,
+        )
+    ).all()
+    reclaimed = 0
+    for row in rows:
+        lease_is_stale = row.lease_expires_at is None or row.lease_expires_at <= now
+        if not lease_is_stale:
+            continue
+        row.status = AutoApplyQueueStatus.QUEUED
+        row.lease_token = None
+        row.lease_expires_at = None
+        row.next_attempt_at = now
+        row.last_error_code = "stale_lease_reclaimed"
+        row.last_error_message = "running_lease_expired_or_missing"
+        row.updated_at = now
+        reclaimed += 1
+    if reclaimed:
+        session.commit()
+    return reclaimed
 
 
 def _to_queue_item_read(

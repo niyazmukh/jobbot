@@ -5,7 +5,7 @@
 - Overall status: `in_progress`
 - Implementation mode: `local-first, deterministic-first`
 - Primary spec: `FINAL_JOB_BOT_PRD.md`
-- Latest validation: `233 passed` (`.venv\\Scripts\\python -m pytest -q`)
+- Latest validation: `234 passed` (`.venv\\Scripts\\python -m pytest -q`)
 
 ## Completed
 - Created persistent roadmap and ADR structure.
@@ -258,6 +258,10 @@
     `submit_interaction_mode=simulated_probe_fallback` as a failure path.
   - New failure code: `guarded_submit_simulation_not_allowed_in_auto_apply`.
   - Added API regression to ensure simulated fallback cannot be counted as a successful auto-apply.
+- Added explicit stale-lease recovery for durable auto-apply queue workers:
+  - Queue runs now reclaim stale RUNNING items (expired/missing lease) back to QUEUED before drain.
+  - Reclamation is observable via `reclaimed_count` in auto-apply run responses.
+  - Added regression coverage for stale lease reclamation and run metrics.
 - Extended model-call dashboard telemetry with blocked-call visibility:
   - `blocked_non_essential_call_count`
   - `blocked_non_essential_stage_counts`
@@ -283,6 +287,7 @@
 - Brought the scoped JobBot test suite to green in `.venv` with `230 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `232 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `233 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `234 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.
