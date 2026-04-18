@@ -556,6 +556,17 @@ def show_auto_apply_summary_cmd(
         f"recent_completed_1h={summary.recent_completed_count_1h} "
         f"recent_failure_rate_1h={summary.recent_failure_rate_1h if summary.recent_failure_rate_1h is not None else 'none'}"
     )
+    console.print(
+        "Remediation template: "
+        f"top_failure_code={summary.top_failure_code or 'none'} "
+        f"top_failure_count={summary.top_failure_count} "
+        f"action={summary.recommended_remediation_action or 'none'} "
+        f"requeue_route={summary.recommended_requeue_route or 'none'}"
+    )
+    if summary.top_failure_queue_ids:
+        console.print(f"Top failure queue IDs: {summary.top_failure_queue_ids}")
+    if summary.recommended_cli_command:
+        console.print(f"Suggested CLI: {summary.recommended_cli_command}")
 
 
 @app.command("run-auto-apply-queue")

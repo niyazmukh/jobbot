@@ -199,6 +199,8 @@ def get_auto_apply_queue_summary(
     recent_completed_count_1h = 0
     recent_failed_count_1h = 0
     one_hour_ago = now - timedelta(hours=1)
+    failure_code_counts: dict[str, int] = {}
+    failure_code_queue_ids: dict[str, list[int]] = {}
 
     for row in rows:
         if row.status == AutoApplyQueueStatus.QUEUED:
@@ -224,6 +226,9 @@ def get_auto_apply_queue_summary(
             succeeded_count += 1
         elif row.status == AutoApplyQueueStatus.FAILED:
             failed_count += 1
+            if row.last_error_code and row.last_error_code != _CANCELLED_BY_OPERATOR:
+                failure_code_counts[row.last_error_code] = failure_code_counts.get(row.last_error_code, 0) + 1
+                failure_code_queue_ids.setdefault(row.last_error_code, []).append(row.id)
 
         if (
             row.status in {AutoApplyQueueStatus.SUCCEEDED, AutoApplyQueueStatus.FAILED}
@@ -255,6 +260,35 @@ def get_auto_apply_queue_summary(
     if recent_completed_count_1h > 0:
         recent_failure_rate_1h = recent_failed_count_1h / float(recent_completed_count_1h)
 
+    top_failure_code: str | None = None
+    top_failure_count = 0
+    top_failure_queue_ids: list[int] = []
+    if failure_code_counts:
+        top_failure_code = max(failure_code_counts, key=lambda key: (failure_code_counts[key], key))
+        top_failure_count = failure_code_counts[top_failure_code]
+        top_failure_queue_ids = failure_code_queue_ids.get(top_failure_code, [])
+
+    recommended_remediation_action: str | None = None
+    recommended_requeue_route: str | None = None
+    recommended_cli_command: str | None = None
+    if top_failure_code is not None:
+        recommended_remediation_action = _recommended_queue_remediation_action(top_failure_code)
+        recommended_requeue_route = f"/api/auto-apply/{candidate_profile_slug}/requeue-failed"
+        queue_id_flags = " ".join([f"--queue-id {queue_id}" for queue_id in top_failure_queue_ids[:10]])
+        if recommended_remediation_action == "reauth_then_requeue":
+            recommended_cli_command = (
+                "reauth-browser-profile --profile-key <application-profile-key>; "
+                f"requeue-auto-apply-failed --candidate-profile {candidate_profile_slug} {queue_id_flags}".strip()
+            )
+        elif queue_id_flags:
+            recommended_cli_command = (
+                f"requeue-auto-apply-failed --candidate-profile {candidate_profile_slug} {queue_id_flags}"
+            )
+        else:
+            recommended_cli_command = (
+                f"requeue-auto-apply-failed --candidate-profile {candidate_profile_slug}"
+            )
+
     return AutoApplyQueueSummaryRead(
         candidate_profile_slug=candidate_profile_slug,
         total_count=len(rows),
@@ -273,6 +307,12 @@ def get_auto_apply_queue_summary(
         runner_lease_active=runner_lease_active,
         runner_lease_expires_at=runner_lease_expires_at,
         runner_lease_remaining_seconds=runner_lease_remaining_seconds,
+        top_failure_code=top_failure_code,
+        top_failure_count=top_failure_count,
+        top_failure_queue_ids=top_failure_queue_ids,
+        recommended_remediation_action=recommended_remediation_action,
+        recommended_requeue_route=recommended_requeue_route,
+        recommended_cli_command=recommended_cli_command,
     )
 
 
@@ -812,3 +852,23 @@ def _seconds_until(value: datetime | None, now: datetime) -> int | None:
     if remaining < 0:
         return 0
     return int(remaining)
+
+
+def _recommended_queue_remediation_action(failure_code: str) -> str:
+    """Map top queue failure code to operator remediation action template."""
+
+    if failure_code in {
+        "browser_profile_required_for_page_open",
+        "browser_profile_not_ready_for_application",
+        "browser_profile_not_found",
+    }:
+        return "reauth_then_requeue"
+    if failure_code in {
+        "guarded_submit_interaction_failed",
+        "guarded_submit_probe_failed",
+        "submit_gate_blocked",
+        "draft_target_not_opened",
+        "guarded_submit_simulation_not_allowed_in_auto_apply",
+    }:
+        return "selective_retry_requeue"
+    return "requeue_failed_items"

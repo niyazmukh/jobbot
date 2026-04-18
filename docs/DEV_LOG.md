@@ -41,14 +41,15 @@
 - `8faa498`: queue operation controls (`pause`/`resume`/`cancel`) + paused-runner safety.
 - `888fdd2`: candidate-scoped queue-run concurrency guardrails (`queue_runner_already_active`).
 - `32dab76`: queue pressure telemetry (aging + recent failure-rate window) for summary reads.
-- `in-progress`: actionable runner-lease conflict diagnostics (API 409 detail + summary lease visibility).
+- `6f63d1f`: actionable runner-lease conflict diagnostics (API 409 detail + summary lease visibility).
+- `in-progress`: top failure-code remediation templates in queue summaries (route + CLI hints).
 
 ### Validation Baseline
 - Full suite green at latest checkpoint: `244 passed`.
 
 ### Graphify Snapshot Update (latest)
-- Re-ran `graphify update .` after runner-lease conflict diagnostics updates.
-- Current graph totals: 4376 nodes, 78444 edges, 251 communities.
+- Re-ran `graphify update .` after remediation-template summary telemetry updates.
+- Current graph totals: 4413 nodes, 78738 edges, 257 communities.
 - God Nodes remain stable around execution/profile/job domain entities.
 
 ### Next Intended Discipline

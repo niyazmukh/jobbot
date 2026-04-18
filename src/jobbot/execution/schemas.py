@@ -569,6 +569,12 @@ class AutoApplyQueueSummaryRead(BaseModel):
     runner_lease_active: bool = False
     runner_lease_expires_at: datetime | None = None
     runner_lease_remaining_seconds: int | None = None
+    top_failure_code: str | None = None
+    top_failure_count: int = 0
+    top_failure_queue_ids: list[int] = []
+    recommended_remediation_action: str | None = None
+    recommended_requeue_route: str | None = None
+    recommended_cli_command: str | None = None
 
 
 class AutoApplyQueueRequeueRead(BaseModel):

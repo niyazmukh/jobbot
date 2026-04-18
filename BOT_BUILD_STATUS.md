@@ -292,6 +292,12 @@
   - API `POST /api/auto-apply/{candidate_profile_slug}/run` now returns structured `409` detail payload for `queue_runner_already_active`.
   - Queue summary now includes active runner lease diagnostics (`runner_lease_active`, `runner_lease_expires_at`, `runner_lease_remaining_seconds`).
   - Added API regressions for conflict payload diagnostics and summary runner-lease visibility.
+- Added top failure-code remediation templates into queue summary telemetry:
+  - Queue summary now surfaces `top_failure_code`, `top_failure_count`, and `top_failure_queue_ids`.
+  - Added action classification templates (`reauth_then_requeue`, `selective_retry_requeue`, `requeue_failed_items`).
+  - Added prefilled remediation hints: `recommended_requeue_route` and `recommended_cli_command`.
+  - Added CLI summary output for remediation templates to reduce operator triage overhead.
+  - Added API regressions for remediation template and queue-id hint behavior.
 - Added explicit stale-lease recovery for durable auto-apply queue workers:
   - Queue runs now reclaim stale RUNNING items (expired/missing lease) back to QUEUED before drain.
   - Reclamation is observable via `reclaimed_count` in auto-apply run responses.
@@ -347,10 +353,10 @@
 - None currently.
 
 ## Next Tasks
-1. Add top failure-code one-click remediation templates for requeue, reauth, and selective retry to reduce manual triage overhead.
-2. Add queue-control dashboard surfacing/actions so pause/resume/cancel can be driven from operator HTML flows without CLI/API-only usage.
-3. Add queue summary SLO thresholds/alerts (warning-critical cutoffs) to classify pressure metrics for faster operator response.
-4. Add lease ownership metadata (source host/process identifier) for multi-worker contention traceability beyond expiry timers.
+1. Add queue-control dashboard surfacing/actions so pause/resume/cancel can be driven from operator HTML flows without CLI/API-only usage.
+2. Add queue summary SLO thresholds/alerts (warning-critical cutoffs) to classify pressure metrics for faster operator response.
+3. Add lease ownership metadata (source host/process identifier) for multi-worker contention traceability beyond expiry timers.
+4. Add remediation-template dashboard actions that apply suggested requeue payloads without manual command assembly.
 
 ## Decisions
 - New implementation lives in `src/jobbot/` instead of modifying existing bot repos.

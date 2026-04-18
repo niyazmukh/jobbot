@@ -353,6 +353,10 @@ def test_auto_apply_queue_summary_api_reports_active_runner_lease_diagnostics(tm
     assert payload["runner_lease_expires_at"] is not None
     assert payload["runner_lease_remaining_seconds"] is not None
     assert payload["runner_lease_remaining_seconds"] > 0
+    assert payload["top_failure_code"] is None
+    assert payload["recommended_remediation_action"] is None
+    assert payload["recommended_requeue_route"] is None
+    assert payload["recommended_cli_command"] is None
 
 
 def test_auto_apply_queue_summary_api_reports_recent_failure_rate_window(tmp_path):
@@ -439,6 +443,12 @@ def test_auto_apply_queue_summary_api_reports_recent_failure_rate_window(tmp_pat
     payload = summary_response.json()
     assert payload["recent_completed_count_1h"] == 2
     assert payload["recent_failure_rate_1h"] == 0.5
+    assert payload["top_failure_code"] == "submit_gate_blocked"
+    assert payload["top_failure_count"] == 1
+    assert payload["top_failure_queue_ids"]
+    assert payload["recommended_remediation_action"] == "selective_retry_requeue"
+    assert payload["recommended_requeue_route"] == "/api/auto-apply/alex-doe/requeue-failed"
+    assert "requeue-auto-apply-failed --candidate-profile alex-doe" in payload["recommended_cli_command"]
 
 
 def test_auto_apply_queue_api_requeue_failed_items(tmp_path):
