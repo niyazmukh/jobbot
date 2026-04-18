@@ -330,6 +330,8 @@ def test_auto_apply_queue_summary_api_reports_active_runner_lease_diagnostics(tm
             candidate_profile_id=candidate.id,
             lease_token="runner-active",
             lease_expires_at=now + timedelta(minutes=4),
+            lease_owner_host="test-worker-host",
+            lease_owner_pid=32100,
             created_at=now,
             updated_at=now,
         )
@@ -356,6 +358,8 @@ def test_auto_apply_queue_summary_api_reports_active_runner_lease_diagnostics(tm
     assert payload["runner_lease_expires_at"] is not None
     assert payload["runner_lease_remaining_seconds"] is not None
     assert payload["runner_lease_remaining_seconds"] > 0
+    assert payload["runner_lease_owner_host"] == "test-worker-host"
+    assert payload["runner_lease_owner_pid"] == 32100
     assert payload["top_failure_code"] is None
     assert payload["recommended_remediation_action"] is None
     assert payload["recommended_requeue_route"] is None
@@ -897,6 +901,8 @@ def test_auto_apply_queue_api_run_returns_conflict_when_runner_lease_active(tmp_
         candidate_profile_id=candidate.id,
         lease_token="runner-active",
         lease_expires_at=now + timedelta(minutes=5),
+        lease_owner_host="conflict-worker-host",
+        lease_owner_pid=45601,
         created_at=now,
         updated_at=now,
     )
@@ -925,6 +931,8 @@ def test_auto_apply_queue_api_run_returns_conflict_when_runner_lease_active(tmp_
     assert detail["runner_lease_expires_at"] is not None
     assert detail["runner_lease_remaining_seconds"] is not None
     assert detail["runner_lease_remaining_seconds"] > 0
+    assert detail["runner_lease_owner_host"] == "conflict-worker-host"
+    assert detail["runner_lease_owner_pid"] == 45601
 
 
 def test_auto_apply_queue_api_run_reuses_stale_runner_lease(tmp_path, monkeypatch):
@@ -936,6 +944,8 @@ def test_auto_apply_queue_api_run_reuses_stale_runner_lease(tmp_path, monkeypatc
         candidate_profile_id=candidate.id,
         lease_token="runner-stale",
         lease_expires_at=now - timedelta(minutes=1),
+        lease_owner_host="stale-worker-host",
+        lease_owner_pid=47611,
         created_at=now,
         updated_at=now,
     )
@@ -978,3 +988,5 @@ def test_auto_apply_queue_api_run_reuses_stale_runner_lease(tmp_path, monkeypatc
     assert run_response.json()["succeeded_count"] == 1
     assert lease_row.lease_token is None
     assert lease_row.lease_expires_at is None
+    assert lease_row.lease_owner_host is None
+    assert lease_row.lease_owner_pid is None

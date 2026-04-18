@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import socket
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -53,10 +55,14 @@ class QueueRunnerAlreadyActiveError(ValueError):
         *,
         lease_expires_at: datetime | None,
         remaining_seconds: int | None,
+        owner_host: str | None,
+        owner_pid: int | None,
     ) -> None:
         super().__init__("queue_runner_already_active")
         self.lease_expires_at = lease_expires_at
         self.remaining_seconds = remaining_seconds
+        self.owner_host = owner_host
+        self.owner_pid = owner_pid
 
 
 def enqueue_auto_apply_jobs(
@@ -256,6 +262,8 @@ def get_auto_apply_queue_summary(
     runner_lease_active = False
     runner_lease_expires_at: datetime | None = None
     runner_lease_remaining_seconds: int | None = None
+    runner_lease_owner_host: str | None = None
+    runner_lease_owner_pid: int | None = None
     if (
         runner_lease is not None
         and runner_lease.lease_token
@@ -265,6 +273,8 @@ def get_auto_apply_queue_summary(
         runner_lease_active = True
         runner_lease_expires_at = runner_lease.lease_expires_at
         runner_lease_remaining_seconds = _seconds_until(runner_lease.lease_expires_at, now)
+        runner_lease_owner_host = runner_lease.lease_owner_host
+        runner_lease_owner_pid = runner_lease.lease_owner_pid
 
     recent_failure_rate_1h = None
     if recent_completed_count_1h > 0:
@@ -361,6 +371,8 @@ def get_auto_apply_queue_summary(
         runner_lease_active=runner_lease_active,
         runner_lease_expires_at=runner_lease_expires_at,
         runner_lease_remaining_seconds=runner_lease_remaining_seconds,
+        runner_lease_owner_host=runner_lease_owner_host,
+        runner_lease_owner_pid=runner_lease_owner_pid,
         top_failure_code=top_failure_code,
         top_failure_count=top_failure_count,
         top_failure_queue_ids=top_failure_queue_ids,
@@ -719,6 +731,8 @@ def _acquire_runner_lease(
     now = utcnow()
     lease_token = f"runner-{uuid4().hex}"
     lease_expires_at = now + timedelta(seconds=lease_seconds)
+    owner_host = socket.gethostname()
+    owner_pid = os.getpid()
 
     lease = session.scalar(
         select(AutoApplyQueueRunnerLease).where(
@@ -734,9 +748,13 @@ def _acquire_runner_lease(
             raise QueueRunnerAlreadyActiveError(
                 lease_expires_at=lease.lease_expires_at,
                 remaining_seconds=_seconds_until(lease.lease_expires_at, now),
+                owner_host=lease.lease_owner_host,
+                owner_pid=lease.lease_owner_pid,
             )
         lease.lease_token = lease_token
         lease.lease_expires_at = lease_expires_at
+        lease.lease_owner_host = owner_host
+        lease.lease_owner_pid = owner_pid
         lease.updated_at = now
         session.commit()
         return lease_token
@@ -745,6 +763,8 @@ def _acquire_runner_lease(
         candidate_profile_id=candidate_id,
         lease_token=lease_token,
         lease_expires_at=lease_expires_at,
+        lease_owner_host=owner_host,
+        lease_owner_pid=owner_pid,
         created_at=now,
         updated_at=now,
     )
@@ -768,11 +788,15 @@ def _acquire_runner_lease(
             raise QueueRunnerAlreadyActiveError(
                 lease_expires_at=lease.lease_expires_at,
                 remaining_seconds=_seconds_until(lease.lease_expires_at, now),
+                owner_host=lease.lease_owner_host,
+                owner_pid=lease.lease_owner_pid,
             )
         if lease is None:
             raise
         lease.lease_token = lease_token
         lease.lease_expires_at = lease_expires_at
+        lease.lease_owner_host = owner_host
+        lease.lease_owner_pid = owner_pid
         lease.updated_at = now
         session.commit()
         return lease_token
@@ -795,6 +819,8 @@ def _release_runner_lease(
         return
     lease.lease_token = None
     lease.lease_expires_at = None
+    lease.lease_owner_host = None
+    lease.lease_owner_pid = None
     lease.updated_at = utcnow()
     session.commit()
 

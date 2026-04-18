@@ -599,7 +599,9 @@ def run_auto_apply_queue_cmd(
         raise typer.BadParameter(
             "queue_runner_already_active "
             f"(runner_lease_remaining_seconds={exc.remaining_seconds}, "
-            f"runner_lease_expires_at={exc.lease_expires_at})"
+            f"runner_lease_expires_at={exc.lease_expires_at}, "
+            f"runner_lease_owner_host={exc.owner_host}, "
+            f"runner_lease_owner_pid={exc.owner_pid})"
         ) from exc
     except ValueError as exc:
         session.close()

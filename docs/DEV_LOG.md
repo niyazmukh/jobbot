@@ -43,14 +43,15 @@
 - `32dab76`: queue pressure telemetry (aging + recent failure-rate window) for summary reads.
 - `6f63d1f`: actionable runner-lease conflict diagnostics (API 409 detail + summary lease visibility).
 - `ab106fb`: top failure-code remediation templates in queue summaries (route + CLI hints).
-- `in-progress`: queue summary SLO alert/severity classification (`ok`/`warning`/`critical`).
+- `ca2a8f1`: queue summary SLO alert/severity classification (`ok`/`warning`/`critical`).
+- `in-progress`: runner lease ownership diagnostics (host/pid) across summary + conflict payloads.
 
 ### Validation Baseline
 - Full suite green at latest checkpoint: `245 passed`.
 
 ### Graphify Snapshot Update (latest)
-- Re-ran `graphify update .` after queue SLO severity/alert telemetry updates.
-- Current graph totals: 4466 nodes, 79151 edges, 262 communities.
+- Re-ran `graphify update .` after runner lease ownership diagnostics updates.
+- Current graph totals: 4526 nodes, 79592 edges, 269 communities.
 - God Nodes remain stable around execution/profile/job domain entities.
 
 ### Next Intended Discipline

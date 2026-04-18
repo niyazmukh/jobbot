@@ -1175,6 +1175,8 @@ def create_app() -> FastAPI:
                                 else None
                             ),
                             "runner_lease_remaining_seconds": exc.remaining_seconds,
+                            "runner_lease_owner_host": exc.owner_host,
+                            "runner_lease_owner_pid": exc.owner_pid,
                         },
                     ) from exc
                 raise HTTPException(status_code=409, detail=detail) from exc

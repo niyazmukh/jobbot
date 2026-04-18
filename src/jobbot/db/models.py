@@ -364,5 +364,7 @@ class AutoApplyQueueRunnerLease(Base):
     candidate_profile_id: Mapped[int] = mapped_column(ForeignKey("candidate_profiles.id"), index=True)
     lease_token: Mapped[str | None] = mapped_column(String(100), index=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    lease_owner_host: Mapped[str | None] = mapped_column(String(255), index=True)
+    lease_owner_pid: Mapped[int | None] = mapped_column(Integer, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)

@@ -303,6 +303,12 @@
   - Added warning/critical cutoffs for queue age, retry age, stale-running rows, and recent failure-rate pressure.
   - Added CLI summary surfacing for SLO status/alerts/actions.
   - Added API regressions for warning and critical SLO paths.
+- Added runner lease ownership diagnostics for multi-worker contention traceability:
+  - Added lease owner metadata on runner leases (`lease_owner_host`, `lease_owner_pid`) with migration support.
+  - Queue summary now surfaces runner lease owner host/pid alongside lease timing diagnostics.
+  - `queue_runner_already_active` API `409` detail now includes lease owner host/pid context.
+  - CLI active-run conflict output now includes lease owner host/pid diagnostics.
+  - Added regressions for summary/conflict ownership visibility and stale-lease owner cleanup on release.
 - Added explicit stale-lease recovery for durable auto-apply queue workers:
   - Queue runs now reclaim stale RUNNING items (expired/missing lease) back to QUEUED before drain.
   - Reclamation is observable via `reclaimed_count` in auto-apply run responses.
@@ -359,9 +365,9 @@
 
 ## Next Tasks
 1. Add queue-control dashboard surfacing/actions so pause/resume/cancel can be driven from operator HTML flows without CLI/API-only usage.
-2. Add lease ownership metadata (source host/process identifier) for multi-worker contention traceability beyond expiry timers.
-3. Add remediation-template dashboard actions that apply suggested requeue payloads without manual command assembly.
-4. Add SLO-severity filtering/sorting on queue and dashboard views to prioritize critical backlog first.
+2. Add remediation-template dashboard actions that apply suggested requeue payloads without manual command assembly.
+3. Add SLO-severity filtering/sorting on queue and dashboard views to prioritize critical backlog first.
+4. Add queue summary export/read APIs for machine-consumable operations tooling beyond CLI/HTML.
 
 ## Decisions
 - New implementation lives in `src/jobbot/` instead of modifying existing bot repos.
