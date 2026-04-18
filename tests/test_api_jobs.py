@@ -1407,6 +1407,9 @@ def test_execution_api_can_execute_guarded_submit_after_gate_passes(tmp_path, mo
         session.commit()
         gate_response = client.post(f"/api/execution/draft-attempts/{attempt_id}/submit-gate")
         submit_response = client.post(f"/api/execution/draft-attempts/{attempt_id}/guarded-submit")
+        overview_response = client.get("/api/execution/overview/alex-doe")
+        attempt_detail_response = client.get(f"/api/execution/attempts/{attempt_id}")
+        attempt_detail_html_response = client.get(f"/execution/attempts/{attempt_id}")
     finally:
         app.dependency_overrides.clear()
         session.close()
@@ -1419,6 +1422,24 @@ def test_execution_api_can_execute_guarded_submit_after_gate_passes(tmp_path, mo
     assert submit_response.json()["failure_code"] is None
     assert submit_response.json()["allow_submit"] is True
     assert submit_response.json()["submission_mode"] == "greenhouse_guarded_submit"
+    assert overview_response.status_code == 200
+    assert len(overview_response.json()) == 1
+    assert overview_response.json()[0]["submit_interaction_mode"] in {
+        "playwright",
+        "simulated_probe_fallback",
+    }
+    assert overview_response.json()[0]["submit_interaction_clicked"] is True
+    assert overview_response.json()[0]["submit_interaction_status"] is not None
+    assert attempt_detail_response.status_code == 200
+    assert attempt_detail_response.json()["submit_interaction_mode"] in {
+        "playwright",
+        "simulated_probe_fallback",
+    }
+    assert attempt_detail_response.json()["submit_interaction_clicked"] is True
+    assert attempt_detail_response.json()["submit_interaction_status"] is not None
+    assert attempt_detail_html_response.status_code == 200
+    assert "Submit-Stage Diagnostics" in attempt_detail_html_response.text
+    assert "Interaction mode" in attempt_detail_html_response.text
 
 
 def test_execution_api_guarded_submit_returns_conflict_when_submit_gate_blocked(tmp_path):

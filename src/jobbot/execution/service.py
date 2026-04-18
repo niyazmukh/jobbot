@@ -313,6 +313,18 @@ def list_execution_overview(
             .order_by(ApplicationEvent.created_at.desc(), ApplicationEvent.id.desc())
             .limit(1)
         ).scalar_one_or_none()
+        submit_stage_event = session.execute(
+            select(ApplicationEvent)
+            .where(
+                ApplicationEvent.attempt_id == attempt.id,
+                ApplicationEvent.event_type.in_(
+                    ["draft_submit_executed", "draft_submit_execution_blocked"]
+                ),
+            )
+            .order_by(ApplicationEvent.created_at.desc(), ApplicationEvent.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        submit_interaction = _extract_submit_interaction_diagnostics_from_event(submit_stage_event)
         attempt_failure_classification = _resolve_attempt_failure_classification(
             session=session,
             attempt_id=attempt.id,
@@ -395,6 +407,11 @@ def list_execution_overview(
                 session_health=attempt.session_health,
                 latest_event_type=(latest_event.event_type if latest_event is not None else None),
                 latest_event_message=(latest_event.message if latest_event is not None else None),
+                submit_interaction_mode=submit_interaction["mode"],
+                submit_interaction_status=submit_interaction["status"],
+                submit_interaction_clicked=submit_interaction["clicked"],
+                submit_interaction_selector=submit_interaction["selector"],
+                submit_interaction_confirmation_count=submit_interaction["confirmation_count"],
                 attempt_route=attempt_route,
                 replay_route=replay_route,
                 primary_action_route=primary_action_route,
@@ -597,6 +614,7 @@ def get_execution_attempt_detail(
         .where(ApplicationEvent.attempt_id == attempt.id)
         .order_by(ApplicationEvent.created_at, ApplicationEvent.id)
     ).all()
+    submit_interaction = _extract_submit_interaction_diagnostics_from_events(events)
     failure_classification = _resolve_attempt_failure_classification_from_events(events)
     if (
         attempt.result == AttemptResult.BLOCKED.value
@@ -628,6 +646,11 @@ def get_execution_attempt_detail(
         browser_profile_key=attempt.browser_profile_key,
         session_health=attempt.session_health,
         notes=attempt.notes,
+        submit_interaction_mode=submit_interaction["mode"],
+        submit_interaction_status=submit_interaction["status"],
+        submit_interaction_clicked=submit_interaction["clicked"],
+        submit_interaction_selector=submit_interaction["selector"],
+        submit_interaction_confirmation_count=submit_interaction["confirmation_count"],
         reasons=list(eligibility.reasons or []),
         started_at=attempt.started_at,
         events=[
@@ -2284,6 +2307,85 @@ def _resolve_attempt_failure_classification_from_events(
         if classification:
             return classification
     return None
+
+
+def _extract_submit_interaction_diagnostics_from_event(
+    event: ApplicationEvent | None,
+) -> dict[str, object | None]:
+    """Extract submit-stage interaction diagnostics from one submit-stage event payload."""
+
+    empty = {
+        "mode": None,
+        "status": None,
+        "clicked": None,
+        "selector": None,
+        "confirmation_count": None,
+    }
+    if event is None:
+        return empty
+
+    payload = event.payload or {}
+    interaction = payload.get("submit_interaction")
+    if isinstance(interaction, dict) and interaction:
+        mode = interaction.get("interaction_mode")
+        status = (
+            interaction.get("status")
+            or interaction.get("error")
+            or interaction.get("blocked_reason")
+        )
+        clicked_value = interaction.get("clicked")
+        clicked = clicked_value if isinstance(clicked_value, bool) else None
+        selector = interaction.get("clicked_selector")
+        markers = interaction.get("matched_confirmation_markers")
+        confirmation_count = len(markers) if isinstance(markers, list) else None
+        return {
+            "mode": (str(mode) if mode is not None and str(mode).strip() else None),
+            "status": (str(status) if status is not None and str(status).strip() else None),
+            "clicked": clicked,
+            "selector": (str(selector) if selector is not None and str(selector).strip() else None),
+            "confirmation_count": confirmation_count,
+        }
+
+    submit_probe = payload.get("submit_probe")
+    if isinstance(submit_probe, dict) and submit_probe:
+        status = submit_probe.get("blocked_reason") or submit_probe.get("reason")
+        matched_markers = submit_probe.get("matched_confirmation_markers")
+        matched_selectors = submit_probe.get("matched_submit_selectors")
+        selector = (
+            matched_selectors[0]
+            if isinstance(matched_selectors, list) and matched_selectors
+            else None
+        )
+        confirmation_count = len(matched_markers) if isinstance(matched_markers, list) else None
+        return {
+            "mode": "probe_only",
+            "status": (str(status) if status is not None and str(status).strip() else None),
+            "clicked": None,
+            "selector": (str(selector) if selector is not None and str(selector).strip() else None),
+            "confirmation_count": confirmation_count,
+        }
+
+    return empty
+
+
+def _extract_submit_interaction_diagnostics_from_events(
+    events: list[ApplicationEvent],
+) -> dict[str, object | None]:
+    """Extract submit-stage interaction diagnostics from ordered attempt events."""
+
+    for event in reversed(events):
+        if event.event_type not in {"draft_submit_executed", "draft_submit_execution_blocked"}:
+            continue
+        diagnostics = _extract_submit_interaction_diagnostics_from_event(event)
+        if any(value is not None for value in diagnostics.values()):
+            return diagnostics
+    return {
+        "mode": None,
+        "status": None,
+        "clicked": None,
+        "selector": None,
+        "confirmation_count": None,
+    }
 
 
 def _selector_matches_html(selector: str, html: str) -> bool:

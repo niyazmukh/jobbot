@@ -126,6 +126,7 @@
 - Surfaced guarded-submit `failure_classification` across execution overview/attempt detail and inbox execution summaries so operators can triage blocked attempts without opening raw artifact payloads.
 - Added classification-aware execution triage controls: overview/dashboard filters by `failure_classification`, dashboard classification breakdown metrics, and CLI/API/HTML surfacing for classification-scoped blocked-attempt analysis.
 - Expanded guarded-submit execution into deterministic ATS submit-interaction attempts with Playwright-first execution, persisted `submit_interaction` evidence, simulated probe fallback when Playwright is unavailable, and explicit `guarded_submit_interaction_failed` blocked-state conflict semantics (`409`) across service/API paths.
+- Added submit-stage-first execution diagnostics across overview/detail API+HTML surfaces (`submit_interaction_mode`, `submit_interaction_status`, click/selector/confirmation counters) so operators can triage guarded-submit outcomes without drilling into raw event payload JSON.
 - Hardened selector probing with CSS-like signature matching tests to prevent false positives on mismatched attribute selectors.
 - Added a repo-local `.venv` workflow for JobBot development and validation without relying on global Python packages.
 - Added missing dev test dependency coverage (`httpx`) and repo-scoped `pytest` configuration so `pytest` targets JobBot tests instead of bundled comparison bots.
@@ -151,9 +152,9 @@
 - None currently.
 
 ## Next Tasks
-1. Expand execution detail/overview HTML/API surfaces with submit-stage-first operator actions (e.g., explicit post-submit diagnostics panel).
-2. Promote the replay bundle and dashboard into a broader multi-ATS execution control center once multiple handlers exist.
-3. Tighten guarded-submit interaction policies from simulated fallback toward stricter browser-executed submit evidence as profile/session reliability instrumentation improves.
+1. Promote the replay bundle and dashboard into a broader multi-ATS execution control center once multiple handlers exist.
+2. Tighten guarded-submit interaction policies from simulated fallback toward stricter browser-executed submit evidence as profile/session reliability instrumentation improves.
+3. Add explicit submit-stage troubleshooting routes that pivot directly from diagnostics signals to relevant artifact/event views for faster operator remediation.
 
 ## Decisions
 - New implementation lives in `src/jobbot/` instead of modifying existing bot repos.

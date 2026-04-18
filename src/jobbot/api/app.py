@@ -1522,6 +1522,11 @@ def _render_execution_overview_page(
             f"<div class='status'>Failure class: {escape(str(row.failure_classification or 'none'))}</div>"
             f"<div class='status'>Confidence: {escape(str(row.submit_confidence))} | "
             f"Session: {escape(str(row.session_health or 'unknown'))}</div>"
+            f"<div class='status'>Submit interaction: {escape(str(row.submit_interaction_status or 'none'))} | "
+            f"Mode: {escape(str(row.submit_interaction_mode or 'none'))} | "
+            f"Clicked: {escape(str(row.submit_interaction_clicked))} | "
+            f"Selector: {escape(str(row.submit_interaction_selector or 'none'))} | "
+            f"Confirmations: {escape(str(row.submit_interaction_confirmation_count))}</div>"
             f"<div class='status'>Latest stage: {escape(str(row.latest_event_type or 'none'))}</div>"
             f"<div class='status'>Artifacts: {row.artifact_count} total | "
             f"HTML {row.html_snapshot_count} | Model IO {row.model_io_count} | "
@@ -1821,6 +1826,14 @@ def _render_execution_attempt_detail_page(detail: DraftExecutionAttemptDetailRea
         <p>Browser: {escape(str(detail.browser_profile_key or 'none'))} | Session: {escape(str(detail.session_health or 'unknown'))}</p>
         <p>Notes: {escape(str(detail.notes or ''))}</p>
         <p><a href="/execution/replay/{detail.attempt_id}">Open replay bundle</a></p>
+      </section>
+      <section class="panel">
+        <h2>Submit-Stage Diagnostics</h2>
+        <p>Interaction mode: {escape(str(detail.submit_interaction_mode or 'none'))}</p>
+        <p>Interaction status: {escape(str(detail.submit_interaction_status or 'none'))}</p>
+        <p>Submit clicked: {escape(str(detail.submit_interaction_clicked))}</p>
+        <p>Clicked selector: {escape(str(detail.submit_interaction_selector or 'none'))}</p>
+        <p>Confirmation markers matched: {escape(str(detail.submit_interaction_confirmation_count))}</p>
       </section>
       <section class="panel">
         <h2>Execution Events</h2>

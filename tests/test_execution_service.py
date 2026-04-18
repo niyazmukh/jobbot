@@ -830,6 +830,29 @@ def test_execute_guarded_submit_succeeds_after_passing_submit_gate(tmp_path: Pat
     assert persisted_application.current_state == "applied"
     assert persisted_application.applied_at is not None
 
+    overview_rows = list_execution_overview(
+        session,
+        candidate_profile_slug="alex-doe",
+        limit=10,
+    )
+    assert len(overview_rows) == 1
+    assert overview_rows[0].submit_interaction_mode in {
+        "playwright",
+        "simulated_probe_fallback",
+    }
+    assert overview_rows[0].submit_interaction_clicked is True
+    assert overview_rows[0].submit_interaction_status is not None
+    assert overview_rows[0].submit_interaction_confirmation_count is not None
+
+    detail = get_execution_attempt_detail(session, attempt_id=attempt.attempt_id)
+    assert detail.submit_interaction_mode in {
+        "playwright",
+        "simulated_probe_fallback",
+    }
+    assert detail.submit_interaction_clicked is True
+    assert detail.submit_interaction_status is not None
+    assert detail.submit_interaction_confirmation_count is not None
+
 
 def test_execute_guarded_submit_blocks_when_submit_gate_disallows(tmp_path: Path):
     session = make_session()

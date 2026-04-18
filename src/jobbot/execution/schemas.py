@@ -50,11 +50,17 @@ class DraftExecutionOverviewRead(BaseModel):
     attempt_mode: str
     attempt_result: str | None = None
     failure_code: str | None = None
+    failure_classification: str | None = None
     submit_confidence: float | None = None
     browser_profile_key: str | None = None
     session_health: str | None = None
     latest_event_type: str | None = None
     latest_event_message: str | None = None
+    submit_interaction_mode: str | None = None
+    submit_interaction_status: str | None = None
+    submit_interaction_clicked: bool | None = None
+    submit_interaction_selector: str | None = None
+    submit_interaction_confirmation_count: int | None = None
     attempt_route: str
     replay_route: str
     primary_action_route: str
@@ -178,6 +184,7 @@ class DraftExecutionDashboardRead(BaseModel):
     review_state_attempts: int
     replay_ready_attempts: int
     blocked_failure_counts: dict[str, int]
+    blocked_failure_classification_counts: dict[str, int]
     recent_attempts: list[DraftExecutionOverviewRead]
     blocked_recent_attempts: list[DraftExecutionOverviewRead]
     recommended_actions: list[str]
@@ -201,10 +208,16 @@ class DraftExecutionAttemptDetailRead(BaseModel):
     attempt_mode: str
     attempt_result: str | None = None
     failure_code: str | None = None
+    failure_classification: str | None = None
     submit_confidence: float | None = None
     browser_profile_key: str | None = None
     session_health: str | None = None
     notes: str | None = None
+    submit_interaction_mode: str | None = None
+    submit_interaction_status: str | None = None
+    submit_interaction_clicked: bool | None = None
+    submit_interaction_selector: str | None = None
+    submit_interaction_confirmation_count: int | None = None
     reasons: list[str]
     started_at: datetime
     events: list[DraftExecutionEventRead]
@@ -322,6 +335,8 @@ class DraftTargetOpenRead(BaseModel):
     capture_error: str | None = None
     opened_page_artifact_id: int
     resolution_artifact_id: int
+    screenshot_artifact_id: int | None = None
+    trace_artifact_id: int | None = None
     resolved_count: int
     unresolved_count: int
     entries: list[DraftResolvedFieldRead]
@@ -349,3 +364,28 @@ class DraftSubmitGateRead(BaseModel):
     manual_review_fields: list[str]
     artifact_id: int
     artifact_path: str
+
+
+class DraftGuardedSubmitRead(BaseModel):
+    """Read model for guarded submit execution outcomes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: int
+    attempt_id: int
+    event_id: int
+    job_id: int
+    candidate_profile_slug: str
+    site_vendor: str
+    application_state: str
+    attempt_result: str
+    failure_code: str | None = None
+    confidence_score: float
+    allow_submit: bool
+    submission_mode: str
+    target_url: str
+    artifact_id: int
+    artifact_path: str
+    screenshot_artifact_id: int | None = None
+    trace_artifact_id: int | None = None
+    submitted_at: datetime
