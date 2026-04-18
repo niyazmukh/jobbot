@@ -159,7 +159,10 @@
 - Exposed deterministic LinkedIn session probe operations through API and CLI surfaces:
   - API: `POST /api/browser/profiles/{profile_key}/linkedin-health`
   - CLI: `probe-linkedin-browser-profile`
-- Brought the scoped JobBot test suite to green in `.venv` with `175 passed`.
+- Added deterministic LinkedIn question-extraction scaffolding with confidence-based assist routing (`extract_linkedin_question_widgets`) and surfaced it through API/CLI:
+  - API: `POST /api/execution/linkedin/question-extraction`
+  - CLI: `extract-linkedin-questions`
+- Brought the scoped JobBot test suite to green in `.venv` with `179 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.
@@ -179,7 +182,7 @@
 ## Next Tasks
 1. Promote the replay bundle and dashboard into a broader multi-ATS execution control center once multiple handlers exist.
 2. Tighten guarded-submit interaction policies from simulated fallback toward stricter browser-executed submit evidence as profile/session reliability instrumentation improves.
-3. Add first LinkedIn question-extraction scaffolding so Phase 5 can route unknown/low-confidence question widgets into assist mode.
+3. Add first LinkedIn assist-mode field-fill scaffolding that consumes extracted question widgets and blocks low-confidence auto-actions.
 
 ## Decisions
 - New implementation lives in `src/jobbot/` instead of modifying existing bot repos.

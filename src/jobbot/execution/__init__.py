@@ -24,7 +24,10 @@ from jobbot.execution.schemas import (
     DraftSiteFieldPlanEntryRead,
     DraftSiteFieldPlanRead,
     DraftTargetOpenRead,
+    DraftLinkedInQuestionRead,
+    DraftLinkedInQuestionExtractionRead,
 )
+from jobbot.execution.linkedin import extract_linkedin_question_widgets
 from jobbot.execution.service import (
     bootstrap_draft_application_attempt,
     build_draft_field_plan,
@@ -77,6 +80,9 @@ __all__ = [
     "DraftSiteFieldPlanEntryRead",
     "DraftSiteFieldPlanRead",
     "DraftTargetOpenRead",
+    "DraftLinkedInQuestionRead",
+    "DraftLinkedInQuestionExtractionRead",
+    "extract_linkedin_question_widgets",
     "bootstrap_draft_application_attempt",
     "build_draft_field_plan",
     "build_site_field_overlay",

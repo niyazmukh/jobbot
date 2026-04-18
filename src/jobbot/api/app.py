@@ -39,10 +39,12 @@ from jobbot.execution import (
     DraftSiteFieldPlanRead,
     DraftSubmitGateRead,
     DraftTargetOpenRead,
+    DraftLinkedInQuestionExtractionRead,
     bootstrap_draft_application_attempt,
     build_draft_field_plan,
     build_site_field_overlay,
     execute_guarded_submit,
+    extract_linkedin_question_widgets,
     evaluate_submit_gate,
     get_execution_artifact_detail,
     get_execution_artifact_file,
@@ -111,6 +113,17 @@ def create_app() -> FastAPI:
             "app": "jobbot",
             "database_url": settings.resolved_database_url,
         }
+
+    @app.post(
+        "/api/execution/linkedin/question-extraction",
+        response_model=DraftLinkedInQuestionExtractionRead,
+    )
+    def extract_linkedin_question_widgets_endpoint(
+        page_html: str,
+    ) -> DraftLinkedInQuestionExtractionRead:
+        """Extract deterministic LinkedIn question widgets and assist-mode signal."""
+
+        return extract_linkedin_question_widgets(page_html=page_html)
 
     @app.post("/api/browser/profiles/{profile_key}/linkedin-health")
     def probe_linkedin_browser_profile_endpoint(

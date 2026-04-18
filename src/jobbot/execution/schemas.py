@@ -491,3 +491,28 @@ class DraftExecutionDashboardRemediationHistoryRetentionRead(BaseModel):
     before_count: int
     after_count: int
     removed_count: int
+
+
+class DraftLinkedInQuestionRead(BaseModel):
+    """Read model for one extracted LinkedIn question widget."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    field_key: str
+    question_text: str
+    field_type: str
+    confidence: float
+    source: str
+    assist_required: bool
+
+
+class DraftLinkedInQuestionExtractionRead(BaseModel):
+    """Read model for deterministic LinkedIn question extraction output."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question_count: int
+    unknown_field_count: int
+    assist_required: bool
+    recommended_mode: str
+    questions: list[DraftLinkedInQuestionRead]

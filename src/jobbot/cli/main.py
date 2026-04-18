@@ -46,6 +46,7 @@ from jobbot.execution.service import (
     set_execution_dashboard_bulk_history_limit,
     start_draft_execution_attempt,
 )
+from jobbot.execution.linkedin import extract_linkedin_question_widgets
 from jobbot.discovery.inbox import list_inbox_jobs, list_ready_to_apply_jobs
 from jobbot.enrichment.service import enrich_job
 from jobbot.models.enums import BrowserProfileType, ReviewStatus, SessionHealth
@@ -1269,6 +1270,40 @@ def prepare_job_cmd(
     console.print(f"Generated documents: {summary.generated_document_ids}")
     console.print(f"Answers: {summary.answer_ids}")
     console.print(f"Queued reviews: {summary.queued_review_ids}")
+
+
+@app.command("extract-linkedin-questions")
+def extract_linkedin_questions_cmd(
+    file: Path = typer.Option(..., "--file", exists=True, file_okay=True, dir_okay=False),
+) -> None:
+    """Extract deterministic LinkedIn question widgets from an HTML capture file."""
+
+    extraction = extract_linkedin_question_widgets(
+        page_html=file.read_text(encoding="utf-8"),
+    )
+
+    console.print(f"[bold]Question count:[/bold] {extraction.question_count}")
+    console.print(f"[bold]Unknown/low-confidence:[/bold] {extraction.unknown_field_count}")
+    console.print(f"[bold]Assist required:[/bold] {extraction.assist_required}")
+    console.print(f"[bold]Recommended mode:[/bold] {extraction.recommended_mode}")
+
+    table = Table(title="LinkedIn Question Widgets", show_header=True, header_style="bold cyan")
+    table.add_column("Field key")
+    table.add_column("Question")
+    table.add_column("Type")
+    table.add_column("Confidence")
+    table.add_column("Source")
+    table.add_column("Assist")
+    for row in extraction.questions:
+        table.add_row(
+            row.field_key,
+            row.question_text,
+            row.field_type,
+            str(row.confidence),
+            row.source,
+            str(row.assist_required),
+        )
+    console.print(table)
 
 
 if __name__ == "__main__":

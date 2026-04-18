@@ -4339,3 +4339,26 @@ def test_linkedin_browser_profile_probe_endpoint_updates_health():
     assert payload["session_health"] == "checkpointed"
     assert payload["recommended_action"] == "manual_checkpoint_recovery"
     assert payload["validation_details"]["observation"]["checkpoint_detected"] is True
+
+
+def test_linkedin_question_extraction_endpoint_returns_assist_signal():
+    client = TestClient(app)
+    response = client.post(
+        "/api/execution/linkedin/question-extraction",
+        params={
+            "page_html": (
+                "<form>"
+                "<label for='emailAddress'>Email address</label>"
+                "<input id='emailAddress' name='emailAddress' type='email'>"
+                "<input name='customQuestion_99' type='text'>"
+                "</form>"
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["question_count"] == 2
+    assert payload["recommended_mode"] == "assist"
+    assert payload["assist_required"] is True
+    assert payload["unknown_field_count"] == 1

@@ -2,6 +2,7 @@ from typer.testing import CliRunner
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+from pathlib import Path
 
 import jobbot.cli.main as cli_main
 from jobbot.db.base import Base
@@ -62,3 +63,32 @@ def test_cli_probe_linkedin_browser_profile_updates_health(monkeypatch):
     assert "LinkedIn probe saved for browser profile:" in result.stdout
     assert "Health: checkpointed" in result.stdout
     assert "Recommended action: manual_checkpoint_recovery" in result.stdout
+
+
+def test_cli_extract_linkedin_questions_reports_assist_mode(tmp_path: Path):
+    html_file = tmp_path / "linkedin_capture.html"
+    html_file.write_text(
+        (
+            "<form>"
+            "<label for='emailAddress'>Email address</label>"
+            "<input id='emailAddress' name='emailAddress' type='email'>"
+            "<input name='customQuestion_77' type='text'>"
+            "</form>"
+        ),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "extract-linkedin-questions",
+            "--file",
+            str(html_file),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Question count:" in result.stdout
+    assert "Recommended mode:" in result.stdout
+    assert "assist" in result.stdout
