@@ -35,10 +35,11 @@
 - `9688df5`: strict unattended auto-apply success policy (reject simulated submit fallback outcomes).
 - `96c97f1`: stale-lease recovery and reclaim observability for auto-apply queue runs.
 - `dd68ad7`: candidate-scoped auto-apply queue summary telemetry (API + CLI).
-- `in-progress`: failed-item requeue recovery controls (service/API/CLI + regressions).
+- `672b103`: failed-item requeue recovery controls (service/API/CLI + regressions).
+- `in-progress`: targeted failed-item requeue reliability hardening (missing-ID visibility + no silent limit truncation).
 
 ### Validation Baseline
-- Full suite green at latest checkpoint: `237 passed`.
+- Full suite green at latest checkpoint: `238 passed`.
 
 ### Graphify Snapshot Update (latest)
 - Re-ran `graphify update .` after prompt API/schema changes.

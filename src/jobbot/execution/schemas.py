@@ -570,6 +570,7 @@ class AutoApplyQueueRequeueRead(BaseModel):
 
     candidate_profile_slug: str
     requested_queue_ids: list[int]
+    missing_queue_ids: list[int]
     requeued_count: int
     skipped_count: int
     items: list[AutoApplyQueueItemRead]

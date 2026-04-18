@@ -5,7 +5,7 @@
 - Overall status: `in_progress`
 - Implementation mode: `local-first, deterministic-first`
 - Primary spec: `FINAL_JOB_BOT_PRD.md`
-- Latest validation: `237 passed` (`.venv\\Scripts\\python -m pytest -q`)
+- Latest validation: `238 passed` (`.venv\\Scripts\\python -m pytest -q`)
 
 ## Completed
 - Created persistent roadmap and ADR structure.
@@ -263,6 +263,11 @@
   - New API: `POST /api/auto-apply/{candidate_profile_slug}/requeue-failed`.
   - New CLI operation: `requeue-auto-apply-failed`.
   - Added API regressions for targeted and default-scope requeue behavior.
+- Hardened targeted failed-item requeue semantics to avoid silent truncation:
+  - Targeted `queue_ids` requeue now processes all requested IDs even when `limit` is small.
+  - Requeue responses now include `missing_queue_ids` for requested IDs not found in candidate scope.
+  - CLI requeue output now surfaces missing-ID counts/details for operator visibility.
+  - Added regression coverage for targeted requeue with `limit=1` and missing-ID reporting.
 - Added explicit stale-lease recovery for durable auto-apply queue workers:
   - Queue runs now reclaim stale RUNNING items (expired/missing lease) back to QUEUED before drain.
   - Reclamation is observable via `reclaimed_count` in auto-apply run responses.

@@ -222,11 +222,14 @@ def requeue_failed_auto_apply_items(
     )
     if requested_queue_ids:
         stmt = stmt.where(AutoApplyQueueItem.id.in_(requested_queue_ids))
-    rows = session.scalars(
-        stmt
-        .order_by(AutoApplyQueueItem.created_at.asc(), AutoApplyQueueItem.id.asc())
-        .limit(limit)
-    ).all()
+    ordered_stmt = stmt.order_by(AutoApplyQueueItem.created_at.asc(), AutoApplyQueueItem.id.asc())
+    if requested_queue_ids:
+        rows = session.scalars(ordered_stmt).all()
+    else:
+        rows = session.scalars(ordered_stmt.limit(limit)).all()
+
+    found_ids = {row.id for row in rows}
+    missing_queue_ids = [queue_id for queue_id in requested_queue_ids if queue_id not in found_ids]
 
     now = utcnow()
     requeued_count = 0
@@ -256,6 +259,7 @@ def requeue_failed_auto_apply_items(
     return AutoApplyQueueRequeueRead(
         candidate_profile_slug=candidate_profile_slug,
         requested_queue_ids=requested_queue_ids,
+        missing_queue_ids=missing_queue_ids,
         requeued_count=requeued_count,
         skipped_count=skipped_count,
         items=[_to_queue_item_read(item=row, candidate_profile_slug=candidate_profile_slug) for row in touched],

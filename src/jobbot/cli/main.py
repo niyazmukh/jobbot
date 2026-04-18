@@ -606,8 +606,12 @@ def requeue_auto_apply_failed_cmd(
 
     console.print(
         "[green]Failed auto-apply items requeued:[/green] "
-        f"requeued={result.requeued_count} skipped={result.skipped_count}"
+        f"requeued={result.requeued_count} "
+        f"skipped={result.skipped_count} "
+        f"missing={len(result.missing_queue_ids)}"
     )
+    if result.missing_queue_ids:
+        console.print(f"Missing queue IDs: {result.missing_queue_ids}")
 
 
 @app.command("materialize-eligibility")

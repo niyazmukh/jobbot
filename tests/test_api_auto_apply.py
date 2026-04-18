@@ -419,3 +419,68 @@ def test_auto_apply_queue_api_requeue_failed_default_scope(tmp_path):
     payload = response.json()
     assert payload["requeued_count"] == 1
     assert payload["skipped_count"] == 1
+
+
+def test_auto_apply_queue_api_requeue_failed_targeted_ignores_limit_and_reports_missing(tmp_path):
+    session = make_session()
+    job_id = _seed_ready_job(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    second_job = session.query(models.Job).filter(models.Job.id != job_id).order_by(models.Job.id.asc()).first()
+    now = models.utcnow()
+
+    first_failed = models.AutoApplyQueueItem(
+        candidate_profile_id=candidate.id,
+        job_id=job_id,
+        status="failed",
+        priority=120,
+        attempt_count=2,
+        max_attempts=3,
+        last_error_code="submit_gate_blocked",
+        last_error_message="submit_gate_blocked",
+        finished_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    second_failed = models.AutoApplyQueueItem(
+        candidate_profile_id=candidate.id,
+        job_id=second_job.id,
+        status="failed",
+        priority=100,
+        attempt_count=1,
+        max_attempts=3,
+        last_error_code="guarded_submit_probe_failed",
+        last_error_message="guarded_submit_probe_failed",
+        finished_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add_all([first_failed, second_failed])
+    session.commit()
+
+    missing_queue_id = max(first_failed.id, second_failed.id) + 999
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/api/auto-apply/alex-doe/requeue-failed?limit=1",
+            json={"queue_ids": [first_failed.id, second_failed.id, missing_queue_id]},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["requeued_count"] == 2
+    assert payload["skipped_count"] == 0
+    assert payload["missing_queue_ids"] == [missing_queue_id]
+    item_by_id = {row["queue_id"]: row for row in payload["items"]}
+    assert item_by_id[first_failed.id]["status"] == "queued"
+    assert item_by_id[second_failed.id]["status"] == "queued"
