@@ -266,6 +266,36 @@ def validate_browser_profile_session(
     return profile
 
 
+def validate_linkedin_browser_profile_session(
+    session: Session,
+    profile_key: str,
+    *,
+    page_url: str | None,
+    page_title: str | None,
+    page_content: str | None,
+    redirect_count: int = 0,
+    visible_job_count: int | None = None,
+    authenticated: bool | None = None,
+    notes: str | None = None,
+) -> BrowserProfile:
+    """Build and persist deterministic session health from LinkedIn probe signals."""
+
+    observation = build_linkedin_session_observation(
+        page_url=page_url,
+        page_title=page_title,
+        page_content=page_content,
+        redirect_count=redirect_count,
+        visible_job_count=visible_job_count,
+        authenticated=authenticated,
+        notes=notes,
+    )
+    return validate_browser_profile_session(
+        session,
+        profile_key=profile_key,
+        observation=observation,
+    )
+
+
 def build_browser_profile_policy(profile: BrowserProfile) -> BrowserAutomationPolicy:
     """Convert persisted session state into an explicit automation policy."""
 

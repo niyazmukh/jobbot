@@ -4295,3 +4295,47 @@ def test_execution_dashboard_html_history_retention_actions_apply_and_redirect()
     assert prune.status_code == 303
     assert "history_retention_configured=2" in prune.headers["location"]
     assert "history_retention_removed=0" in prune.headers["location"]
+
+
+def test_linkedin_browser_profile_probe_endpoint_updates_health():
+    session = make_session()
+    profile = models.BrowserProfile(
+        profile_key="linkedin-main",
+        profile_type=models.BrowserProfileType.APPLICATION,
+        display_name="LinkedIn Main",
+        storage_path="C:/profiles/linkedin-main",
+        session_health=models.SessionHealth.HEALTHY.value,
+        validation_details={},
+    )
+    session.add(profile)
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/api/browser/profiles/linkedin-main/linkedin-health",
+            params={
+                "page_url": "https://www.linkedin.com/checkpoint/challenge",
+                "page_title": "Security Verification",
+                "page_content": "Please verify your identity and complete CAPTCHA.",
+                "redirect_count": 1,
+                "authenticated": "true",
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["profile_key"] == "linkedin-main"
+    assert payload["session_health"] == "checkpointed"
+    assert payload["recommended_action"] == "manual_checkpoint_recovery"
+    assert payload["validation_details"]["observation"]["checkpoint_detected"] is True

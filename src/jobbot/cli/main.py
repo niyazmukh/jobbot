@@ -16,6 +16,7 @@ from jobbot.browser.service import (
     mark_browser_profile_used,
     register_browser_profile,
     update_browser_profile_health,
+    validate_linkedin_browser_profile_session,
     validate_browser_profile_session,
 )
 from jobbot.config import get_settings
@@ -201,6 +202,54 @@ def validate_browser_profile_cmd(
 
     console.print(f"[green]Validated browser profile:[/green] {profile.profile_key}")
     console.print(f"Health: {profile.session_health}")
+    console.print(f"Validation details: {profile.validation_details}")
+
+
+@app.command("probe-linkedin-browser-profile")
+def probe_linkedin_browser_profile_cmd(
+    profile_key: str = typer.Option(..., "--profile-key"),
+    page_url: str = typer.Option(..., "--page-url"),
+    page_title: str | None = typer.Option(None, "--page-title"),
+    page_content: str | None = typer.Option(None, "--page-content"),
+    redirect_count: int = typer.Option(0, "--redirect-count", min=0),
+    visible_job_count: int | None = typer.Option(None, "--visible-job-count", min=0),
+    authenticated: str | None = typer.Option(None, "--authenticated"),
+    notes: str | None = typer.Option(None, "--notes"),
+) -> None:
+    """Run deterministic LinkedIn session probe and persist browser health."""
+
+    normalized_authenticated: bool | None
+    if authenticated is None:
+        normalized_authenticated = None
+    else:
+        token = authenticated.strip().lower()
+        if token in {"true", "1", "yes", "y"}:
+            normalized_authenticated = True
+        elif token in {"false", "0", "no", "n"}:
+            normalized_authenticated = False
+        else:
+            raise typer.BadParameter("--authenticated must be true or false")
+
+    session = SessionLocal()
+    try:
+        profile = validate_linkedin_browser_profile_session(
+            session,
+            profile_key,
+            page_url=page_url,
+            page_title=page_title,
+            page_content=page_content,
+            redirect_count=redirect_count,
+            visible_job_count=visible_job_count,
+            authenticated=normalized_authenticated,
+            notes=notes,
+        )
+        policy = get_browser_profile_policy(session, profile_key)
+    finally:
+        session.close()
+
+    console.print(f"[green]LinkedIn probe saved for browser profile:[/green] {profile.profile_key}")
+    console.print(f"Health: {profile.session_health}")
+    console.print(f"Recommended action: {policy.recommended_action}")
     console.print(f"Validation details: {profile.validation_details}")
 
 

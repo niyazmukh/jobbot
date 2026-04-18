@@ -156,7 +156,10 @@
 - Added dashboard/API visibility for remediation-history inventory size versus configured limit (`remediation_history_count`, `remediation_history_limit`) so operators can proactively prune before high-volume remediation loops.
 - Added retention-pressure guidance to dashboard recommended actions when remediation-history inventory exceeds the configured limit.
 - Added deterministic LinkedIn session probe helpers (`build_linkedin_session_observation`, `evaluate_linkedin_session_health`) as a Phase 5 kickoff baseline for conservative session-risk detection.
-- Brought the scoped JobBot test suite to green in `.venv` with `173 passed`.
+- Exposed deterministic LinkedIn session probe operations through API and CLI surfaces:
+  - API: `POST /api/browser/profiles/{profile_key}/linkedin-health`
+  - CLI: `probe-linkedin-browser-profile`
+- Brought the scoped JobBot test suite to green in `.venv` with `175 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.
@@ -176,7 +179,7 @@
 ## Next Tasks
 1. Promote the replay bundle and dashboard into a broader multi-ATS execution control center once multiple handlers exist.
 2. Tighten guarded-submit interaction policies from simulated fallback toward stricter browser-executed submit evidence as profile/session reliability instrumentation improves.
-3. Expose LinkedIn session-probe helpers through API/CLI surfaces so operators can persist deterministic LinkedIn health checks without manual signal mapping.
+3. Add first LinkedIn question-extraction scaffolding so Phase 5 can route unknown/low-confidence question widgets into assist mode.
 
 ## Decisions
 - New implementation lives in `src/jobbot/` instead of modifying existing bot repos.

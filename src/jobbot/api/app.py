@@ -10,6 +10,10 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
+from jobbot.browser.service import (
+    get_browser_profile_policy,
+    validate_linkedin_browser_profile_session,
+)
 from jobbot.config import get_settings
 from jobbot.db import SessionLocal
 from jobbot.eligibility import (
@@ -106,6 +110,49 @@ def create_app() -> FastAPI:
             "status": "ok",
             "app": "jobbot",
             "database_url": settings.resolved_database_url,
+        }
+
+    @app.post("/api/browser/profiles/{profile_key}/linkedin-health")
+    def probe_linkedin_browser_profile_endpoint(
+        profile_key: str,
+        db: DbSession,
+        page_url: str,
+        page_title: str | None = None,
+        page_content: str | None = None,
+        redirect_count: Annotated[int, Query(ge=0)] = 0,
+        visible_job_count: Annotated[int | None, Query(ge=0)] = None,
+        authenticated: bool | None = None,
+        notes: str | None = None,
+    ) -> dict[str, object]:
+        """Persist deterministic LinkedIn session probe signals for a browser profile."""
+
+        try:
+            profile = validate_linkedin_browser_profile_session(
+                db,
+                profile_key,
+                page_url=page_url,
+                page_title=page_title,
+                page_content=page_content,
+                redirect_count=redirect_count,
+                visible_job_count=visible_job_count,
+                authenticated=authenticated,
+                notes=notes,
+            )
+            policy = get_browser_profile_policy(db, profile_key)
+        except ValueError as exc:
+            detail = str(exc)
+            if detail.startswith("Unknown browser profile key:"):
+                raise HTTPException(status_code=404, detail="browser_profile_not_found") from exc
+            raise
+
+        return {
+            "profile_key": profile.profile_key,
+            "session_health": profile.session_health,
+            "recommended_action": policy.recommended_action,
+            "requires_reauth": policy.requires_reauth,
+            "block_automation": not policy.allow_application,
+            "reasons": policy.reasons,
+            "validation_details": profile.validation_details or {},
         }
 
     @app.get("/inbox", response_class=HTMLResponse)

@@ -16,6 +16,7 @@ from jobbot.browser.service import (
     list_browser_profiles,
     register_browser_profile,
     update_browser_profile_health,
+    validate_linkedin_browser_profile_session,
     validate_browser_profile_session,
 )
 
@@ -33,5 +34,6 @@ __all__ = [
     "list_browser_profiles",
     "register_browser_profile",
     "update_browser_profile_health",
+    "validate_linkedin_browser_profile_session",
     "validate_browser_profile_session",
 ]
