@@ -61,6 +61,8 @@ class DraftExecutionOverviewRead(BaseModel):
     submit_interaction_clicked: bool | None = None
     submit_interaction_selector: str | None = None
     submit_interaction_confirmation_count: int | None = None
+    submit_troubleshoot_event_route: str | None = None
+    submit_troubleshoot_artifact_route: str | None = None
     attempt_route: str
     replay_route: str
     primary_action_route: str
@@ -218,6 +220,8 @@ class DraftExecutionAttemptDetailRead(BaseModel):
     submit_interaction_clicked: bool | None = None
     submit_interaction_selector: str | None = None
     submit_interaction_confirmation_count: int | None = None
+    submit_troubleshoot_event_route: str | None = None
+    submit_troubleshoot_artifact_route: str | None = None
     reasons: list[str]
     started_at: datetime
     events: list[DraftExecutionEventRead]

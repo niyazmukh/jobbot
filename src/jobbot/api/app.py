@@ -1508,6 +1508,16 @@ def _render_execution_overview_page(
         evidence_block = ""
         if evidence_links:
             evidence_block = f"<div class='status'>{' | '.join(evidence_links)}</div>"
+        submit_event_link = (
+            f"<a href='{escape(row.submit_troubleshoot_event_route)}'>submit event</a>"
+            if row.submit_troubleshoot_event_route
+            else "submit event unavailable"
+        )
+        submit_artifact_link = (
+            f" | <a href='{escape(row.submit_troubleshoot_artifact_route)}'>submit artifact</a>"
+            if row.submit_troubleshoot_artifact_route
+            else ""
+        )
         card_items.append(
             "<article class='card'>"
             f"<h2>{escape(row.job_title)}</h2>"
@@ -1527,6 +1537,7 @@ def _render_execution_overview_page(
             f"Clicked: {escape(str(row.submit_interaction_clicked))} | "
             f"Selector: {escape(str(row.submit_interaction_selector or 'none'))} | "
             f"Confirmations: {escape(str(row.submit_interaction_confirmation_count))}</div>"
+            f"<div class='status'>Troubleshoot: {submit_event_link}{submit_artifact_link}</div>"
             f"<div class='status'>Latest stage: {escape(str(row.latest_event_type or 'none'))}</div>"
             f"<div class='status'>Artifacts: {row.artifact_count} total | "
             f"HTML {row.html_snapshot_count} | Model IO {row.model_io_count} | "
@@ -1754,7 +1765,7 @@ def _render_execution_attempt_detail_page(detail: DraftExecutionAttemptDetailRea
 
     events_html = "\n".join(
         (
-            "<li>"
+            f"<li id='event-{event.event_id}'>"
             f"<strong>{escape(event.event_type)}</strong> | {escape(event.created_at.isoformat())}"
             f"<br>{escape(event.message)}"
             f"{_event_artifact_links(event)}"
@@ -1834,6 +1845,11 @@ def _render_execution_attempt_detail_page(detail: DraftExecutionAttemptDetailRea
         <p>Submit clicked: {escape(str(detail.submit_interaction_clicked))}</p>
         <p>Clicked selector: {escape(str(detail.submit_interaction_selector or 'none'))}</p>
         <p>Confirmation markers matched: {escape(str(detail.submit_interaction_confirmation_count))}</p>
+      </section>
+      <section class="panel">
+        <h2>Submit Troubleshooting</h2>
+        <p>{f"<a href='{escape(detail.submit_troubleshoot_event_route)}'>Open latest submit-stage event</a>" if detail.submit_troubleshoot_event_route else "Submit-stage event route unavailable."}</p>
+        <p>{f"<a href='{escape(detail.submit_troubleshoot_artifact_route)}'>Open latest submit-stage artifact</a>" if detail.submit_troubleshoot_artifact_route else "Submit-stage artifact route unavailable."}</p>
       </section>
       <section class="panel">
         <h2>Execution Events</h2>

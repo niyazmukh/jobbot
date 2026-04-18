@@ -843,6 +843,10 @@ def test_execute_guarded_submit_succeeds_after_passing_submit_gate(tmp_path: Pat
     assert overview_rows[0].submit_interaction_clicked is True
     assert overview_rows[0].submit_interaction_status is not None
     assert overview_rows[0].submit_interaction_confirmation_count is not None
+    assert overview_rows[0].submit_troubleshoot_event_route is not None
+    assert "#event-" in (overview_rows[0].submit_troubleshoot_event_route or "")
+    assert overview_rows[0].submit_troubleshoot_artifact_route is not None
+    assert "/execution/artifacts/" in (overview_rows[0].submit_troubleshoot_artifact_route or "")
 
     detail = get_execution_attempt_detail(session, attempt_id=attempt.attempt_id)
     assert detail.submit_interaction_mode in {
@@ -852,6 +856,10 @@ def test_execute_guarded_submit_succeeds_after_passing_submit_gate(tmp_path: Pat
     assert detail.submit_interaction_clicked is True
     assert detail.submit_interaction_status is not None
     assert detail.submit_interaction_confirmation_count is not None
+    assert detail.submit_troubleshoot_event_route is not None
+    assert "#event-" in (detail.submit_troubleshoot_event_route or "")
+    assert detail.submit_troubleshoot_artifact_route is not None
+    assert "/execution/artifacts/" in (detail.submit_troubleshoot_artifact_route or "")
 
 
 def test_execute_guarded_submit_blocks_when_submit_gate_disallows(tmp_path: Path):

@@ -1430,6 +1430,9 @@ def test_execution_api_can_execute_guarded_submit_after_gate_passes(tmp_path, mo
     }
     assert overview_response.json()[0]["submit_interaction_clicked"] is True
     assert overview_response.json()[0]["submit_interaction_status"] is not None
+    assert overview_response.json()[0]["submit_troubleshoot_event_route"] is not None
+    assert "#event-" in overview_response.json()[0]["submit_troubleshoot_event_route"]
+    assert overview_response.json()[0]["submit_troubleshoot_artifact_route"] is not None
     assert attempt_detail_response.status_code == 200
     assert attempt_detail_response.json()["submit_interaction_mode"] in {
         "playwright",
@@ -1437,9 +1440,13 @@ def test_execution_api_can_execute_guarded_submit_after_gate_passes(tmp_path, mo
     }
     assert attempt_detail_response.json()["submit_interaction_clicked"] is True
     assert attempt_detail_response.json()["submit_interaction_status"] is not None
+    assert attempt_detail_response.json()["submit_troubleshoot_event_route"] is not None
+    assert "#event-" in attempt_detail_response.json()["submit_troubleshoot_event_route"]
+    assert attempt_detail_response.json()["submit_troubleshoot_artifact_route"] is not None
     assert attempt_detail_html_response.status_code == 200
     assert "Submit-Stage Diagnostics" in attempt_detail_html_response.text
     assert "Interaction mode" in attempt_detail_html_response.text
+    assert "Submit Troubleshooting" in attempt_detail_html_response.text
 
 
 def test_execution_api_guarded_submit_returns_conflict_when_submit_gate_blocked(tmp_path):

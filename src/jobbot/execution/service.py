@@ -325,6 +325,10 @@ def list_execution_overview(
             .limit(1)
         ).scalar_one_or_none()
         submit_interaction = _extract_submit_interaction_diagnostics_from_event(submit_stage_event)
+        submit_troubleshoot = _build_submit_troubleshoot_routes(
+            attempt_id=attempt.id,
+            submit_stage_event=submit_stage_event,
+        )
         attempt_failure_classification = _resolve_attempt_failure_classification(
             session=session,
             attempt_id=attempt.id,
@@ -412,6 +416,8 @@ def list_execution_overview(
                 submit_interaction_clicked=submit_interaction["clicked"],
                 submit_interaction_selector=submit_interaction["selector"],
                 submit_interaction_confirmation_count=submit_interaction["confirmation_count"],
+                submit_troubleshoot_event_route=submit_troubleshoot["event_route"],
+                submit_troubleshoot_artifact_route=submit_troubleshoot["artifact_route"],
                 attempt_route=attempt_route,
                 replay_route=replay_route,
                 primary_action_route=primary_action_route,
@@ -615,6 +621,11 @@ def get_execution_attempt_detail(
         .order_by(ApplicationEvent.created_at, ApplicationEvent.id)
     ).all()
     submit_interaction = _extract_submit_interaction_diagnostics_from_events(events)
+    submit_stage_event = _resolve_submit_stage_event_from_events(events)
+    submit_troubleshoot = _build_submit_troubleshoot_routes(
+        attempt_id=attempt.id,
+        submit_stage_event=submit_stage_event,
+    )
     failure_classification = _resolve_attempt_failure_classification_from_events(events)
     if (
         attempt.result == AttemptResult.BLOCKED.value
@@ -651,6 +662,8 @@ def get_execution_attempt_detail(
         submit_interaction_clicked=submit_interaction["clicked"],
         submit_interaction_selector=submit_interaction["selector"],
         submit_interaction_confirmation_count=submit_interaction["confirmation_count"],
+        submit_troubleshoot_event_route=submit_troubleshoot["event_route"],
+        submit_troubleshoot_artifact_route=submit_troubleshoot["artifact_route"],
         reasons=list(eligibility.reasons or []),
         started_at=attempt.started_at,
         events=[
@@ -2385,6 +2398,49 @@ def _extract_submit_interaction_diagnostics_from_events(
         "clicked": None,
         "selector": None,
         "confirmation_count": None,
+    }
+
+
+def _resolve_submit_stage_event_from_events(
+    events: list[ApplicationEvent],
+) -> ApplicationEvent | None:
+    """Resolve the latest submit-stage event from ordered attempt events."""
+
+    submit_stage_types = (
+        "draft_submit_executed",
+        "draft_submit_execution_blocked",
+        "draft_submit_gate_evaluated",
+    )
+    for event in reversed(events):
+        if event.event_type in submit_stage_types:
+            return event
+    return None
+
+
+def _build_submit_troubleshoot_routes(
+    *,
+    attempt_id: int,
+    submit_stage_event: ApplicationEvent | None,
+) -> dict[str, str | None]:
+    """Build direct troubleshooting routes from submit diagnostics to event/artifact views."""
+
+    if submit_stage_event is None:
+        return {
+            "event_route": None,
+            "artifact_route": None,
+        }
+
+    event_route = f"/execution/attempts/{attempt_id}#event-{submit_stage_event.id}"
+    payload = submit_stage_event.payload or {}
+    artifact_id = payload.get("artifact_id")
+    artifact_route = (
+        f"/execution/artifacts/{artifact_id}"
+        if isinstance(artifact_id, int) and artifact_id > 0
+        else None
+    )
+    return {
+        "event_route": event_route,
+        "artifact_route": artifact_route,
     }
 
 
