@@ -1967,7 +1967,27 @@ def _render_execution_dashboard_page(
             if row.get("manual_review_only"):
                 scopes.append("manual_review_only=true")
             scope_line = f"<br><small>{escape(' | '.join(scopes))}</small>" if scopes else ""
-            history_items.append(f"<li>{escape(summary)}{scope_line}</li>")
+            rerun_params: list[tuple[str, str]] = []
+            if row.get("failure_code"):
+                rerun_params.append(("failure_code", str(row["failure_code"])))
+            if row.get("failure_classification"):
+                rerun_params.append(("failure_classification", str(row["failure_classification"])))
+            if row.get("manual_review_only"):
+                rerun_params.append(("manual_review_only", "true"))
+            rerun_params.append(("limit", str(int(row.get("limit", 25)))))
+            rerun_params.append(("sort_by", str(row.get("sort_by", "started_at"))))
+            rerun_params.append(("descending", "true" if row.get("descending", True) else "false"))
+            if row.get("max_submit_confidence") is not None:
+                rerun_params.append(("max_submit_confidence", str(row["max_submit_confidence"])))
+            rerun_route = f"{base_bulk_route}?{urlencode(rerun_params)}"
+            history_items.append(
+                "<li>"
+                f"{escape(summary)}{scope_line}"
+                f"<br><form method='post' action='{escape(rerun_route)}'>"
+                "<button type='submit'>Re-run scope</button>"
+                "</form>"
+                "</li>"
+            )
         bulk_history_html = (
             "<section class='panel'>"
             "<h2>Bulk Remediation History</h2>"

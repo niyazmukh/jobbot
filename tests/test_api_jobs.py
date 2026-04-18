@@ -3771,3 +3771,8 @@ def test_execution_dashboard_html_persists_bulk_remediation_history():
     assert response.text.count("targeted=0 | remediated=0 | failed=0") >= 2
     assert "failure_code=submit_gate_blocked" in response.text
     assert "manual_review_only=true" in response.text
+    assert "Re-run scope" in response.text
+    assert (
+        "/execution/dashboard/alex-doe/bulk-remediate-submit?manual_review_only=true&amp;limit=3&amp;sort_by=started_at&amp;descending=true"
+        in response.text
+    )

@@ -145,6 +145,7 @@
 - Preserved dashboard bulk-remediation filter context on HTML post-action redirects so operators return to the same scoped execution view after triggering a batch.
 - Added dashboard-level bulk-remediation feedback surfacing on HTML redirects (targeted/remediated/failed counts + first failure details) so operators get immediate batch outcome visibility without API inspection.
 - Added candidate-scoped persistent dashboard bulk-remediation history (last batch summaries + scopes) and surfaced it in HTML so operators can audit recent batch runs beyond a single redirect cycle.
+- Added one-click history-row scope replay actions on the dashboard (`Re-run scope`) so persisted remediation-history entries can be re-executed without manually reconstructing query params.
 - Brought the scoped JobBot test suite to green in `.venv` with `157 passed`.
 
 ## In Progress
@@ -165,7 +166,7 @@
 ## Next Tasks
 1. Promote the replay bundle and dashboard into a broader multi-ATS execution control center once multiple handlers exist.
 2. Tighten guarded-submit interaction policies from simulated fallback toward stricter browser-executed submit evidence as profile/session reliability instrumentation improves.
-3. Add dashboard remediation-history replay shortcuts (re-run with preserved prior scope params) to turn persisted history rows into one-click repeat batch actions.
+3. Add history-row metadata visibility (timestamp + first failure details inline) and sorting controls so operators can quickly pick the most relevant prior scope to replay.
 
 ## Decisions
 - New implementation lives in `src/jobbot/` instead of modifying existing bot repos.
