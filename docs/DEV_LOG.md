@@ -39,14 +39,15 @@
 - `04fe793`: targeted failed-item requeue reliability hardening (missing-ID visibility + no silent limit truncation).
 - `bc9bdcd`: synced build/dev status docs after queue reliability checkpoint.
 - `8faa498`: queue operation controls (`pause`/`resume`/`cancel`) + paused-runner safety.
-- `in-progress`: candidate-scoped queue-run concurrency guardrails (`queue_runner_already_active`).
+- `888fdd2`: candidate-scoped queue-run concurrency guardrails (`queue_runner_already_active`).
+- `in-progress`: queue pressure telemetry (aging + recent failure-rate window) for summary reads.
 
 ### Validation Baseline
-- Full suite green at latest checkpoint: `242 passed`.
+- Full suite green at latest checkpoint: `243 passed`.
 
 ### Graphify Snapshot Update (latest)
-- Re-ran `graphify update .` after queue-runner lease/concurrency guard updates.
-- Current graph totals: 4259 nodes, 77547 edges, 237 communities.
+- Re-ran `graphify update .` after queue pressure telemetry summary updates.
+- Current graph totals: 4302 nodes, 77829 edges, 244 communities.
 - God Nodes remain stable around execution/profile/job domain entities.
 
 ### Next Intended Discipline

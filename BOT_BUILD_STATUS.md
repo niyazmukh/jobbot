@@ -5,7 +5,7 @@
 - Overall status: `in_progress`
 - Implementation mode: `local-first, deterministic-first`
 - Primary spec: `FINAL_JOB_BOT_PRD.md`
-- Latest validation: `242 passed` (`.venv\\Scripts\\python -m pytest -q`)
+- Latest validation: `243 passed` (`.venv\\Scripts\\python -m pytest -q`)
 
 ## Completed
 - Created persistent roadmap and ADR structure.
@@ -281,6 +281,11 @@
   - Concurrent run invocations for one candidate now fail fast with `queue_runner_already_active`.
   - API run endpoint maps active-run lease conflict to `409` for explicit operator semantics.
   - Added API regressions for active-lease conflict and stale-lease recovery/reuse behavior.
+- Extended auto-apply summary telemetry with queue pressure and recent failure-window metrics:
+  - Added summary aging metrics: `oldest_queued_age_seconds`, `oldest_retry_scheduled_age_seconds`.
+  - Added one-hour completion pressure metrics: `recent_completed_count_1h`, `recent_failure_rate_1h`.
+  - Added CLI summary surfacing for new pressure metrics.
+  - Added API regressions for aging telemetry and one-hour failure-rate window behavior.
 - Added explicit stale-lease recovery for durable auto-apply queue workers:
   - Queue runs now reclaim stale RUNNING items (expired/missing lease) back to QUEUED before drain.
   - Reclamation is observable via `reclaimed_count` in auto-apply run responses.
@@ -336,10 +341,10 @@
 - None currently.
 
 ## Next Tasks
-1. Extend auto-apply summary telemetry with aging metrics (oldest queued age, oldest retry age, recent failure-rate window) for intervention prioritization.
-2. Add top failure-code one-click remediation templates for requeue, reauth, and selective retry to reduce manual triage overhead.
-3. Add queue-control dashboard surfacing/actions so pause/resume/cancel can be driven from operator HTML flows without CLI/API-only usage.
-4. Add queue-run conflict diagnostics (lease owner/age visibility) so `queue_runner_already_active` responses are actionable without DB inspection.
+1. Add top failure-code one-click remediation templates for requeue, reauth, and selective retry to reduce manual triage overhead.
+2. Add queue-control dashboard surfacing/actions so pause/resume/cancel can be driven from operator HTML flows without CLI/API-only usage.
+3. Add queue-run conflict diagnostics (lease owner/age visibility) so `queue_runner_already_active` responses are actionable without DB inspection.
+4. Add queue summary SLO thresholds/alerts (warning-critical cutoffs) to classify pressure metrics for faster operator response.
 
 ## Decisions
 - New implementation lives in `src/jobbot/` instead of modifying existing bot repos.

@@ -562,6 +562,10 @@ class AutoApplyQueueSummaryRead(BaseModel):
     retry_scheduled_count: int
     stale_running_count: int
     next_attempt_at: datetime | None = None
+    oldest_queued_age_seconds: int | None = None
+    oldest_retry_scheduled_age_seconds: int | None = None
+    recent_completed_count_1h: int = 0
+    recent_failure_rate_1h: float | None = None
 
 
 class AutoApplyQueueRequeueRead(BaseModel):

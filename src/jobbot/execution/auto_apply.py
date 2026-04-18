@@ -175,6 +175,11 @@ def get_auto_apply_queue_summary(
     retry_scheduled_count = 0
     stale_running_count = 0
     next_attempt_at: datetime | None = None
+    oldest_queued_at: datetime | None = None
+    oldest_retry_scheduled_at: datetime | None = None
+    recent_completed_count_1h = 0
+    recent_failed_count_1h = 0
+    one_hour_ago = now - timedelta(hours=1)
 
     for row in rows:
         if row.status == AutoApplyQueueStatus.QUEUED:
@@ -182,12 +187,16 @@ def get_auto_apply_queue_summary(
                 paused_count += 1
             else:
                 queued_count += 1
+                if oldest_queued_at is None or _to_utc_naive(row.created_at) < _to_utc_naive(oldest_queued_at):
+                    oldest_queued_at = row.created_at
             if (
                 row.last_error_code != _PAUSED_BY_OPERATOR
                 and row.next_attempt_at is not None
                 and _is_after_now(row.next_attempt_at, now)
             ):
                 retry_scheduled_count += 1
+                if oldest_retry_scheduled_at is None or _to_utc_naive(row.updated_at) < _to_utc_naive(oldest_retry_scheduled_at):
+                    oldest_retry_scheduled_at = row.updated_at
         elif row.status == AutoApplyQueueStatus.RUNNING:
             running_count += 1
             if row.lease_expires_at is None or not _is_after_now(row.lease_expires_at, now):
@@ -197,9 +206,22 @@ def get_auto_apply_queue_summary(
         elif row.status == AutoApplyQueueStatus.FAILED:
             failed_count += 1
 
+        if (
+            row.status in {AutoApplyQueueStatus.SUCCEEDED, AutoApplyQueueStatus.FAILED}
+            and row.finished_at is not None
+            and _to_utc_naive(row.finished_at) >= _to_utc_naive(one_hour_ago)
+        ):
+            recent_completed_count_1h += 1
+            if row.status == AutoApplyQueueStatus.FAILED:
+                recent_failed_count_1h += 1
+
         if row.next_attempt_at is not None:
             if next_attempt_at is None or row.next_attempt_at < next_attempt_at:
                 next_attempt_at = row.next_attempt_at
+
+    recent_failure_rate_1h = None
+    if recent_completed_count_1h > 0:
+        recent_failure_rate_1h = recent_failed_count_1h / float(recent_completed_count_1h)
 
     return AutoApplyQueueSummaryRead(
         candidate_profile_slug=candidate_profile_slug,
@@ -212,6 +234,10 @@ def get_auto_apply_queue_summary(
         retry_scheduled_count=retry_scheduled_count,
         stale_running_count=stale_running_count,
         next_attempt_at=next_attempt_at,
+        oldest_queued_age_seconds=_seconds_since(oldest_queued_at, now),
+        oldest_retry_scheduled_age_seconds=_seconds_since(oldest_retry_scheduled_at, now),
+        recent_completed_count_1h=recent_completed_count_1h,
+        recent_failure_rate_1h=recent_failure_rate_1h,
     )
 
 
@@ -723,3 +749,14 @@ def _to_utc_naive(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value
     return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _seconds_since(value: datetime | None, now: datetime) -> int | None:
+    """Return whole seconds elapsed since value, clamped at zero."""
+
+    if value is None:
+        return None
+    elapsed = (_to_utc_naive(now) - _to_utc_naive(value)).total_seconds()
+    if elapsed < 0:
+        return 0
+    return int(elapsed)

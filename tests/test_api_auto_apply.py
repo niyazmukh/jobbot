@@ -306,6 +306,98 @@ def test_auto_apply_queue_summary_api_reports_counts_and_stale_running(tmp_path)
     assert payload["retry_scheduled_count"] == 1
     assert payload["stale_running_count"] == 1
     assert payload["next_attempt_at"] is not None
+    assert payload["oldest_queued_age_seconds"] is not None
+    assert payload["oldest_queued_age_seconds"] >= 0
+    assert payload["oldest_retry_scheduled_age_seconds"] is not None
+    assert payload["oldest_retry_scheduled_age_seconds"] >= 0
+    assert payload["recent_completed_count_1h"] == 0
+    assert payload["recent_failure_rate_1h"] is None
+
+
+def test_auto_apply_queue_summary_api_reports_recent_failure_rate_window(tmp_path):
+    session = make_session()
+    job_id = _seed_ready_job(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    now = models.utcnow()
+    jobs = session.query(models.Job).order_by(models.Job.id.asc()).all()
+    other_jobs = [row for row in jobs if row.id != job_id]
+    second_job = other_jobs[0]
+    if len(other_jobs) > 1:
+        third_job = other_jobs[1]
+    else:
+        extra_job = models.Job(
+            canonical_url="https://jobs.example.com/telemetry-window-test",
+            title="Telemetry Window Test",
+            title_normalized="telemetry window test",
+            status="discovered",
+            discovered_at=now,
+            last_seen_at=now,
+        )
+        session.add(extra_job)
+        session.commit()
+        third_job = extra_job
+
+    session.add_all(
+        [
+            models.AutoApplyQueueItem(
+                candidate_profile_id=candidate.id,
+                job_id=job_id,
+                status="failed",
+                priority=120,
+                attempt_count=2,
+                max_attempts=3,
+                last_error_code="submit_gate_blocked",
+                last_error_message="submit_gate_blocked",
+                finished_at=now - timedelta(minutes=10),
+                created_at=now - timedelta(minutes=20),
+                updated_at=now - timedelta(minutes=10),
+            ),
+            models.AutoApplyQueueItem(
+                candidate_profile_id=candidate.id,
+                job_id=second_job.id,
+                status="succeeded",
+                priority=100,
+                attempt_count=1,
+                max_attempts=3,
+                finished_at=now - timedelta(minutes=25),
+                created_at=now - timedelta(minutes=30),
+                updated_at=now - timedelta(minutes=25),
+            ),
+            models.AutoApplyQueueItem(
+                candidate_profile_id=candidate.id,
+                job_id=third_job.id,
+                status="failed",
+                priority=90,
+                attempt_count=3,
+                max_attempts=3,
+                last_error_code="guarded_submit_probe_failed",
+                last_error_message="guarded_submit_probe_failed",
+                finished_at=now - timedelta(hours=3),
+                created_at=now - timedelta(hours=4),
+                updated_at=now - timedelta(hours=3),
+            ),
+        ]
+    )
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        summary_response = client.get("/api/auto-apply/alex-doe/summary")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert summary_response.status_code == 200
+    payload = summary_response.json()
+    assert payload["recent_completed_count_1h"] == 2
+    assert payload["recent_failure_rate_1h"] == 0.5
 
 
 def test_auto_apply_queue_api_requeue_failed_items(tmp_path):

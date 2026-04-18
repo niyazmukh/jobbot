@@ -548,6 +548,13 @@ def show_auto_apply_summary_cmd(
         f"stale_running={summary.stale_running_count} "
         f"next_attempt_at={summary.next_attempt_at or 'none'}"
     )
+    console.print(
+        "Queue pressure: "
+        f"oldest_queued_age_seconds={summary.oldest_queued_age_seconds if summary.oldest_queued_age_seconds is not None else 'none'} "
+        f"oldest_retry_scheduled_age_seconds={summary.oldest_retry_scheduled_age_seconds if summary.oldest_retry_scheduled_age_seconds is not None else 'none'} "
+        f"recent_completed_1h={summary.recent_completed_count_1h} "
+        f"recent_failure_rate_1h={summary.recent_failure_rate_1h if summary.recent_failure_rate_1h is not None else 'none'}"
+    )
 
 
 @app.command("run-auto-apply-queue")
