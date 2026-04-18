@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from html import escape
 from typing import Annotated
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlencode
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -225,6 +225,11 @@ def create_app() -> FastAPI:
         sort_by: str = "started_at",
         descending: bool = True,
         limit: Annotated[int, Query(ge=1, le=50)] = 10,
+        bulk_requested: Annotated[int | None, Query(ge=0)] = None,
+        bulk_remediated: Annotated[int | None, Query(ge=0)] = None,
+        bulk_failed: Annotated[int | None, Query(ge=0)] = None,
+        bulk_first_failure_attempt: Annotated[int | None, Query(ge=1)] = None,
+        bulk_first_failure_code: str | None = None,
     ) -> HTMLResponse:
         """Render a candidate-scoped execution dashboard."""
 
@@ -246,7 +251,16 @@ def create_app() -> FastAPI:
             if str(exc) == "invalid_execution_overview_sort":
                 raise HTTPException(status_code=400, detail="invalid_execution_overview_sort") from exc
             raise
-        return HTMLResponse(_render_execution_dashboard_page(detail))
+        return HTMLResponse(
+            _render_execution_dashboard_page(
+                detail,
+                bulk_requested=bulk_requested,
+                bulk_remediated=bulk_remediated,
+                bulk_failed=bulk_failed,
+                bulk_first_failure_attempt=bulk_first_failure_attempt,
+                bulk_first_failure_code=bulk_first_failure_code,
+            )
+        )
 
     @app.post(
         "/execution/dashboard/{candidate_profile_slug}/bulk-remediate-submit",
@@ -267,7 +281,7 @@ def create_app() -> FastAPI:
         """Run dashboard-scoped bulk submit remediation and return to dashboard."""
 
         try:
-            run_dashboard_bulk_submit_remediation(
+            remediation_batch = run_dashboard_bulk_submit_remediation(
                 db,
                 candidate_profile_slug=candidate_profile_slug,
                 manual_review_only=manual_review_only,
@@ -285,7 +299,15 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=400, detail="invalid_execution_overview_sort") from exc
             raise
         redirect_url = f"/execution/dashboard/{candidate_profile_slug}"
-        query_string = str(request.url.query).strip()
+        query_params = dict(parse_qsl(str(request.url.query), keep_blank_values=True))
+        query_params["bulk_requested"] = str(remediation_batch.requested_count)
+        query_params["bulk_remediated"] = str(remediation_batch.remediated_count)
+        query_params["bulk_failed"] = str(remediation_batch.failed_count)
+        if remediation_batch.failures:
+            first_failure = remediation_batch.failures[0]
+            query_params["bulk_first_failure_attempt"] = str(first_failure.source_attempt_id)
+            query_params["bulk_first_failure_code"] = first_failure.error_code
+        query_string = urlencode(query_params)
         if query_string:
             redirect_url = f"{redirect_url}?{query_string}"
         return RedirectResponse(url=redirect_url, status_code=303)
@@ -1791,7 +1813,15 @@ def _render_execution_overview_page(
 </html>"""
 
 
-def _render_execution_dashboard_page(detail: DraftExecutionDashboardRead) -> str:
+def _render_execution_dashboard_page(
+    detail: DraftExecutionDashboardRead,
+    *,
+    bulk_requested: int | None = None,
+    bulk_remediated: int | None = None,
+    bulk_failed: int | None = None,
+    bulk_first_failure_attempt: int | None = None,
+    bulk_first_failure_code: str | None = None,
+) -> str:
     """Render a candidate-scoped execution dashboard page."""
 
     metric_cards = "\n".join(
@@ -1872,6 +1902,32 @@ def _render_execution_dashboard_page(detail: DraftExecutionDashboardRead) -> str
     )
 
     actions_html = "\n".join(f"<li>{escape(action)}</li>" for action in detail.recommended_actions)
+    bulk_feedback_html = ""
+    if (
+        bulk_requested is not None
+        or bulk_remediated is not None
+        or bulk_failed is not None
+    ):
+        requested_value = bulk_requested if bulk_requested is not None else 0
+        remediated_value = bulk_remediated if bulk_remediated is not None else 0
+        failed_value = bulk_failed if bulk_failed is not None else 0
+        first_failure_line = ""
+        if bulk_first_failure_attempt is not None and bulk_first_failure_code:
+            first_failure_line = (
+                "<div>"
+                f"First failure: attempt #{bulk_first_failure_attempt} "
+                f"({escape(bulk_first_failure_code)})"
+                "</div>"
+            )
+        bulk_feedback_html = (
+            "<section class='panel'>"
+            "<h2>Bulk Remediation Result</h2>"
+            "<div>"
+            f"targeted={requested_value} | remediated={remediated_value} | failed={failed_value}"
+            "</div>"
+            f"{first_failure_line}"
+            "</section>"
+        )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -1926,6 +1982,7 @@ def _render_execution_dashboard_page(detail: DraftExecutionDashboardRead) -> str
         <div>Candidate: {escape(detail.candidate_profile_slug)}</div>
         <div><a href="/execution/overview/{escape(detail.candidate_profile_slug)}">Open execution overview</a></div>
       </section>
+      {bulk_feedback_html}
       <section class="panel">
         <h2>Bulk Remediation</h2>
         <form method="post" action="{base_bulk_route}">
