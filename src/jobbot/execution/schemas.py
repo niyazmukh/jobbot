@@ -433,6 +433,15 @@ class DraftSubmitRemediationActionRead(BaseModel):
     replay_route: str
 
 
+class DraftSubmitRemediationFailureRead(BaseModel):
+    """Read model for one failed submit-remediation replay in a bulk action."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_attempt_id: int
+    error_code: str
+
+
 class DraftSubmitRemediationBatchRead(BaseModel):
     """Read model for dashboard-scoped bulk submit-remediation actions."""
 
@@ -441,5 +450,7 @@ class DraftSubmitRemediationBatchRead(BaseModel):
     candidate_profile_slug: str
     requested_count: int
     remediated_count: int
+    failed_count: int
     targeted_attempt_ids: list[int]
     results: list[DraftSubmitRemediationActionRead]
+    failures: list[DraftSubmitRemediationFailureRead]

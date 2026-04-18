@@ -7,6 +7,7 @@ from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import sessionmaker
 
 from jobbot.api.app import app, get_db_session
+import jobbot.execution.service as execution_service
 from jobbot.db.base import Base
 from jobbot.db import models  # noqa: F401
 from jobbot.db.models import CandidateFact, CandidateProfile
@@ -2490,6 +2491,132 @@ def test_execution_dashboard_bulk_remediation_api_scopes_by_failure_code(tmp_pat
     assert len(payload["results"]) == 1
     assert payload["results"][0]["source_attempt_id"] == blocked_attempt_id
     assert "submit_gate" in payload["results"][0]["executed_steps"]
+
+
+def test_execution_dashboard_bulk_remediation_api_reports_partial_failures(tmp_path, monkeypatch):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={
+            "email": "alex@example.com",
+            "phone": "+1-555-0100",
+            "location": "Remote",
+            "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+        },
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    browser = models.BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    first_job.ats_vendor = "greenhouse"
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+
+        first_bootstrap = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe?browser_profile_key=apply-main"
+        )
+        first_attempt_id = first_bootstrap.json()["attempt_id"]
+        client.post(f"/api/execution/draft-attempts/{first_attempt_id}/start")
+        client.post(f"/api/execution/draft-attempts/{first_attempt_id}/field-plan")
+        client.post(f"/api/execution/draft-attempts/{first_attempt_id}/site-overlay")
+        client.post(f"/api/execution/draft-attempts/{first_attempt_id}/open-target")
+        client.post(f"/api/execution/draft-attempts/{first_attempt_id}/submit-gate")
+
+        second_bootstrap = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe?browser_profile_key=apply-main"
+        )
+        second_attempt_id = second_bootstrap.json()["attempt_id"]
+        client.post(f"/api/execution/draft-attempts/{second_attempt_id}/start")
+        client.post(f"/api/execution/draft-attempts/{second_attempt_id}/field-plan")
+        client.post(f"/api/execution/draft-attempts/{second_attempt_id}/site-overlay")
+        client.post(f"/api/execution/draft-attempts/{second_attempt_id}/open-target")
+        client.post(f"/api/execution/draft-attempts/{second_attempt_id}/submit-gate")
+
+        original_run = execution_service.run_submit_remediation_action
+
+        def flaky_remediation(service_session, *, attempt_id: int):
+            if attempt_id == first_attempt_id:
+                raise ValueError("draft_field_plan_not_created")
+            return original_run(service_session, attempt_id=attempt_id)
+
+        monkeypatch.setattr(
+            "jobbot.execution.service.run_submit_remediation_action",
+            flaky_remediation,
+        )
+
+        remediation_response = client.post(
+            "/api/execution/dashboard/alex-doe/bulk-remediate-submit"
+            "?failure_code=submit_gate_blocked&limit=10"
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert remediation_response.status_code == 200
+    payload = remediation_response.json()
+    assert payload["requested_count"] == 2
+    assert payload["remediated_count"] == 1
+    assert payload["failed_count"] == 1
+    assert len(payload["results"]) == 1
+    assert payload["results"][0]["source_attempt_id"] == second_attempt_id
+    assert len(payload["failures"]) == 1
+    assert payload["failures"][0]["source_attempt_id"] == first_attempt_id
+    assert payload["failures"][0]["error_code"] == "draft_field_plan_not_created"
 
 
 def test_execution_overview_and_dashboard_api_support_manual_review_only_filter(tmp_path):

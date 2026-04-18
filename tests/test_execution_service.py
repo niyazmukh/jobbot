@@ -1355,6 +1355,77 @@ def test_run_dashboard_bulk_submit_remediation_scopes_by_failure_code(tmp_path: 
     assert "submit_gate" in bulk.results[0].executed_steps
 
 
+def test_run_dashboard_bulk_submit_remediation_continues_on_attempt_failures(
+    tmp_path: Path, monkeypatch
+):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "greenhouse"
+    browser = BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+
+    def create_blocked_attempt() -> int:
+        blocked = bootstrap_draft_application_attempt(
+            session,
+            job_id=job_id,
+            candidate_profile_slug="alex-doe",
+            browser_profile_key="apply-main",
+        )
+        start_draft_execution_attempt(session, attempt_id=blocked.attempt_id)
+        build_draft_field_plan(session, attempt_id=blocked.attempt_id)
+        build_site_field_overlay(session, attempt_id=blocked.attempt_id)
+        open_site_target_page(session, attempt_id=blocked.attempt_id)
+        evaluate_submit_gate(session, attempt_id=blocked.attempt_id)
+        return blocked.attempt_id
+
+    failing_attempt_id = create_blocked_attempt()
+    successful_attempt_id = create_blocked_attempt()
+    original_run = run_submit_remediation_action
+
+    def flaky_remediation(service_session, *, attempt_id: int):
+        if attempt_id == failing_attempt_id:
+            raise ValueError("draft_field_plan_not_created")
+        return original_run(service_session, attempt_id=attempt_id)
+
+    monkeypatch.setattr(
+        "jobbot.execution.service.run_submit_remediation_action",
+        flaky_remediation,
+    )
+
+    bulk = run_dashboard_bulk_submit_remediation(
+        session,
+        candidate_profile_slug="alex-doe",
+        failure_code="submit_gate_blocked",
+        limit=10,
+    )
+
+    assert bulk.requested_count == 2
+    assert bulk.remediated_count == 1
+    assert bulk.failed_count == 1
+    assert set(bulk.targeted_attempt_ids) == {failing_attempt_id, successful_attempt_id}
+    assert len(bulk.results) == 1
+    assert bulk.results[0].source_attempt_id == successful_attempt_id
+    assert len(bulk.failures) == 1
+    assert bulk.failures[0].source_attempt_id == failing_attempt_id
+    assert bulk.failures[0].error_code == "draft_field_plan_not_created"
+
+
 def test_execute_guarded_submit_is_idempotent_after_first_success(tmp_path: Path):
     session = make_session()
     job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)

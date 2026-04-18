@@ -39,6 +39,7 @@ from jobbot.execution.schemas import (
     DraftGuardedSubmitRead,
     DraftSubmitRemediationBatchRead,
     DraftSubmitRemediationActionRead,
+    DraftSubmitRemediationFailureRead,
     DraftExecutionOverviewRead,
     DraftExecutionReplayAssetRead,
     DraftExecutionReplayBundleRead,
@@ -2321,16 +2322,27 @@ def run_dashboard_bulk_submit_remediation(
         limit=limit,
     )
     targeted_attempt_ids = [row.attempt_id for row in rows]
-    results = [
-        run_submit_remediation_action(session, attempt_id=attempt_id)
-        for attempt_id in targeted_attempt_ids
-    ]
+    results: list[DraftSubmitRemediationActionRead] = []
+    failures: list[DraftSubmitRemediationFailureRead] = []
+    for attempt_id in targeted_attempt_ids:
+        try:
+            results.append(run_submit_remediation_action(session, attempt_id=attempt_id))
+        except ValueError as exc:
+            error_code = (str(exc) or "submit_remediation_failed").strip()
+            failures.append(
+                DraftSubmitRemediationFailureRead(
+                    source_attempt_id=attempt_id,
+                    error_code=(error_code or "submit_remediation_failed"),
+                )
+            )
     return DraftSubmitRemediationBatchRead(
         candidate_profile_slug=candidate_profile_slug,
         requested_count=len(targeted_attempt_ids),
         remediated_count=len(results),
+        failed_count=len(failures),
         targeted_attempt_ids=targeted_attempt_ids,
         results=results,
+        failures=failures,
     )
 
 
