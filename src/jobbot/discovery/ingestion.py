@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
@@ -64,14 +65,7 @@ def ingest_canonical_job(session: Session, item: CanonicalJob) -> str:
         return "duplicate"
 
     if item.external_job_id:
-        job = session.scalar(
-            select(Job).where(
-                and_(
-                    Job.source == item.source.value,
-                    Job.external_job_id == item.external_job_id,
-                )
-            )
-        )
+        job = _find_by_ats_external_id(session, item)
         if job is not None:
             _attach_source(session, job.id, item)
             _refresh_job_fields(job, item, company.id, canonical_url, application_url)
@@ -79,6 +73,19 @@ def ingest_canonical_job(session: Session, item: CanonicalJob) -> str:
 
     fingerprint = _fingerprint_values(item.company_name, item.title, item.location_normalized)
     job = _find_by_fingerprint(session, *fingerprint)
+    if job is not None:
+        _attach_source(session, job.id, item)
+        _refresh_job_fields(job, item, company.id, canonical_url, application_url)
+        return "source_attached"
+
+    # Layer 4: deterministic fuzzy candidate generation with conservative confirmation.
+    job = _find_by_fuzzy_similarity(
+        session,
+        item=item,
+        normalized_company_name=fingerprint[0],
+        normalized_title=fingerprint[1],
+        normalized_location=fingerprint[2],
+    )
     if job is not None:
         _attach_source(session, job.id, item)
         _refresh_job_fields(job, item, company.id, canonical_url, application_url)
@@ -162,6 +169,90 @@ def _find_by_fingerprint(
     return session.scalar(query)
 
 
+def _find_by_ats_external_id(session: Session, item: CanonicalJob) -> Job | None:
+    """Return an existing job by ATS external id using conservative matching."""
+
+    external_id = str(item.external_job_id or "").strip()
+    if not external_id:
+        return None
+
+    normalized_vendor = str(item.ats_vendor or "").strip().lower()
+    conditions = [Job.external_job_id == external_id]
+
+    if normalized_vendor:
+        conditions.append(
+            or_(
+                Job.ats_vendor == normalized_vendor,
+                Job.source == item.source.value,
+            )
+        )
+    else:
+        conditions.append(Job.source == item.source.value)
+
+    return session.scalar(select(Job).where(and_(*conditions)))
+
+
+def _find_by_fuzzy_similarity(
+    session: Session,
+    *,
+    item: CanonicalJob,
+    normalized_company_name: str,
+    normalized_title: str,
+    normalized_location: str | None,
+) -> Job | None:
+    """Find one likely duplicate via deterministic fuzzy similarity.
+
+    Confirmation policy is conservative to minimize false merges:
+    - weighted title/company/location similarity >= threshold
+    - plus metadata overlap OR exact location match
+    """
+
+    normalized_vendor = str(item.ats_vendor or "").strip().lower()
+    vendor_scope_filters = [Job.source == item.source.value]
+    if normalized_vendor:
+        vendor_scope_filters.append(Job.ats_vendor == normalized_vendor)
+
+    rows = session.execute(
+        select(Job, Company)
+        .join(Company, Job.company_id == Company.id)
+        .where(
+            or_(
+                Company.name == normalized_company_name,
+                Job.title_normalized == normalized_title,
+                *vendor_scope_filters,
+            )
+        )
+    ).all()
+
+    incoming_metadata_tokens = _metadata_tokens(item.metadata)
+    incoming_company_tokens = _tokenize(normalized_company_name)
+    incoming_title_tokens = _tokenize(normalized_title)
+    incoming_location = normalize_location(normalized_location)
+
+    best: tuple[float, Job] | None = None
+    for job, company in rows:
+        company_score = _jaccard(incoming_company_tokens, _tokenize(company.name))
+        title_score = _jaccard(incoming_title_tokens, _tokenize(job.title_normalized))
+        existing_location = normalize_location(job.location_normalized)
+        location_score = 1.0 if incoming_location and incoming_location == existing_location else 0.0
+
+        weighted_similarity = (title_score * 0.55) + (company_score * 0.35) + (location_score * 0.10)
+
+        metadata_overlap = _job_has_metadata_overlap(
+            session,
+            job_id=job.id,
+            incoming_tokens=incoming_metadata_tokens,
+        )
+        confirmed = metadata_overlap or location_score == 1.0
+        if weighted_similarity < 0.75 or not confirmed:
+            continue
+
+        if best is None or weighted_similarity > best[0]:
+            best = (weighted_similarity, job)
+
+    return best[1] if best is not None else None
+
+
 def _attach_source(session: Session, job_id: int, item: CanonicalJob) -> None:
     source_url = canonicalize_job_url(str(item.canonical_url))
     source_row = session.scalar(
@@ -225,3 +316,58 @@ def _prefer_text(existing: str | None, new_value: str | None) -> str | None:
     if not candidate:
         return existing
     return candidate
+
+
+def _tokenize(value: str | None) -> set[str]:
+    """Tokenize normalized strings for deterministic similarity scoring."""
+
+    if not value:
+        return set()
+    return set(re.findall(r"[a-z0-9]+", value.lower()))
+
+
+def _jaccard(left: set[str], right: set[str]) -> float:
+    """Compute Jaccard similarity with deterministic empty-set handling."""
+
+    if not left or not right:
+        return 0.0
+    union = left | right
+    if not union:
+        return 0.0
+    return len(left & right) / len(union)
+
+
+def _metadata_tokens(metadata: dict) -> set[str]:
+    """Flatten metadata into token set for deterministic overlap checks."""
+
+    tokens: set[str] = set()
+
+    def _walk(value: object) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                tokens.update(_tokenize(str(key)))
+                _walk(nested)
+            return
+        if isinstance(value, list):
+            for nested in value:
+                _walk(nested)
+            return
+        if value is None:
+            return
+        tokens.update(_tokenize(str(value)))
+
+    _walk(metadata)
+    return tokens
+
+
+def _job_has_metadata_overlap(session: Session, *, job_id: int, incoming_tokens: set[str]) -> bool:
+    """Return whether incoming metadata overlaps persisted source metadata."""
+
+    if not incoming_tokens:
+        return False
+    source_rows = session.scalars(select(JobSource).where(JobSource.job_id == job_id)).all()
+    for source_row in source_rows:
+        existing_tokens = _metadata_tokens(source_row.metadata_json or {})
+        if existing_tokens & incoming_tokens:
+            return True
+    return False

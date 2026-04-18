@@ -5,7 +5,7 @@
 - Overall status: `in_progress`
 - Implementation mode: `local-first, deterministic-first`
 - Primary spec: `FINAL_JOB_BOT_PRD.md`
-- Latest validation: `215 passed` (`.venv\\Scripts\\python -m pytest -q`)
+- Latest validation: `218 passed` (`.venv\\Scripts\\python -m pytest -q`)
 
 ## Completed
 - Created persistent roadmap and ADR structure.
@@ -209,6 +209,11 @@
   - Added replay-compatibility helpers (`is_prompt_replay_compatible`, `assert_prompt_replay_compatible`) for old-vs-new prompt checks.
   - Wired model-call budget guardrail writes to resolve prompt version IDs from registry defaults.
   - Added prompt-registry and compatibility tests plus guardrail prompt-version wiring coverage.
+- Implemented PRD §21.6 dedup layers 2-4 in discovery ingestion:
+  - Layer 2: ATS external-id scoped matching (`external_job_id` + vendor/source scope).
+  - Layer 3: normalized company/title/location tuple matching (existing deterministic fingerprint path).
+  - Layer 4: deterministic fuzzy candidate matching (token similarity over title/company with conservative confirmation via metadata overlap or exact location).
+  - Added ingestion regressions for ATS external-id attachment, fuzzy positive attachment, and fuzzy false-positive protection.
 - Extended model-call dashboard telemetry with blocked-call visibility:
   - `blocked_non_essential_call_count`
   - `blocked_non_essential_stage_counts`
@@ -225,6 +230,7 @@
 - Brought the scoped JobBot test suite to green in `.venv` with `208 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `210 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `215 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `218 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.

@@ -119,3 +119,71 @@ def test_ingest_discovery_batch_preserves_existing_richer_values():
     assert refreshed.title_normalized == "senior backend engineer ii"
     assert refreshed.salary_text == "$180k-$220k"
     assert refreshed.seniority == "senior"
+
+
+def test_ingest_discovery_batch_attaches_source_by_ats_external_id_vendor_scope():
+    session = make_session()
+    batch = load_greenhouse_batch()
+    ingest_discovery_batch(session, batch)
+
+    existing_job = session.scalar(select(Job).where(Job.external_job_id == "12345"))
+    assert existing_job is not None
+
+    mutated = load_greenhouse_batch()
+    mutated.jobs = [mutated.jobs[0]]
+    mutated.jobs[0].canonical_url = "https://boards.greenhouse.io/example/jobs/999999"
+    mutated.jobs[0].title = "Senior Backend Engineer Platform"
+    mutated.jobs[0].source_type = "ats_board_mirror"
+    mutated.jobs[0].ats_vendor = "greenhouse"
+
+    counters = ingest_discovery_batch(session, mutated)
+
+    assert counters.inserted == 0
+    assert counters.source_attached == 1
+    assert session.query(Job).count() == 2
+    assert session.query(JobSource).count() == 3
+
+
+def test_ingest_discovery_batch_attaches_source_by_fuzzy_similarity_layer4():
+    session = make_session()
+    batch = load_greenhouse_batch()
+    ingest_discovery_batch(session, batch)
+
+    fuzzy = load_greenhouse_batch()
+    fuzzy.jobs = [fuzzy.jobs[0]]
+    fuzzy.jobs[0].external_job_id = None
+    fuzzy.jobs[0].canonical_url = "https://jobs.example.com/roles/backend-engineer-senior"
+    fuzzy.jobs[0].company_name = "Example Corp Platform"
+    fuzzy.jobs[0].title = "Backend Engineer Senior"
+    fuzzy.jobs[0].location_normalized = "remote"
+    fuzzy.jobs[0].metadata["department"] = "Engineering"
+
+    counters = ingest_discovery_batch(session, fuzzy)
+
+    assert counters.inserted == 0
+    assert counters.source_attached == 1
+    assert session.query(Job).count() == 2
+    assert session.query(JobSource).count() == 3
+
+
+def test_ingest_discovery_batch_fuzzy_layer_does_not_merge_low_similarity_jobs():
+    session = make_session()
+    batch = load_greenhouse_batch()
+    ingest_discovery_batch(session, batch)
+
+    unrelated = load_greenhouse_batch()
+    unrelated.jobs = [unrelated.jobs[0]]
+    unrelated.jobs[0].external_job_id = None
+    unrelated.jobs[0].canonical_url = "https://jobs.example.com/roles/marketing-manager"
+    unrelated.jobs[0].company_name = "Totally Different Co"
+    unrelated.jobs[0].title = "Marketing Operations Manager"
+    unrelated.jobs[0].location_raw = "Berlin"
+    unrelated.jobs[0].location_normalized = "berlin"
+    unrelated.jobs[0].metadata = {"department": "Marketing"}
+
+    counters = ingest_discovery_batch(session, unrelated)
+
+    assert counters.inserted == 1
+    assert counters.source_attached == 0
+    assert session.query(Job).count() == 3
+    assert session.query(JobSource).count() == 3
