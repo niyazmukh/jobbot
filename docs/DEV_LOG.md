@@ -31,10 +31,11 @@
 - `ee03698`: Replay-capable job materialization endpoints for enrichment/scoring with prompt guardrails.
 - `33759f3`: CLI replay parity for `enrich-job` and `score-job` with prompt-version pass-through.
 - `ad9a239`: CLI prompt-governance commands for registry listing and replay compatibility checks.
-- `in-progress`: durable auto-apply queue orchestration + automation-safe draft bootstrap reuse.
+- `f41c181`: durable auto-apply queue orchestration + automation-safe draft bootstrap reuse.
+- `in-progress`: strict unattended auto-apply success policy (reject simulated submit fallback outcomes).
 
 ### Validation Baseline
-- Full suite green at latest checkpoint: `232 passed`.
+- Full suite green at latest checkpoint: `233 passed`.
 
 ### Graphify Snapshot Update (latest)
 - Re-ran `graphify update .` after prompt API/schema changes.

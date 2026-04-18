@@ -5,7 +5,7 @@
 - Overall status: `in_progress`
 - Implementation mode: `local-first, deterministic-first`
 - Primary spec: `FINAL_JOB_BOT_PRD.md`
-- Latest validation: `232 passed` (`.venv\\Scripts\\python -m pytest -q`)
+- Latest validation: `233 passed` (`.venv\\Scripts\\python -m pytest -q`)
 
 ## Completed
 - Created persistent roadmap and ADR structure.
@@ -253,6 +253,11 @@
   - `bootstrap_draft_application_attempt(..., reuse_existing_active_attempt=True)` reuses active draft attempts.
   - Auto-apply queue runner uses reuse mode to avoid duplicate draft attempt fanout.
   - Existing manual/operator bootstrap semantics remain unchanged.
+- Hardened unattended auto-apply success criteria to reject simulated submit fallback outcomes:
+  - Queue runner now validates execution attempt diagnostics and treats
+    `submit_interaction_mode=simulated_probe_fallback` as a failure path.
+  - New failure code: `guarded_submit_simulation_not_allowed_in_auto_apply`.
+  - Added API regression to ensure simulated fallback cannot be counted as a successful auto-apply.
 - Extended model-call dashboard telemetry with blocked-call visibility:
   - `blocked_non_essential_call_count`
   - `blocked_non_essential_stage_counts`
@@ -277,6 +282,7 @@
 - Brought the scoped JobBot test suite to green in `.venv` with `228 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `230 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `232 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `233 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.

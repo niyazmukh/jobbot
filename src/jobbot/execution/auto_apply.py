@@ -17,6 +17,7 @@ from jobbot.execution.service import (
     build_site_field_overlay,
     evaluate_submit_gate,
     execute_guarded_submit,
+    get_execution_attempt_detail,
     open_site_target_page,
     start_draft_execution_attempt,
 )
@@ -224,6 +225,9 @@ def run_auto_apply_queue(
             if not gate.allow_submit:
                 raise ValueError("submit_gate_blocked")
             submitted = execute_guarded_submit(session, attempt_id=attempt.attempt_id)
+            attempt_detail = get_execution_attempt_detail(session, attempt_id=submitted.attempt_id)
+            if attempt_detail.submit_interaction_mode == "simulated_probe_fallback":
+                raise ValueError("guarded_submit_simulation_not_allowed_in_auto_apply")
 
             completed_at = utcnow()
             item.status = AutoApplyQueueStatus.SUCCEEDED
@@ -284,6 +288,7 @@ def _is_retryable_error(error_code: str) -> bool:
         "draft_execution_not_started",
         "guarded_submit_interaction_failed",
         "guarded_submit_probe_failed",
+        "guarded_submit_simulation_not_allowed_in_auto_apply",
         "draft_target_not_opened",
     }
 
