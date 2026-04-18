@@ -6,7 +6,7 @@ from html import escape
 from typing import Annotated
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
@@ -254,6 +254,7 @@ def create_app() -> FastAPI:
     )
     def execution_dashboard_bulk_remediation_page(
         candidate_profile_slug: str,
+        request: Request,
         db: DbSession,
         manual_review_only: bool = False,
         failure_code: str | None = None,
@@ -283,7 +284,11 @@ def create_app() -> FastAPI:
             if str(exc) == "invalid_execution_overview_sort":
                 raise HTTPException(status_code=400, detail="invalid_execution_overview_sort") from exc
             raise
-        return RedirectResponse(url=f"/execution/dashboard/{candidate_profile_slug}", status_code=303)
+        redirect_url = f"/execution/dashboard/{candidate_profile_slug}"
+        query_string = str(request.url.query).strip()
+        if query_string:
+            redirect_url = f"{redirect_url}?{query_string}"
+        return RedirectResponse(url=redirect_url, status_code=303)
 
     @app.get("/execution/attempts/{attempt_id}", response_class=HTMLResponse)
     def execution_attempt_detail_page(

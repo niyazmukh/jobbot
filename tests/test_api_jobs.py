@@ -3653,3 +3653,40 @@ def test_execution_dashboard_api_and_html_surface_summary_and_links(tmp_path):
         "/execution/dashboard/alex-doe/bulk-remediate-submit?failure_classification=unknown_classification"
         in html_response.text
     )
+
+
+def test_execution_dashboard_bulk_remediation_html_redirect_preserves_filters():
+    session = make_session()
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={"email": "alex@example.com"},
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/execution/dashboard/alex-doe/bulk-remediate-submit"
+            "?failure_code=submit_gate_blocked&manual_review_only=true&limit=7",
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 303
+    assert (
+        response.headers["location"]
+        == "/execution/dashboard/alex-doe?failure_code=submit_gate_blocked&manual_review_only=true&limit=7"
+    )
