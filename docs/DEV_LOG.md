@@ -27,10 +27,11 @@
 - `2cb92c0`: Scoring model-pass telemetry with prompt-version checks.
 - `64106ef`: Enrichment model-pass telemetry with prompt-version checks.
 - `0ce9be3`: Added rolling dev log with graphify + checkpoint discipline.
-- `in-progress`: Prompt registry/replay compatibility API surfaces (`/api/model-calls/prompts`, `/api/model-calls/replay-compatibility`).
+- `bfe7449`: Prompt registry/replay compatibility API surfaces (`/api/model-calls/prompts`, `/api/model-calls/replay-compatibility`).
+- `in-progress`: Replay-capable job materialization endpoints for enrichment/scoring with prompt guardrails.
 
 ### Validation Baseline
-- Full suite green at latest checkpoint: `224 passed`.
+- Full suite green at latest checkpoint: `226 passed`.
 
 ### Graphify Snapshot Update (latest)
 - Re-ran `graphify update .` after prompt API/schema changes.

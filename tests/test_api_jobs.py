@@ -195,6 +195,96 @@ def test_job_score_endpoint_returns_persisted_score():
     assert payload["score_json"]["blocked"] is False
 
 
+def test_job_score_materialize_endpoint_supports_replay_prompt_guardrails():
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add(
+        CandidateFact(
+            candidate_profile_id=candidate.id,
+            fact_key="skills-001",
+            category="skills",
+            content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+        )
+    )
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        ok = client.post(f"/api/jobs/{first_job.id}/scores/alex-doe")
+        incompatible = client.post(
+            f"/api/jobs/{first_job.id}/scores/alex-doe?replay_prompt_version=score_v2"
+        )
+        invalid = client.post(
+            f"/api/jobs/{first_job.id}/scores/alex-doe?replay_prompt_version=bad-version"
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert ok.status_code == 200
+    assert ok.json()["score_json"]["scoring_method"] == "deterministic_rules_v1"
+    assert incompatible.status_code == 409
+    assert incompatible.json()["detail"] == "prompt_replay_incompatible"
+    assert invalid.status_code == 400
+    assert invalid.json()["detail"] == "invalid_prompt_version_id"
+
+
+def test_job_enrich_materialize_endpoint_supports_replay_prompt_guardrails():
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.description_text = "Requires Python and SQL."
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        ok = client.post(f"/api/jobs/{first_job.id}/enrich")
+        incompatible = client.post(
+            f"/api/jobs/{first_job.id}/enrich?replay_prompt_version=enrich_v2"
+        )
+        invalid = client.post(
+            f"/api/jobs/{first_job.id}/enrich?replay_prompt_version=bad-version"
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert ok.status_code == 200
+    assert ok.json()["job_id"] == first_job.id
+    assert ok.json()["status"] == "enriched"
+    assert incompatible.status_code == 409
+    assert incompatible.json()["detail"] == "prompt_replay_incompatible"
+    assert invalid.status_code == 400
+    assert invalid.json()["detail"] == "invalid_prompt_version_id"
+
+
 def test_job_list_and_detail_endpoints_can_include_score_summary():
     session = make_session()
     ingest_discovery_batch(session, load_greenhouse_batch())

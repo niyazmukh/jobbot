@@ -5,7 +5,7 @@
 - Overall status: `in_progress`
 - Implementation mode: `local-first, deterministic-first`
 - Primary spec: `FINAL_JOB_BOT_PRD.md`
-- Latest validation: `224 passed` (`.venv\\Scripts\\python -m pytest -q`)
+- Latest validation: `226 passed` (`.venv\\Scripts\\python -m pytest -q`)
 
 ## Completed
 - Created persistent roadmap and ADR structure.
@@ -226,6 +226,10 @@
   - API: `GET /api/model-calls/prompts` returns stable registry key/version/description entries.
   - API: `GET /api/model-calls/replay-compatibility` evaluates old-vs-new prompt version compatibility.
   - Added API regressions for prompt registry output and compatibility validation guardrails.
+- Added replay-capable scoring/enrichment materialization APIs that enforce prompt-version guardrails:
+  - API: `POST /api/jobs/{job_id}/enrich` with optional `replay_prompt_version`.
+  - API: `POST /api/jobs/{job_id}/scores/{candidate_profile_slug}` with optional `replay_prompt_version`.
+  - Added API regressions covering success path + incompatible replay (`409`) + invalid prompt version (`400`).
 - Extended model-call dashboard telemetry with blocked-call visibility:
   - `blocked_non_essential_call_count`
   - `blocked_non_essential_stage_counts`
@@ -246,6 +250,7 @@
 - Brought the scoped JobBot test suite to green in `.venv` with `220 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `222 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `224 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `226 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.

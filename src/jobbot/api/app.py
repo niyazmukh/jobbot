@@ -79,6 +79,7 @@ from jobbot.discovery.inbox import (
     list_inbox_jobs,
     list_ready_to_apply_jobs,
 )
+from jobbot.enrichment import enrich_job
 from jobbot.models.enums import ReviewStatus
 from jobbot.model_calls import (
     ModelCostDashboardRead,
@@ -91,7 +92,7 @@ from jobbot.preparation import PreparedJobRead, get_prepared_job_read
 from jobbot.review.schemas import ReviewQueueRead
 from jobbot.review.service import list_review_queue, queue_score_review, set_review_status
 from jobbot.scoring.schemas import JobScoreRead
-from jobbot.scoring.service import get_job_score_for_candidate
+from jobbot.scoring.service import get_job_score_for_candidate, score_job_for_candidate
 
 
 def get_db_session():
@@ -931,6 +932,71 @@ def create_app() -> FastAPI:
         if score is None:
             raise HTTPException(status_code=404, detail="job_score_not_found")
         return score
+
+    @app.post("/api/jobs/{job_id}/enrich")
+    def enrich_job_endpoint(
+        job_id: int,
+        db: DbSession,
+        replay_prompt_version: str | None = None,
+    ) -> dict[str, object]:
+        """Materialize deterministic enrichment (with optional replay prompt version check)."""
+
+        try:
+            row = enrich_job(
+                db,
+                job_id,
+                replay_prompt_version=replay_prompt_version,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail.startswith("Unknown job id:"):
+                raise HTTPException(status_code=404, detail="job_not_found") from exc
+            if detail == "prompt_replay_incompatible":
+                raise HTTPException(status_code=409, detail="prompt_replay_incompatible") from exc
+            if detail == "invalid_prompt_version_id":
+                raise HTTPException(status_code=400, detail="invalid_prompt_version_id") from exc
+            raise
+
+        return {
+            "job_id": row.id,
+            "status": row.status,
+            "requirements_structured": row.requirements_structured or {},
+        }
+
+    @app.post("/api/jobs/{job_id}/scores/{candidate_profile_slug}", response_model=JobScoreRead)
+    def score_job_endpoint(
+        job_id: int,
+        candidate_profile_slug: str,
+        db: DbSession,
+        replay_prompt_version: str | None = None,
+    ) -> JobScoreRead:
+        """Materialize deterministic score (with optional replay prompt version check)."""
+
+        try:
+            row = score_job_for_candidate(
+                db,
+                job_id,
+                candidate_profile_slug,
+                replay_prompt_version=replay_prompt_version,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail.startswith("Unknown job id:"):
+                raise HTTPException(status_code=404, detail="job_not_found") from exc
+            if detail.startswith("Unknown candidate profile slug:"):
+                raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
+            if detail == "prompt_replay_incompatible":
+                raise HTTPException(status_code=409, detail="prompt_replay_incompatible") from exc
+            if detail == "invalid_prompt_version_id":
+                raise HTTPException(status_code=400, detail="invalid_prompt_version_id") from exc
+            raise
+
+        return JobScoreRead(
+            job_id=row.job_id,
+            candidate_profile_slug=candidate_profile_slug,
+            overall_score=row.overall_score,
+            score_json=row.score_json,
+        )
 
     @app.get("/api/jobs/{job_id}/prepared/{candidate_profile_slug}", response_model=PreparedJobRead)
     def get_prepared_job(job_id: int, candidate_profile_slug: str, db: DbSession) -> PreparedJobRead:
