@@ -2346,6 +2346,74 @@ def run_dashboard_bulk_submit_remediation(
     )
 
 
+def record_execution_dashboard_bulk_history(
+    session: Session,
+    *,
+    candidate_profile_slug: str,
+    remediation_batch: DraftSubmitRemediationBatchRead,
+    manual_review_only: bool = False,
+    failure_code: str | None = None,
+    failure_classification: str | None = None,
+    max_submit_confidence: float | None = None,
+    sort_by: str = "started_at",
+    descending: bool = True,
+    limit: int = 25,
+    history_limit: int = 10,
+) -> None:
+    """Persist one dashboard bulk-remediation summary for candidate-level operator history."""
+
+    candidate = session.scalar(
+        select(CandidateProfile).where(CandidateProfile.slug == candidate_profile_slug)
+    )
+    if candidate is None:
+        raise ValueError("candidate_profile_not_found")
+
+    source_profile_data = dict(candidate.source_profile_data or {})
+    history = list(source_profile_data.get("execution_dashboard_bulk_history") or [])
+    first_failure = remediation_batch.failures[0] if remediation_batch.failures else None
+    history.insert(
+        0,
+        {
+            "created_at": utcnow().isoformat(),
+            "requested_count": remediation_batch.requested_count,
+            "remediated_count": remediation_batch.remediated_count,
+            "failed_count": remediation_batch.failed_count,
+            "failure_code": failure_code,
+            "failure_classification": failure_classification,
+            "manual_review_only": bool(manual_review_only),
+            "max_submit_confidence": max_submit_confidence,
+            "sort_by": sort_by,
+            "descending": bool(descending),
+            "limit": limit,
+            "first_failure_attempt_id": (
+                first_failure.source_attempt_id if first_failure is not None else None
+            ),
+            "first_failure_code": (first_failure.error_code if first_failure is not None else None),
+        },
+    )
+    source_profile_data["execution_dashboard_bulk_history"] = history[:history_limit]
+    candidate.source_profile_data = source_profile_data
+    candidate.updated_at = utcnow()
+    session.commit()
+
+
+def list_execution_dashboard_bulk_history(
+    session: Session,
+    *,
+    candidate_profile_slug: str,
+    limit: int = 5,
+) -> list[dict]:
+    """Return persisted candidate-scoped dashboard bulk-remediation history entries."""
+
+    candidate = session.scalar(
+        select(CandidateProfile).where(CandidateProfile.slug == candidate_profile_slug)
+    )
+    if candidate is None:
+        raise ValueError("candidate_profile_not_found")
+    history = list((candidate.source_profile_data or {}).get("execution_dashboard_bulk_history") or [])
+    return history[:limit]
+
+
 def _carry_forward_resolved_field_state(
     *,
     session: Session,

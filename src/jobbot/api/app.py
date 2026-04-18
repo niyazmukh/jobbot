@@ -44,9 +44,11 @@ from jobbot.execution import (
     get_execution_attempt_detail,
     get_execution_replay_asset_file,
     get_execution_replay_bundle,
+    list_execution_dashboard_bulk_history,
     list_execution_overview,
     list_draft_application_attempts,
     open_site_target_page,
+    record_execution_dashboard_bulk_history,
     run_dashboard_bulk_submit_remediation,
     run_submit_remediation_action,
     start_draft_execution_attempt,
@@ -245,6 +247,11 @@ def create_app() -> FastAPI:
                 descending=descending,
                 limit=limit,
             )
+            history = list_execution_dashboard_bulk_history(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                limit=5,
+            )
         except ValueError as exc:
             if str(exc) == "candidate_profile_not_found":
                 raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
@@ -259,6 +266,7 @@ def create_app() -> FastAPI:
                 bulk_failed=bulk_failed,
                 bulk_first_failure_attempt=bulk_first_failure_attempt,
                 bulk_first_failure_code=bulk_first_failure_code,
+                bulk_history=history,
             )
         )
 
@@ -284,6 +292,18 @@ def create_app() -> FastAPI:
             remediation_batch = run_dashboard_bulk_submit_remediation(
                 db,
                 candidate_profile_slug=candidate_profile_slug,
+                manual_review_only=manual_review_only,
+                failure_code=failure_code,
+                failure_classification=failure_classification,
+                max_submit_confidence=max_submit_confidence,
+                sort_by=sort_by,
+                descending=descending,
+                limit=limit,
+            )
+            record_execution_dashboard_bulk_history(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                remediation_batch=remediation_batch,
                 manual_review_only=manual_review_only,
                 failure_code=failure_code,
                 failure_classification=failure_classification,
@@ -1821,6 +1841,7 @@ def _render_execution_dashboard_page(
     bulk_failed: int | None = None,
     bulk_first_failure_attempt: int | None = None,
     bulk_first_failure_code: str | None = None,
+    bulk_history: list[dict] | None = None,
 ) -> str:
     """Render a candidate-scoped execution dashboard page."""
 
@@ -1928,6 +1949,31 @@ def _render_execution_dashboard_page(
             f"{first_failure_line}"
             "</section>"
         )
+    history_rows = list(bulk_history or [])
+    bulk_history_html = ""
+    if history_rows:
+        history_items = []
+        for row in history_rows:
+            summary = (
+                f"targeted={int(row.get('requested_count', 0))} | "
+                f"remediated={int(row.get('remediated_count', 0))} | "
+                f"failed={int(row.get('failed_count', 0))}"
+            )
+            scopes: list[str] = []
+            if row.get("failure_code"):
+                scopes.append(f"failure_code={row['failure_code']}")
+            if row.get("failure_classification"):
+                scopes.append(f"failure_classification={row['failure_classification']}")
+            if row.get("manual_review_only"):
+                scopes.append("manual_review_only=true")
+            scope_line = f"<br><small>{escape(' | '.join(scopes))}</small>" if scopes else ""
+            history_items.append(f"<li>{escape(summary)}{scope_line}</li>")
+        bulk_history_html = (
+            "<section class='panel'>"
+            "<h2>Bulk Remediation History</h2>"
+            f"<ul>{''.join(history_items)}</ul>"
+            "</section>"
+        )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -1983,6 +2029,7 @@ def _render_execution_dashboard_page(
         <div><a href="/execution/overview/{escape(detail.candidate_profile_slug)}">Open execution overview</a></div>
       </section>
       {bulk_feedback_html}
+      {bulk_history_html}
       <section class="panel">
         <h2>Bulk Remediation</h2>
         <form method="post" action="{base_bulk_route}">

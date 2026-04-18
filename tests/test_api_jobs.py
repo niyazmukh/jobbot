@@ -3726,3 +3726,48 @@ def test_execution_dashboard_html_surfaces_bulk_remediation_feedback():
     assert "Bulk Remediation Result" in response.text
     assert "targeted=3 | remediated=2 | failed=1" in response.text
     assert "First failure: attempt #42 (draft_field_plan_not_created)" in response.text
+
+
+def test_execution_dashboard_html_persists_bulk_remediation_history():
+    session = make_session()
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={"email": "alex@example.com"},
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        first = client.post(
+            "/execution/dashboard/alex-doe/bulk-remediate-submit"
+            "?failure_code=submit_gate_blocked&limit=7",
+            follow_redirects=False,
+        )
+        second = client.post(
+            "/execution/dashboard/alex-doe/bulk-remediate-submit"
+            "?manual_review_only=true&limit=3",
+            follow_redirects=False,
+        )
+        response = client.get("/execution/dashboard/alex-doe")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert first.status_code == 303
+    assert second.status_code == 303
+    assert response.status_code == 200
+    assert "Bulk Remediation History" in response.text
+    assert response.text.count("targeted=0 | remediated=0 | failed=0") >= 2
+    assert "failure_code=submit_gate_blocked" in response.text
+    assert "manual_review_only=true" in response.text
