@@ -63,6 +63,11 @@ class DraftExecutionOverviewRead(BaseModel):
     submit_interaction_confirmation_count: int | None = None
     submit_troubleshoot_event_route: str | None = None
     submit_troubleshoot_artifact_route: str | None = None
+    submit_remediation_message: str | None = None
+    submit_remediation_primary_route: str | None = None
+    submit_remediation_primary_label: str | None = None
+    submit_remediation_secondary_route: str | None = None
+    submit_remediation_secondary_label: str | None = None
     attempt_route: str
     replay_route: str
     primary_action_route: str
@@ -222,6 +227,11 @@ class DraftExecutionAttemptDetailRead(BaseModel):
     submit_interaction_confirmation_count: int | None = None
     submit_troubleshoot_event_route: str | None = None
     submit_troubleshoot_artifact_route: str | None = None
+    submit_remediation_message: str | None = None
+    submit_remediation_primary_route: str | None = None
+    submit_remediation_primary_label: str | None = None
+    submit_remediation_secondary_route: str | None = None
+    submit_remediation_secondary_label: str | None = None
     reasons: list[str]
     started_at: datetime
     events: list[DraftExecutionEventRead]

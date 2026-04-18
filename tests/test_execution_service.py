@@ -10,6 +10,7 @@ from jobbot.db.models import BrowserProfile, CandidateFact, CandidateProfile, Jo
 from jobbot.eligibility.service import materialize_application_eligibility
 from jobbot.execution.service import (
     _selector_matches_html,
+    _build_submit_remediation_guidance,
     _capture_target_page_html,
     bootstrap_draft_application_attempt,
     build_draft_field_plan,
@@ -1095,10 +1096,22 @@ def test_execute_guarded_submit_blocks_when_submit_selector_probe_fails(
     assert len(overview_rows) == 1
     assert overview_rows[0].failure_code == "guarded_submit_probe_failed"
     assert overview_rows[0].failure_classification == "page_changed_still_recognizable"
+    assert overview_rows[0].submit_remediation_message is not None
+    assert "Inspect" in (overview_rows[0].submit_remediation_message or "")
+    assert overview_rows[0].submit_remediation_primary_route is not None
+    assert "/execution/artifacts/" in (overview_rows[0].submit_remediation_primary_route or "")
+    assert overview_rows[0].submit_remediation_secondary_route is not None
+    assert "/execution/replay/" in (overview_rows[0].submit_remediation_secondary_route or "")
 
     detail = get_execution_attempt_detail(session, attempt_id=attempt.attempt_id)
     assert detail.failure_code == "guarded_submit_probe_failed"
     assert detail.failure_classification == "page_changed_still_recognizable"
+    assert detail.submit_remediation_message is not None
+    assert "Inspect" in (detail.submit_remediation_message or "")
+    assert detail.submit_remediation_primary_route is not None
+    assert "/execution/artifacts/" in (detail.submit_remediation_primary_route or "")
+    assert detail.submit_remediation_secondary_route is not None
+    assert "/execution/replay/" in (detail.submit_remediation_secondary_route or "")
 
 
 def test_execute_guarded_submit_probe_failure_classifies_authentication_session_issue(
@@ -1175,6 +1188,41 @@ def test_execute_guarded_submit_probe_failure_classifies_authentication_session_
         blocked_event.payload["submit_probe"]["failure_classification"]
         == "authentication_session_issue"
     )
+
+    detail = get_execution_attempt_detail(session, attempt_id=attempt.attempt_id)
+    assert detail.failure_classification == "authentication_session_issue"
+    assert detail.submit_remediation_message is not None
+    assert "Re-authenticate" in (detail.submit_remediation_message or "")
+    assert detail.submit_remediation_primary_route is not None
+    assert "/execution/replay/" in (detail.submit_remediation_primary_route or "")
+
+
+def test_build_submit_remediation_guidance_covers_known_classifications():
+    base_kwargs = {
+        "attempt_id": 11,
+        "attempt_route": "/execution/attempts/11",
+        "replay_route": "/execution/replay/11",
+        "primary_action_route": "/execution/replay/11",
+        "submit_troubleshoot_event_route": "/execution/attempts/11#event-22",
+        "submit_troubleshoot_artifact_route": "/execution/artifacts/22",
+    }
+    cases = {
+        "page_changed_still_recognizable": "Inspect",
+        "unsupported_variant": "unsupported",
+        "authentication_session_issue": "Re-authenticate",
+        "browser_runtime_issue": "browser",
+        "unknown_classification": "Review",
+    }
+
+    for classification, expected_keyword in cases.items():
+        guidance = _build_submit_remediation_guidance(
+            failure_code="guarded_submit_probe_failed",
+            failure_classification=classification,
+            **base_kwargs,
+        )
+        assert guidance["message"] is not None
+        assert expected_keyword.lower() in str(guidance["message"]).lower()
+        assert guidance["primary_route"] is not None
 
 
 def test_execute_guarded_submit_is_idempotent_after_first_success(tmp_path: Path):

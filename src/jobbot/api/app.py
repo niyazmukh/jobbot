@@ -1518,6 +1518,16 @@ def _render_execution_overview_page(
             if row.submit_troubleshoot_artifact_route
             else ""
         )
+        remediation_primary_link = (
+            f"<a href='{escape(row.submit_remediation_primary_route)}'>{escape(str(row.submit_remediation_primary_label or 'Primary remediation action'))}</a>"
+            if row.submit_remediation_primary_route
+            else "primary action unavailable"
+        )
+        remediation_secondary_link = (
+            f" | <a href='{escape(row.submit_remediation_secondary_route)}'>{escape(str(row.submit_remediation_secondary_label or 'Secondary remediation action'))}</a>"
+            if row.submit_remediation_secondary_route
+            else ""
+        )
         card_items.append(
             "<article class='card'>"
             f"<h2>{escape(row.job_title)}</h2>"
@@ -1538,6 +1548,8 @@ def _render_execution_overview_page(
             f"Selector: {escape(str(row.submit_interaction_selector or 'none'))} | "
             f"Confirmations: {escape(str(row.submit_interaction_confirmation_count))}</div>"
             f"<div class='status'>Troubleshoot: {submit_event_link}{submit_artifact_link}</div>"
+            f"<div class='status'>Remediation: {escape(str(row.submit_remediation_message or 'n/a'))}</div>"
+            f"<div class='status'>Actions: {remediation_primary_link}{remediation_secondary_link}</div>"
             f"<div class='status'>Latest stage: {escape(str(row.latest_event_type or 'none'))}</div>"
             f"<div class='status'>Artifacts: {row.artifact_count} total | "
             f"HTML {row.html_snapshot_count} | Model IO {row.model_io_count} | "
@@ -1850,6 +1862,12 @@ def _render_execution_attempt_detail_page(detail: DraftExecutionAttemptDetailRea
         <h2>Submit Troubleshooting</h2>
         <p>{f"<a href='{escape(detail.submit_troubleshoot_event_route)}'>Open latest submit-stage event</a>" if detail.submit_troubleshoot_event_route else "Submit-stage event route unavailable."}</p>
         <p>{f"<a href='{escape(detail.submit_troubleshoot_artifact_route)}'>Open latest submit-stage artifact</a>" if detail.submit_troubleshoot_artifact_route else "Submit-stage artifact route unavailable."}</p>
+      </section>
+      <section class="panel">
+        <h2>Submit Remediation</h2>
+        <p>{escape(str(detail.submit_remediation_message or 'No remediation guidance available.'))}</p>
+        <p>{f"<a href='{escape(detail.submit_remediation_primary_route)}'>{escape(str(detail.submit_remediation_primary_label or 'Primary remediation action'))}</a>" if detail.submit_remediation_primary_route else "Primary remediation route unavailable."}</p>
+        <p>{f"<a href='{escape(detail.submit_remediation_secondary_route)}'>{escape(str(detail.submit_remediation_secondary_label or 'Secondary remediation action'))}</a>" if detail.submit_remediation_secondary_route else "Secondary remediation route unavailable."}</p>
       </section>
       <section class="panel">
         <h2>Execution Events</h2>

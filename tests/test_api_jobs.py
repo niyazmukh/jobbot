@@ -1670,11 +1670,29 @@ def test_execution_api_guarded_submit_returns_conflict_when_submit_selector_prob
         overview_response.json()[0]["failure_classification"]
         == "page_changed_still_recognizable"
     )
+    assert overview_response.json()[0]["submit_remediation_message"] is not None
+    assert (
+        "/execution/artifacts/"
+        in (overview_response.json()[0]["submit_remediation_primary_route"] or "")
+    )
+    assert (
+        "/execution/replay/"
+        in (overview_response.json()[0]["submit_remediation_secondary_route"] or "")
+    )
     assert attempt_detail_response.status_code == 200
     assert attempt_detail_response.json()["failure_code"] == "guarded_submit_probe_failed"
     assert (
         attempt_detail_response.json()["failure_classification"]
         == "page_changed_still_recognizable"
+    )
+    assert attempt_detail_response.json()["submit_remediation_message"] is not None
+    assert (
+        "/execution/artifacts/"
+        in (attempt_detail_response.json()["submit_remediation_primary_route"] or "")
+    )
+    assert (
+        "/execution/replay/"
+        in (attempt_detail_response.json()["submit_remediation_secondary_route"] or "")
     )
     assert inbox_list_response.status_code == 200
     assert (

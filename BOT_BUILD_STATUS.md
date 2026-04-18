@@ -128,6 +128,7 @@
 - Expanded guarded-submit execution into deterministic ATS submit-interaction attempts with Playwright-first execution, persisted `submit_interaction` evidence, simulated probe fallback when Playwright is unavailable, and explicit `guarded_submit_interaction_failed` blocked-state conflict semantics (`409`) across service/API paths.
 - Added submit-stage-first execution diagnostics across overview/detail API+HTML surfaces (`submit_interaction_mode`, `submit_interaction_status`, click/selector/confirmation counters) so operators can triage guarded-submit outcomes without drilling into raw event payload JSON.
 - Added direct submit-stage troubleshooting routes across execution overview/detail service/API/HTML surfaces so diagnostics now pivot straight to the latest submit event anchor and submit artifact view.
+- Added deterministic submit remediation guidance and quick-action routes across execution overview/detail service/API/HTML surfaces, mapped by blocked submit failure classification.
 - Hardened selector probing with CSS-like signature matching tests to prevent false positives on mismatched attribute selectors.
 - Added a repo-local `.venv` workflow for JobBot development and validation without relying on global Python packages.
 - Added missing dev test dependency coverage (`httpx`) and repo-scoped `pytest` configuration so `pytest` targets JobBot tests instead of bundled comparison bots.
@@ -135,7 +136,7 @@
 - Fixed guarded submit stop-reason classification so unresolved manual-review fields remain explicit `manual_review_required:*` blockers.
 - Fixed execution bootstrap/dashboard state handling so blocked applications preserve `review` state across later draft attempts and dashboard review counts aggregate by application instead of double-counting attempts.
 - Tightened deterministic enrichment/scoring rules for preferred-skill extraction and location mismatch detection.
-- Brought the scoped JobBot test suite to green in `.venv` with `148 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `149 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.
@@ -155,7 +156,7 @@
 ## Next Tasks
 1. Promote the replay bundle and dashboard into a broader multi-ATS execution control center once multiple handlers exist.
 2. Tighten guarded-submit interaction policies from simulated fallback toward stricter browser-executed submit evidence as profile/session reliability instrumentation improves.
-3. Extend submit-stage diagnostics into deterministic remediation guidance and quick-action routes for each blocked submit classification.
+3. Add classification-scoped retry orchestration actions so remediation routes can trigger deterministic follow-up execution steps, not just navigation.
 
 ## Decisions
 - New implementation lives in `src/jobbot/` instead of modifying existing bot repos.

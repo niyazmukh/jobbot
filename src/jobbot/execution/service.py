@@ -364,6 +364,16 @@ def list_execution_overview(
         else:
             primary_action_route = attempt_route
             primary_action_label = "Open attempt detail"
+        submit_remediation = _build_submit_remediation_guidance(
+            attempt_id=attempt.id,
+            failure_code=attempt.failure_code,
+            failure_classification=attempt_failure_classification,
+            submit_troubleshoot_event_route=submit_troubleshoot["event_route"],
+            submit_troubleshoot_artifact_route=submit_troubleshoot["artifact_route"],
+            attempt_route=attempt_route,
+            replay_route=replay_route,
+            primary_action_route=primary_action_route,
+        )
         latest_artifact = artifacts[-1] if artifacts else None
         latest_artifact_route = (
             f"/execution/artifacts/{latest_artifact.id}" if latest_artifact is not None else None
@@ -418,6 +428,11 @@ def list_execution_overview(
                 submit_interaction_confirmation_count=submit_interaction["confirmation_count"],
                 submit_troubleshoot_event_route=submit_troubleshoot["event_route"],
                 submit_troubleshoot_artifact_route=submit_troubleshoot["artifact_route"],
+                submit_remediation_message=submit_remediation["message"],
+                submit_remediation_primary_route=submit_remediation["primary_route"],
+                submit_remediation_primary_label=submit_remediation["primary_label"],
+                submit_remediation_secondary_route=submit_remediation["secondary_route"],
+                submit_remediation_secondary_label=submit_remediation["secondary_label"],
                 attempt_route=attempt_route,
                 replay_route=replay_route,
                 primary_action_route=primary_action_route,
@@ -632,6 +647,18 @@ def get_execution_attempt_detail(
         and (failure_classification is None or not failure_classification.strip())
     ):
         failure_classification = "unknown_classification"
+    attempt_route = f"/execution/attempts/{attempt.id}"
+    replay_route = f"/execution/replay/{attempt.id}"
+    submit_remediation = _build_submit_remediation_guidance(
+        attempt_id=attempt.id,
+        failure_code=attempt.failure_code,
+        failure_classification=failure_classification,
+        submit_troubleshoot_event_route=submit_troubleshoot["event_route"],
+        submit_troubleshoot_artifact_route=submit_troubleshoot["artifact_route"],
+        attempt_route=attempt_route,
+        replay_route=replay_route,
+        primary_action_route=replay_route,
+    )
     artifacts = session.scalars(
         select(Artifact)
         .where(Artifact.attempt_id == attempt.id)
@@ -664,6 +691,11 @@ def get_execution_attempt_detail(
         submit_interaction_confirmation_count=submit_interaction["confirmation_count"],
         submit_troubleshoot_event_route=submit_troubleshoot["event_route"],
         submit_troubleshoot_artifact_route=submit_troubleshoot["artifact_route"],
+        submit_remediation_message=submit_remediation["message"],
+        submit_remediation_primary_route=submit_remediation["primary_route"],
+        submit_remediation_primary_label=submit_remediation["primary_label"],
+        submit_remediation_secondary_route=submit_remediation["secondary_route"],
+        submit_remediation_secondary_label=submit_remediation["secondary_label"],
         reasons=list(eligibility.reasons or []),
         started_at=attempt.started_at,
         events=[
@@ -2441,6 +2473,106 @@ def _build_submit_troubleshoot_routes(
     return {
         "event_route": event_route,
         "artifact_route": artifact_route,
+    }
+
+
+def _build_submit_remediation_guidance(
+    *,
+    attempt_id: int,
+    failure_code: str | None,
+    failure_classification: str | None,
+    submit_troubleshoot_event_route: str | None,
+    submit_troubleshoot_artifact_route: str | None,
+    attempt_route: str,
+    replay_route: str,
+    primary_action_route: str,
+) -> dict[str, str | None]:
+    """Build deterministic remediation messaging and action routes for blocked submit diagnostics."""
+
+    classification = (failure_classification or "").strip().lower()
+    normalized_failure_code = (failure_code or "").strip().lower()
+
+    default_primary_route = (
+        submit_troubleshoot_artifact_route
+        or submit_troubleshoot_event_route
+        or primary_action_route
+        or attempt_route
+    )
+    default_primary_label = (
+        "Inspect submit artifact"
+        if submit_troubleshoot_artifact_route
+        else "Inspect submit event"
+        if submit_troubleshoot_event_route
+        else "Inspect attempt detail"
+    )
+
+    message = None
+    primary_route = default_primary_route
+    primary_label = default_primary_label
+    secondary_route = replay_route
+    secondary_label = "Open replay bundle"
+
+    if classification == "page_changed_still_recognizable":
+        message = (
+            "Inspect submit evidence for selector drift, then rerun from replay with updated selector coverage."
+        )
+    elif classification == "unsupported_variant":
+        message = (
+            "Submit flow appears unsupported for this ATS variant; keep this application in review and use assist/manual execution."
+        )
+        primary_route = attempt_route
+        primary_label = "Inspect attempt detail"
+    elif classification == "authentication_session_issue":
+        message = "Re-authenticate the browser profile/session, then rerun guarded submit."
+        primary_route = replay_route
+        primary_label = "Open replay bundle"
+        secondary_route = attempt_route
+        secondary_label = "Inspect attempt detail"
+    elif classification == "browser_runtime_issue":
+        message = "Browser runtime issue detected during submit; inspect diagnostics and retry through replay."
+    elif normalized_failure_code == "guarded_submit_interaction_failed":
+        message = (
+            "Submit interaction failed before confirmation markers were observed; inspect interaction diagnostics and retry."
+        )
+    elif normalized_failure_code == "submit_gate_blocked":
+        message = (
+            "Submit gate blocked this attempt; resolve unresolved/manual-review fields before retrying guarded submit."
+        )
+        primary_route = attempt_route
+        primary_label = "Inspect attempt detail"
+    elif classification:
+        message = (
+            "Review submit diagnostics and replay evidence before retrying this blocked attempt."
+        )
+
+    if message is None:
+        return {
+            "message": None,
+            "primary_route": None,
+            "primary_label": None,
+            "secondary_route": None,
+            "secondary_label": None,
+        }
+
+    if secondary_route == primary_route:
+        secondary_route = None
+        secondary_label = None
+
+    if attempt_id <= 0:
+        return {
+            "message": message,
+            "primary_route": primary_route,
+            "primary_label": primary_label,
+            "secondary_route": secondary_route,
+            "secondary_label": secondary_label,
+        }
+
+    return {
+        "message": message,
+        "primary_route": primary_route,
+        "primary_label": primary_label,
+        "secondary_route": secondary_route,
+        "secondary_label": secondary_label,
     }
 
 
