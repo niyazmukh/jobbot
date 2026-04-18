@@ -162,7 +162,11 @@
 - Added deterministic LinkedIn question-extraction scaffolding with confidence-based assist routing (`extract_linkedin_question_widgets`) and surfaced it through API/CLI:
   - API: `POST /api/execution/linkedin/question-extraction`
   - CLI: `extract-linkedin-questions`
-- Brought the scoped JobBot test suite to green in `.venv` with `179 passed`.
+- Added first LinkedIn assist-mode field-fill scaffolding (`build_linkedin_assist_plan`) that consumes extracted widgets, blocks low-confidence auto actions, and emits deterministic auto-fill vs assist-review decisions.
+- Surfaced LinkedIn assist-plan scaffolding through API/CLI:
+  - API: `POST /api/execution/linkedin/assist-plan`
+  - CLI: `build-linkedin-assist-plan`
+- Brought the scoped JobBot test suite to green in `.venv` with `183 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.
@@ -182,7 +186,7 @@
 ## Next Tasks
 1. Promote the replay bundle and dashboard into a broader multi-ATS execution control center once multiple handlers exist.
 2. Tighten guarded-submit interaction policies from simulated fallback toward stricter browser-executed submit evidence as profile/session reliability instrumentation improves.
-3. Add first LinkedIn assist-mode field-fill scaffolding that consumes extracted question widgets and blocks low-confidence auto-actions.
+3. Add LinkedIn guarded-submit criteria scaffolding that explicitly gates submit eligibility from session-health + assist-plan confidence outcomes.
 
 ## Decisions
 - New implementation lives in `src/jobbot/` instead of modifying existing bot repos.

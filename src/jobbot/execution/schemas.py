@@ -516,3 +516,33 @@ class DraftLinkedInQuestionExtractionRead(BaseModel):
     assist_required: bool
     recommended_mode: str
     questions: list[DraftLinkedInQuestionRead]
+
+
+class DraftLinkedInAssistFieldRead(BaseModel):
+    """Read model for one LinkedIn assist-mode field-fill decision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    field_key: str
+    question_text: str
+    field_type: str
+    confidence: float
+    source: str
+    action: str
+    proposed_answer: str | None = None
+    reason: str
+
+
+class DraftLinkedInAssistPlanRead(BaseModel):
+    """Read model for deterministic LinkedIn assist-plan output."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_profile_slug: str | None = None
+    question_count: int
+    auto_fill_count: int
+    assist_review_count: int
+    blocked_auto_action_count: int
+    recommended_mode: str
+    fields: list[DraftLinkedInAssistFieldRead]
+    recommended_actions: list[str]

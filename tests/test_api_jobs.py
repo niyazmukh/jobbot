@@ -4362,3 +4362,50 @@ def test_linkedin_question_extraction_endpoint_returns_assist_signal():
     assert payload["recommended_mode"] == "assist"
     assert payload["assist_required"] is True
     assert payload["unknown_field_count"] == 1
+
+
+def test_linkedin_assist_plan_endpoint_blocks_low_confidence_auto_actions():
+    session = make_session()
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={"email": "alex@example.com"},
+        source_profile_data={"linkedin_url": "https://www.linkedin.com/in/alex-doe"},
+    )
+    session.add(candidate)
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/api/execution/linkedin/assist-plan",
+            params={
+                "candidate_profile_slug": "alex-doe",
+                "min_auto_confidence": 0.8,
+                "page_html": (
+                    "<form>"
+                    "<label for='emailAddress'>Email address</label>"
+                    "<input id='emailAddress' name='emailAddress' type='email'>"
+                    "<input name='customQuestion_77' type='text'>"
+                    "</form>"
+                ),
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["question_count"] == 2
+    assert payload["auto_fill_count"] == 1
+    assert payload["assist_review_count"] == 1
+    assert payload["blocked_auto_action_count"] == 1
+    assert payload["recommended_mode"] == "assist"

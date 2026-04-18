@@ -39,7 +39,9 @@ from jobbot.execution import (
     DraftSiteFieldPlanRead,
     DraftSubmitGateRead,
     DraftTargetOpenRead,
+    DraftLinkedInAssistPlanRead,
     DraftLinkedInQuestionExtractionRead,
+    build_linkedin_assist_plan,
     bootstrap_draft_application_attempt,
     build_draft_field_plan,
     build_site_field_overlay,
@@ -124,6 +126,36 @@ def create_app() -> FastAPI:
         """Extract deterministic LinkedIn question widgets and assist-mode signal."""
 
         return extract_linkedin_question_widgets(page_html=page_html)
+
+    @app.post(
+        "/api/execution/linkedin/assist-plan",
+        response_model=DraftLinkedInAssistPlanRead,
+    )
+    def build_linkedin_assist_plan_endpoint(
+        db: DbSession,
+        page_html: str,
+        candidate_profile_slug: str | None = None,
+        min_auto_confidence: Annotated[float, Query(ge=0.0, le=1.0)] = 0.8,
+    ) -> DraftLinkedInAssistPlanRead:
+        """Build deterministic LinkedIn assist-plan decisions from extracted widgets."""
+
+        try:
+            return build_linkedin_assist_plan(
+                db,
+                page_html=page_html,
+                candidate_profile_slug=candidate_profile_slug,
+                min_auto_confidence=min_auto_confidence,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
+            if detail == "invalid_linkedin_assist_confidence_threshold":
+                raise HTTPException(
+                    status_code=400,
+                    detail="invalid_linkedin_assist_confidence_threshold",
+                ) from exc
+            raise
 
     @app.post("/api/browser/profiles/{profile_key}/linkedin-health")
     def probe_linkedin_browser_profile_endpoint(

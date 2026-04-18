@@ -46,7 +46,7 @@ from jobbot.execution.service import (
     set_execution_dashboard_bulk_history_limit,
     start_draft_execution_attempt,
 )
-from jobbot.execution.linkedin import extract_linkedin_question_widgets
+from jobbot.execution.linkedin import build_linkedin_assist_plan, extract_linkedin_question_widgets
 from jobbot.discovery.inbox import list_inbox_jobs, list_ready_to_apply_jobs
 from jobbot.enrichment.service import enrich_job
 from jobbot.models.enums import BrowserProfileType, ReviewStatus, SessionHealth
@@ -1302,6 +1302,58 @@ def extract_linkedin_questions_cmd(
             str(row.confidence),
             row.source,
             str(row.assist_required),
+        )
+    console.print(table)
+
+
+@app.command("build-linkedin-assist-plan")
+def build_linkedin_assist_plan_cmd(
+    file: Path = typer.Option(..., "--file", exists=True, file_okay=True, dir_okay=False),
+    candidate_profile: str | None = typer.Option(None, "--candidate-profile"),
+    min_auto_confidence: float = typer.Option(
+        0.8,
+        "--min-auto-confidence",
+        min=0.0,
+        max=1.0,
+    ),
+) -> None:
+    """Build deterministic LinkedIn assist-plan decisions from HTML capture."""
+
+    session = SessionLocal()
+    try:
+        plan = build_linkedin_assist_plan(
+            session,
+            page_html=file.read_text(encoding="utf-8"),
+            candidate_profile_slug=candidate_profile,
+            min_auto_confidence=min_auto_confidence,
+        )
+    except ValueError as exc:
+        session.close()
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        session.close()
+
+    console.print(f"[bold]Question count:[/bold] {plan.question_count}")
+    console.print(f"[bold]Auto-fill:[/bold] {plan.auto_fill_count}")
+    console.print(f"[bold]Assist review:[/bold] {plan.assist_review_count}")
+    console.print(f"[bold]Blocked auto actions:[/bold] {plan.blocked_auto_action_count}")
+    console.print(f"[bold]Recommended mode:[/bold] {plan.recommended_mode}")
+    for action in plan.recommended_actions:
+        console.print(f"- {action}")
+
+    table = Table(title="LinkedIn Assist Plan", show_header=True, header_style="bold cyan")
+    table.add_column("Field key")
+    table.add_column("Question")
+    table.add_column("Action")
+    table.add_column("Answer")
+    table.add_column("Reason")
+    for row in plan.fields:
+        table.add_row(
+            row.field_key,
+            row.question_text,
+            row.action,
+            row.proposed_answer or "",
+            row.reason,
         )
     console.print(table)
 

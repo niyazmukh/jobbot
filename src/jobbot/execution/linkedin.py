@@ -5,7 +5,13 @@ from __future__ import annotations
 import re
 from html import unescape
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from jobbot.db.models import CandidateProfile
 from jobbot.execution.schemas import (
+    DraftLinkedInAssistFieldRead,
+    DraftLinkedInAssistPlanRead,
     DraftLinkedInQuestionExtractionRead,
     DraftLinkedInQuestionRead,
 )
@@ -113,6 +119,86 @@ def extract_linkedin_question_widgets(*, page_html: str) -> DraftLinkedInQuestio
     )
 
 
+def build_linkedin_assist_plan(
+    session: Session,
+    *,
+    page_html: str,
+    candidate_profile_slug: str | None = None,
+    min_auto_confidence: float = 0.8,
+) -> DraftLinkedInAssistPlanRead:
+    """Build deterministic assist-mode field-fill decisions for LinkedIn widgets."""
+
+    if min_auto_confidence < 0.0 or min_auto_confidence > 1.0:
+        raise ValueError("invalid_linkedin_assist_confidence_threshold")
+
+    candidate = None
+    if candidate_profile_slug is not None:
+        candidate = session.scalar(
+            select(CandidateProfile).where(CandidateProfile.slug == candidate_profile_slug)
+        )
+        if candidate is None:
+            raise ValueError("candidate_profile_not_found")
+
+    extraction = extract_linkedin_question_widgets(page_html=page_html)
+    answer_bank = _build_candidate_answer_bank(candidate)
+    fields: list[DraftLinkedInAssistFieldRead] = []
+    auto_fill_count = 0
+    assist_review_count = 0
+    blocked_auto_action_count = 0
+
+    for question in extraction.questions:
+        answer = _resolve_candidate_answer(answer_bank, question.question_text)
+        low_confidence = question.confidence < min_auto_confidence
+
+        if low_confidence:
+            action = "assist_review"
+            reason = "blocked_low_extraction_confidence"
+            assist_review_count += 1
+            blocked_auto_action_count += 1
+        elif answer is None:
+            action = "assist_review"
+            reason = "no_deterministic_candidate_answer"
+            assist_review_count += 1
+        else:
+            action = "auto_fill_candidate_fact"
+            reason = "deterministic_candidate_profile_match"
+            auto_fill_count += 1
+
+        fields.append(
+            DraftLinkedInAssistFieldRead(
+                field_key=question.field_key,
+                question_text=question.question_text,
+                field_type=question.field_type,
+                confidence=question.confidence,
+                source=question.source,
+                action=action,
+                proposed_answer=answer,
+                reason=reason,
+            )
+        )
+
+    recommended_mode = "assist" if assist_review_count > 0 else "draft"
+    recommended_actions = [
+        "Auto-fill only deterministic high-confidence fields from approved candidate profile data.",
+        "Route low-confidence or unmatched LinkedIn questions to assist review before applying.",
+    ]
+    if blocked_auto_action_count > 0:
+        recommended_actions.append(
+            f"Blocked {blocked_auto_action_count} potential auto actions due to extraction confidence below {min_auto_confidence}."
+        )
+
+    return DraftLinkedInAssistPlanRead(
+        candidate_profile_slug=candidate_profile_slug,
+        question_count=extraction.question_count,
+        auto_fill_count=auto_fill_count,
+        assist_review_count=assist_review_count,
+        blocked_auto_action_count=blocked_auto_action_count,
+        recommended_mode=recommended_mode,
+        fields=fields,
+        recommended_actions=recommended_actions,
+    )
+
+
 def _resolve_field_type(*, tag: str, attrs: dict[str, str]) -> str:
     if tag == "select":
         return "select"
@@ -144,3 +230,54 @@ def _clean_text(value: str) -> str:
 def _clean_name(value: str) -> str:
     normalized = value.replace("_", " ").replace("-", " ").replace(".", " ")
     return " ".join(part for part in normalized.split() if part).strip().capitalize()
+
+
+def _build_candidate_answer_bank(candidate: CandidateProfile | None) -> dict[str, str]:
+    if candidate is None:
+        return {}
+
+    personal = dict(candidate.personal_details or {})
+    source = dict(candidate.source_profile_data or {})
+    full_name = str(personal.get("name") or candidate.name or "").strip()
+    name_parts = full_name.split()
+    first_name = str(personal.get("first_name") or (name_parts[0] if name_parts else "")).strip()
+    last_name = str(personal.get("last_name") or (name_parts[-1] if len(name_parts) > 1 else "")).strip()
+
+    return {
+        "full_name": full_name,
+        "first_name": first_name,
+        "last_name": last_name,
+        "email": str(personal.get("email") or "").strip(),
+        "phone": str(personal.get("phone") or "").strip(),
+        "location": str(personal.get("location") or "").strip(),
+        "linkedin_url": str(personal.get("linkedin_url") or source.get("linkedin_url") or "").strip(),
+        "portfolio_url": str(personal.get("portfolio_url") or source.get("portfolio_url") or "").strip(),
+    }
+
+
+def _resolve_candidate_answer(answer_bank: dict[str, str], question_text: str) -> str | None:
+    text = question_text.lower()
+    if "first name" in text:
+        return _non_empty(answer_bank.get("first_name"))
+    if "last name" in text:
+        return _non_empty(answer_bank.get("last_name"))
+    if "full name" in text or text.strip() == "name":
+        return _non_empty(answer_bank.get("full_name"))
+    if "email" in text:
+        return _non_empty(answer_bank.get("email"))
+    if "phone" in text or "mobile" in text:
+        return _non_empty(answer_bank.get("phone"))
+    if "linkedin" in text:
+        return _non_empty(answer_bank.get("linkedin_url"))
+    if "portfolio" in text or "website" in text:
+        return _non_empty(answer_bank.get("portfolio_url"))
+    if "location" in text or "city" in text:
+        return _non_empty(answer_bank.get("location"))
+    return None
+
+
+def _non_empty(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None

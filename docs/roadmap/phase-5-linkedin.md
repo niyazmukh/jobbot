@@ -12,7 +12,7 @@ Add LinkedIn assistance conservatively, prioritizing session health and assist/g
 ## Checklist
 - [~] Add LinkedIn session health checks (deterministic probe helpers + API/CLI probe surfaces added; browser-driven capture wiring pending)
 - [~] Add LinkedIn question extraction (deterministic widget extraction + confidence-based assist routing added; browser/session capture wiring pending)
-- [ ] Add assist-mode field filling
+- [~] Add assist-mode field filling (deterministic assist-plan scaffold added; browser-driven form interaction wiring pending)
 - [ ] Add guarded-submit criteria
 - [ ] Add account-risk controls and cooldown handling
 

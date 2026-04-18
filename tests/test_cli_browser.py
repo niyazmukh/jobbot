@@ -7,7 +7,7 @@ from pathlib import Path
 import jobbot.cli.main as cli_main
 from jobbot.db.base import Base
 from jobbot.db import models  # noqa: F401
-from jobbot.db.models import BrowserProfile
+from jobbot.db.models import BrowserProfile, CandidateProfile
 from jobbot.models.enums import BrowserProfileType, SessionHealth
 
 
@@ -90,5 +90,53 @@ def test_cli_extract_linkedin_questions_reports_assist_mode(tmp_path: Path):
 
     assert result.exit_code == 0
     assert "Question count:" in result.stdout
+    assert "Recommended mode:" in result.stdout
+    assert "assist" in result.stdout
+
+
+def test_cli_build_linkedin_assist_plan_reports_blocked_auto_actions(monkeypatch, tmp_path: Path):
+    session_factory = make_session_factory()
+    session = session_factory()
+    session.add(
+        CandidateProfile(
+            name="Alex Doe",
+            slug="alex-doe",
+            personal_details={"email": "alex@example.com"},
+            source_profile_data={"linkedin_url": "https://www.linkedin.com/in/alex-doe"},
+        )
+    )
+    session.commit()
+    session.close()
+
+    html_file = tmp_path / "linkedin_assist.html"
+    html_file.write_text(
+        (
+            "<form>"
+            "<label for='emailAddress'>Email address</label>"
+            "<input id='emailAddress' name='emailAddress' type='email'>"
+            "<input name='customQuestion_77' type='text'>"
+            "</form>"
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(cli_main, "SessionLocal", session_factory)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "build-linkedin-assist-plan",
+            "--file",
+            str(html_file),
+            "--candidate-profile",
+            "alex-doe",
+            "--min-auto-confidence",
+            "0.8",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Blocked auto actions:" in result.stdout
+    assert "1" in result.stdout
     assert "Recommended mode:" in result.stdout
     assert "assist" in result.stdout
