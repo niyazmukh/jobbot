@@ -30,14 +30,19 @@ from jobbot.execution.service import (
     bootstrap_draft_application_attempt,
     build_draft_field_plan,
     build_site_field_overlay,
+    execute_guarded_submit,
     evaluate_submit_gate,
     get_execution_artifact_detail,
     get_execution_attempt_detail,
     get_execution_dashboard,
     get_execution_replay_bundle,
+    list_execution_dashboard_bulk_history,
+    list_execution_dashboard_bulk_history_reads,
     list_execution_overview,
     list_draft_application_attempts,
     open_site_target_page,
+    record_execution_dashboard_bulk_history,
+    run_dashboard_bulk_submit_remediation,
     start_draft_execution_attempt,
 )
 from jobbot.discovery.inbox import list_inbox_jobs, list_ready_to_apply_jobs
@@ -476,6 +481,7 @@ def list_execution_overview_cmd(
     blocked_only: bool = typer.Option(False, "--blocked-only"),
     manual_review_only: bool = typer.Option(False, "--manual-review-only"),
     failure_code: str | None = typer.Option(None, "--failure-code"),
+    failure_classification: str | None = typer.Option(None, "--failure-classification"),
     max_submit_confidence: float | None = typer.Option(
         None,
         "--max-submit-confidence",
@@ -496,6 +502,7 @@ def list_execution_overview_cmd(
             blocked_only=blocked_only,
             manual_review_only=manual_review_only,
             failure_code=failure_code,
+            failure_classification=failure_classification,
             max_submit_confidence=max_submit_confidence,
             sort_by=sort_by,
             descending=descending,
@@ -512,6 +519,7 @@ def list_execution_overview_cmd(
     table.add_column("Vendor")
     table.add_column("Result")
     table.add_column("Failure")
+    table.add_column("Failure Class")
     table.add_column("Confidence")
     table.add_column("Stage")
     table.add_column("Artifacts")
@@ -526,6 +534,7 @@ def list_execution_overview_cmd(
             row.site_vendor or "",
             row.attempt_result or "pending",
             row.failure_code or "",
+            row.failure_classification or "",
             "" if row.submit_confidence is None else str(row.submit_confidence),
             row.latest_event_type or "",
             str(row.artifact_count),
@@ -540,6 +549,7 @@ def show_execution_dashboard_cmd(
     candidate_profile: str = typer.Option(..., "--candidate-profile"),
     manual_review_only: bool = typer.Option(False, "--manual-review-only"),
     failure_code: str | None = typer.Option(None, "--failure-code"),
+    failure_classification: str | None = typer.Option(None, "--failure-classification"),
     max_submit_confidence: float | None = typer.Option(
         None,
         "--max-submit-confidence",
@@ -559,6 +569,7 @@ def show_execution_dashboard_cmd(
             candidate_profile_slug=candidate_profile,
             manual_review_only=manual_review_only,
             failure_code=failure_code,
+            failure_classification=failure_classification,
             max_submit_confidence=max_submit_confidence,
             sort_by=sort_by,
             descending=descending,
@@ -587,6 +598,15 @@ def show_execution_dashboard_cmd(
             )
         )
         console.print(f"Blocked failure breakdown: {breakdown}")
+    if detail.blocked_failure_classification_counts:
+        class_breakdown = ", ".join(
+            f"{classification}={count}"
+            for classification, count in sorted(
+                detail.blocked_failure_classification_counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+        )
+        console.print(f"Blocked failure classification breakdown: {class_breakdown}")
 
     blocked_table = Table(title="Blocked Attempts", show_header=True, header_style="bold cyan")
     blocked_table.add_column("Attempt", justify="right")
@@ -594,6 +614,7 @@ def show_execution_dashboard_cmd(
     blocked_table.add_column("Company")
     blocked_table.add_column("Title")
     blocked_table.add_column("Failure")
+    blocked_table.add_column("Failure Class")
     blocked_table.add_column("Confidence")
     for row in detail.blocked_recent_attempts:
         blocked_table.add_row(
@@ -602,6 +623,7 @@ def show_execution_dashboard_cmd(
             row.company_name or "",
             row.job_title,
             row.failure_code or "",
+            row.failure_classification or "",
             "" if row.submit_confidence is None else str(row.submit_confidence),
         )
     console.print(blocked_table)
@@ -629,6 +651,125 @@ def show_execution_dashboard_cmd(
         console.print(f"- {action}")
 
 
+@app.command("list-remediation-history")
+def list_remediation_history_cmd(
+    candidate_profile: str = typer.Option(..., "--candidate-profile"),
+    history_sort: str = typer.Option("newest", "--history-sort"),
+    limit: int = typer.Option(5, "--limit", min=1, max=50),
+) -> None:
+    """List persisted dashboard remediation-history entries for one candidate."""
+
+    session = SessionLocal()
+    try:
+        rows = list_execution_dashboard_bulk_history_reads(
+            session,
+            candidate_profile_slug=candidate_profile,
+            history_sort=history_sort,
+            limit=limit,
+        )
+    except ValueError as exc:
+        session.close()
+        raise typer.BadParameter(str(exc)) from exc
+    else:
+        session.close()
+
+    table = Table(title="Execution Remediation History", show_header=True, header_style="bold cyan")
+    table.add_column("#", justify="right")
+    table.add_column("Recorded")
+    table.add_column("Targeted/Remediated/Failed")
+    table.add_column("Scope")
+    table.add_column("First Failure")
+    table.add_column("Replay")
+
+    for index, row in enumerate(rows, start=1):
+        scope_bits: list[str] = []
+        if row.failure_code:
+            scope_bits.append(f"failure_code={row.failure_code}")
+        if row.failure_classification:
+            scope_bits.append(f"failure_classification={row.failure_classification}")
+        if row.manual_review_only:
+            scope_bits.append("manual_review_only=true")
+        first_failure = ""
+        if row.first_failure_attempt_id is not None and row.first_failure_code is not None:
+            first_failure = f"{row.first_failure_attempt_id}:{row.first_failure_code}"
+        table.add_row(
+            str(index),
+            row.created_at,
+            f"{row.requested_count}/{row.remediated_count}/{row.failed_count}",
+            " | ".join(scope_bits),
+            first_failure,
+            row.rerun_route,
+        )
+
+    console.print(table)
+
+
+@app.command("replay-remediation-history")
+def replay_remediation_history_cmd(
+    candidate_profile: str = typer.Option(..., "--candidate-profile"),
+    history_index: int = typer.Option(1, "--history-index", min=1),
+    history_sort: str = typer.Option("newest", "--history-sort"),
+) -> None:
+    """Replay a persisted remediation-history scope by index."""
+
+    session = SessionLocal()
+    try:
+        history_rows = list_execution_dashboard_bulk_history(
+            session,
+            candidate_profile_slug=candidate_profile,
+            history_sort=history_sort,
+            limit=max(history_index, 50),
+        )
+        if history_index > len(history_rows):
+            raise typer.BadParameter("remediation_history_index_out_of_range")
+        row = history_rows[history_index - 1]
+        batch = run_dashboard_bulk_submit_remediation(
+            session,
+            candidate_profile_slug=candidate_profile,
+            manual_review_only=bool(row.get("manual_review_only", False)),
+            failure_code=(str(row["failure_code"]) if row.get("failure_code") else None),
+            failure_classification=(
+                str(row["failure_classification"]) if row.get("failure_classification") else None
+            ),
+            max_submit_confidence=(
+                float(row["max_submit_confidence"])
+                if row.get("max_submit_confidence") is not None
+                else None
+            ),
+            sort_by=str(row.get("sort_by", "started_at")),
+            descending=bool(row.get("descending", True)),
+            limit=int(row.get("limit", 25)),
+        )
+        record_execution_dashboard_bulk_history(
+            session,
+            candidate_profile_slug=candidate_profile,
+            remediation_batch=batch,
+            manual_review_only=bool(row.get("manual_review_only", False)),
+            failure_code=(str(row["failure_code"]) if row.get("failure_code") else None),
+            failure_classification=(
+                str(row["failure_classification"]) if row.get("failure_classification") else None
+            ),
+            max_submit_confidence=(
+                float(row["max_submit_confidence"])
+                if row.get("max_submit_confidence") is not None
+                else None
+            ),
+            sort_by=str(row.get("sort_by", "started_at")),
+            descending=bool(row.get("descending", True)),
+            limit=int(row.get("limit", 25)),
+        )
+    except ValueError as exc:
+        session.close()
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        session.close()
+
+    console.print(
+        "[green]Replayed remediation scope:[/green] "
+        f"targeted={batch.requested_count} remediated={batch.remediated_count} failed={batch.failed_count}"
+    )
+
+
 @app.command("show-execution-attempt")
 def show_execution_attempt_cmd(
     attempt_id: int = typer.Option(..., "--attempt-id", min=1),
@@ -646,6 +787,7 @@ def show_execution_attempt_cmd(
     console.print(f"Candidate: {detail.candidate_profile_slug}")
     console.print(f"State: {detail.application_state} | Result: {detail.attempt_result or 'pending'}")
     console.print(f"Failure: {detail.failure_code or 'none'} | Confidence: {detail.submit_confidence}")
+    console.print(f"Failure class: {detail.failure_classification or 'none'}")
     console.print(f"Notes: {detail.notes or ''}")
 
     event_table = Table(title="Execution Events", show_header=True, header_style="bold cyan")
@@ -881,6 +1023,30 @@ def evaluate_submit_gate_cmd(
     console.print(f"Confidence: {gate.confidence_score}")
     console.print(f"Allow submit: {gate.allow_submit}")
     console.print(f"Stop reasons: {gate.stop_reasons}")
+
+
+@app.command("execute-guarded-submit")
+def execute_guarded_submit_cmd(
+    attempt_id: int = typer.Option(..., "--attempt-id", min=1),
+) -> None:
+    """Execute guarded submit for a draft attempt after gate approval."""
+
+    session = SessionLocal()
+    try:
+        submitted = execute_guarded_submit(
+            session,
+            attempt_id=attempt_id,
+        )
+    finally:
+        session.close()
+
+    console.print(f"[green]Executed guarded submit:[/green] {submitted.attempt_id}")
+    console.print(f"Site vendor: {submitted.site_vendor}")
+    console.print(f"Application state: {submitted.application_state}")
+    console.print(f"Attempt result: {submitted.attempt_result}")
+    console.print(f"Submission mode: {submitted.submission_mode}")
+    console.print(f"Target URL: {submitted.target_url}")
+    console.print(f"Artifact path: {submitted.artifact_path}")
 
 
 @app.command("enrich-job")

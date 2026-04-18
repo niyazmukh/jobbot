@@ -148,7 +148,8 @@
 - Added one-click history-row scope replay actions on the dashboard (`Re-run scope`) so persisted remediation-history entries can be re-executed without manually reconstructing query params.
 - Added remediation-history metadata visibility (recorded timestamp + first failure details) and dashboard-side history sorting controls (`newest`, `most failed`, `oldest`) with invalid-sort guardrails.
 - Added a dedicated typed remediation-history API surface (`/api/execution/dashboard/{candidate_profile_slug}/remediation-history`) with scope replay routes and history-sort guardrails for non-HTML consumers.
-- Brought the scoped JobBot test suite to green in `.venv` with `161 passed`.
+- Added CLI remediation-history operations: scoped history listing (`list-remediation-history`) and one-click scope replay (`replay-remediation-history`) backed by persisted history entries.
+- Brought the scoped JobBot test suite to green in `.venv` with `163 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.
@@ -168,7 +169,7 @@
 ## Next Tasks
 1. Promote the replay bundle and dashboard into a broader multi-ATS execution control center once multiple handlers exist.
 2. Tighten guarded-submit interaction policies from simulated fallback toward stricter browser-executed submit evidence as profile/session reliability instrumentation improves.
-3. Add CLI remediation-history listing and replay commands wired to the new API/service read model so terminal operators can run scope replays without opening dashboard HTML.
+3. Add remediation-history entry identifiers and direct replay-by-id semantics across HTML/API/CLI to avoid index drift when history ordering changes between reads.
 
 ## Decisions
 - New implementation lives in `src/jobbot/` instead of modifying existing bot repos.
