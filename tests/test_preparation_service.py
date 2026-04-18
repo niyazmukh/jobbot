@@ -5,7 +5,16 @@ from sqlalchemy.orm import sessionmaker
 
 from jobbot.db.base import Base
 from jobbot.db import models  # noqa: F401
-from jobbot.db.models import Answer, CandidateFact, CandidateProfile, GeneratedDocument, Job, ResumeVariant, ReviewQueueItem
+from jobbot.db.models import (
+    Answer,
+    CandidateFact,
+    CandidateProfile,
+    GeneratedDocument,
+    Job,
+    ModelCall,
+    ResumeVariant,
+    ReviewQueueItem,
+)
 from jobbot.preparation.read_models import get_prepared_job_read
 from jobbot.preparation.service import prepare_job_for_candidate
 from jobbot.scoring.service import score_job_for_candidate
@@ -17,11 +26,15 @@ def make_session():
     return sessionmaker(bind=engine, autoflush=False, autocommit=False)()
 
 
-def seed_scored_job(session):
+def seed_scored_job(session, *, enable_tier3_extensions: bool = False):
     candidate = CandidateProfile(
         name="Alex Doe",
         slug="alex-doe",
-        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        target_preferences={
+            "preferred_locations": ["Remote"],
+            "remote": True,
+            "enable_tier3_extensions": enable_tier3_extensions,
+        },
         source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
     )
     session.add(candidate)
@@ -116,3 +129,79 @@ def test_get_prepared_job_read_returns_scoped_documents_and_answers(tmp_path: Pa
     assert prepared.documents[0].resume_variant_id is not None
     assert len(prepared.answers) >= 2
     assert all(answer.provenance_facts for answer in prepared.answers)
+
+
+def test_prepare_job_for_candidate_includes_extension_answer_when_enabled(tmp_path: Path):
+    session = make_session()
+    job_id = seed_scored_job(session, enable_tier3_extensions=True)
+
+    prepare_job_for_candidate(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+
+    answers = session.query(Answer).order_by(Answer.id).all()
+    extension_answers = [answer for answer in answers if answer.truth_tier.value == "extension"]
+    extension_review = (
+        session.query(ReviewQueueItem)
+        .filter_by(entity_type="answer", reason="tier3_first_use_answer_review")
+        .one()
+    )
+
+    assert len(extension_answers) == 1
+    assert extension_answers[0].approval_status == "pending"
+    assert extension_answers[0].extension_approved is False
+    assert extension_review.truth_tier.value == "extension"
+
+
+def test_prepare_job_for_candidate_skips_extension_answer_when_budget_ceiling_exceeded(
+    tmp_path: Path, monkeypatch
+):
+    session = make_session()
+    job_id = seed_scored_job(session, enable_tier3_extensions=True)
+    session.add(
+        ModelCall(
+            stage="scoring",
+            model_provider="openai",
+            model_name="gpt-5.4-mini",
+            prompt_version="score_v1",
+            estimated_cost=4.0,
+        )
+    )
+    session.commit()
+
+    class _BudgetSettings:
+        model_call_daily_budget_usd = 1.0
+        model_call_weekly_budget_usd = 10.0
+
+    monkeypatch.setattr("jobbot.preparation.service.get_settings", lambda: _BudgetSettings())
+
+    prepare_job_for_candidate(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+
+    answers = session.query(Answer).order_by(Answer.id).all()
+    extension_answers = [answer for answer in answers if answer.truth_tier.value == "extension"]
+    extension_review_count = (
+        session.query(ReviewQueueItem)
+        .filter_by(entity_type="answer", reason="tier3_first_use_answer_review")
+        .count()
+    )
+    blocked_calls = (
+        session.query(ModelCall)
+        .filter_by(
+            model_provider="budget_guardrail",
+            model_name="blocked_non_essential",
+            stage="preparation_extension_answer",
+        )
+        .count()
+    )
+
+    assert extension_answers == []
+    assert extension_review_count == 0
+    assert blocked_calls == 1

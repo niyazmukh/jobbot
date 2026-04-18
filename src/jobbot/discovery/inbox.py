@@ -12,6 +12,7 @@ from jobbot.db.models import (
     Answer,
     Application,
     ApplicationAttempt,
+    ApplicationEvent,
     CandidateProfile,
     Company,
     GeneratedDocument,
@@ -436,6 +437,20 @@ def _build_execution_summary(
     application, attempt, slug = row
     if application is None:
         return None
+    failure_classification: str | None = None
+    if attempt is not None:
+        latest_event = session.execute(
+            select(ApplicationEvent)
+            .where(ApplicationEvent.attempt_id == attempt.id)
+            .order_by(ApplicationEvent.created_at.desc(), ApplicationEvent.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if latest_event is not None:
+            payload = latest_event.payload or {}
+            submit_probe = payload.get("submit_probe") or {}
+            value = submit_probe.get("failure_classification")
+            if isinstance(value, str) and value.strip():
+                failure_classification = value.strip()
 
     return {
         "candidate_profile_slug": slug,
@@ -444,6 +459,7 @@ def _build_execution_summary(
         "attempt_mode": (attempt.mode.value if attempt is not None else None),
         "attempt_result": (attempt.result if attempt is not None else None),
         "failure_code": (attempt.failure_code if attempt is not None else None),
+        "failure_classification": failure_classification,
         "submit_confidence": (attempt.submit_confidence if attempt is not None else None),
         "notes": (attempt.notes if attempt is not None else None),
     }

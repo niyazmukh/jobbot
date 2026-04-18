@@ -12,3 +12,5 @@ __pycache__/
 graphify-out/
 .coverage
 htmlcov/
+manual_validation/
+resume_variant_v1.md

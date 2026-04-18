@@ -4,6 +4,7 @@ from sqlalchemy.orm import sessionmaker
 from jobbot.db.base import Base
 from jobbot.db import models  # noqa: F401
 from jobbot.db.models import Answer, CandidateFact, CandidateProfile, GeneratedDocument, Job
+from jobbot.eligibility.service import get_application_eligibility
 from jobbot.models.enums import ReviewStatus
 from jobbot.preparation.service import prepare_job_for_candidate
 from jobbot.review.service import list_review_queue, queue_score_review, set_review_status
@@ -152,3 +153,78 @@ def test_set_review_status_writes_back_to_prepared_entities(tmp_path):
     assert document.review_status == ReviewStatus.APPROVED.value
     assert answer.approval_status == ReviewStatus.REJECTED.value
     assert answer.extension_approved is False
+
+
+def test_set_review_status_rematerializes_eligibility_for_prepared_entities(tmp_path):
+    session = make_session()
+    candidate = CandidateProfile(
+        name="Avery Doe",
+        slug="avery-doe",
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Built Python data platforms with AWS and SQL pipelines.",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    job = Job(
+        canonical_url="https://example.com/jobs/77",
+        title="Senior Data Engineer",
+        title_normalized="senior data engineer",
+        location_raw="Remote",
+        location_normalized="remote",
+        requirements_structured={
+            "required_skills": ["python", "sql", "aws"],
+            "seniority_signals": ["senior"],
+            "required_years_experience": 5,
+        },
+        status="enriched",
+    )
+    session.add(job)
+    session.commit()
+    score_job_for_candidate(session, job.id, "avery-doe")
+    prepare_job_for_candidate(session, job_id=job.id, candidate_profile_slug="avery-doe", output_dir=tmp_path)
+
+    eligibility_before = get_application_eligibility(
+        session,
+        job_id=job.id,
+        candidate_profile_slug="avery-doe",
+    )
+    assert eligibility_before is None
+
+    document_review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    answer_review = session.query(models.ReviewQueueItem).filter_by(entity_type="answer").first()
+
+    updated_document_review = set_review_status(
+        session,
+        review_id=document_review.id,
+        status=ReviewStatus.APPROVED,
+    )
+    updated_answer_review = set_review_status(
+        session,
+        review_id=answer_review.id,
+        status=ReviewStatus.REJECTED,
+    )
+
+    eligibility_after = get_application_eligibility(
+        session,
+        job_id=job.id,
+        candidate_profile_slug="avery-doe",
+    )
+    assert updated_document_review.status == ReviewStatus.APPROVED.value
+    assert updated_answer_review.status == ReviewStatus.REJECTED.value
+    assert eligibility_after is not None
+    assert eligibility_after.prepared_summary["preparation_state"] == "ready"

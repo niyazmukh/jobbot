@@ -22,6 +22,7 @@ from jobbot.db.models import (
     utcnow,
 )
 from jobbot.models.enums import ApplicationState, ReviewStatus, TruthTier
+from jobbot.model_calls import allow_non_essential_model_call
 from jobbot.preparation.schemas import PreparedAnswerPlan, PreparedClaim, PreparedJobSummary
 
 
@@ -61,7 +62,23 @@ def prepare_job_for_candidate(
         ).all()
     )
     claims = _build_resume_claims(job, score.score_json or {}, facts)
-    answers = _build_answer_pack(job, candidate, score.score_json or {}, facts)
+    settings = get_settings()
+    extension_calls_allowed = True
+    if bool((candidate.target_preferences or {}).get("enable_tier3_extensions")):
+        extension_calls_allowed = allow_non_essential_model_call(
+            session,
+            stage="preparation_extension_answer",
+            linked_entity_id=job.id,
+            daily_budget_usd=settings.model_call_daily_budget_usd,
+            weekly_budget_usd=settings.model_call_weekly_budget_usd,
+        )
+    answers = _build_answer_pack(
+        job,
+        candidate,
+        score.score_json or {},
+        facts,
+        extension_calls_allowed=extension_calls_allowed,
+    )
 
     base_dir = output_dir or (get_settings().artifacts_dir / "generated" / candidate.slug / str(job.id))
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -118,6 +135,16 @@ def prepare_job_for_candidate(
                 reason="tier2_first_use_answer_review",
                 truth_tier=TruthTier.INFERENCE,
                 confidence=0.75,
+            )
+            queued_review_ids.append(queued.id)
+        elif plan.truth_tier == TruthTier.EXTENSION.value:
+            queued = _queue_review_item(
+                session,
+                entity_type="answer",
+                entity_id=answer.id,
+                reason="tier3_first_use_answer_review",
+                truth_tier=TruthTier.EXTENSION,
+                confidence=0.55,
             )
             queued_review_ids.append(queued.id)
 
@@ -197,6 +224,8 @@ def _build_answer_pack(
     candidate: CandidateProfile,
     score_json: dict,
     facts: list[CandidateFact],
+    *,
+    extension_calls_allowed: bool = True,
 ) -> list[PreparedAnswerPlan]:
     """Create a deterministic baseline answer pack."""
 
@@ -239,6 +268,21 @@ def _build_answer_pack(
                 interview_prep_notes="Treat this as internal prep guidance rather than application copy.",
             )
         )
+    if bool((candidate.target_preferences or {}).get("enable_tier3_extensions")) and extension_calls_allowed:
+        plans.append(
+            PreparedAnswerPlan(
+                question="What impact plan would you propose for the first 90 days?",
+                answer_text=(
+                    "Based on the role scope and my prior work, I would start with discovery, "
+                    "identify key delivery risks, and propose a phased execution plan with measurable milestones."
+                ),
+                truth_tier=TruthTier.EXTENSION.value,
+                provenance_facts=top_fact_keys,
+                interview_prep_notes=(
+                    "Treat this as a hypothesis to discuss, not a factual claim about internal company priorities."
+                ),
+            )
+        )
 
     return plans
 
@@ -273,6 +317,8 @@ def _render_resume_markdown(
 def _truth_tier_max(claims: list[PreparedClaim]) -> TruthTier:
     """Return the highest truth tier found in the claim set."""
 
+    if any(claim.truth_tier == TruthTier.EXTENSION.value for claim in claims):
+        return TruthTier.EXTENSION
     if any(claim.truth_tier == TruthTier.INFERENCE.value for claim in claims):
         return TruthTier.INFERENCE
     return TruthTier.OBSERVED
@@ -281,6 +327,8 @@ def _truth_tier_max(claims: list[PreparedClaim]) -> TruthTier:
 def _review_status_for_claims(claims: list[PreparedClaim]) -> str:
     """Choose the initial review status for a generated document."""
 
+    if any(claim.truth_tier == TruthTier.EXTENSION.value for claim in claims):
+        return ReviewStatus.PENDING.value
     if any(claim.truth_tier == TruthTier.INFERENCE.value for claim in claims):
         return ReviewStatus.PENDING.value
     return ReviewStatus.APPROVED.value
@@ -313,6 +361,10 @@ def _answer_source_type(job_id: int, candidate_id: int) -> str:
 def _upsert_answer(session: Session, plan: PreparedAnswerPlan, *, source_type: str) -> Answer:
     """Reuse an existing identical answer when possible, otherwise insert a new one."""
 
+    needs_review = plan.truth_tier in {
+        TruthTier.INFERENCE.value,
+        TruthTier.EXTENSION.value,
+    }
     question_hash = _question_hash(plan.question)
     answer = session.scalar(
         select(Answer).where(
@@ -329,7 +381,7 @@ def _upsert_answer(session: Session, plan: PreparedAnswerPlan, *, source_type: s
             source_type=source_type,
             approval_status=(
                 ReviewStatus.PENDING.value
-                if plan.truth_tier == TruthTier.INFERENCE.value
+                if needs_review
                 else ReviewStatus.APPROVED.value
             ),
             truth_tier=TruthTier(plan.truth_tier),

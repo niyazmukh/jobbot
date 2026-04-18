@@ -1,0 +1,30 @@
+{
+  "site_vendor": "greenhouse",
+  "required_fields": ["first_name", "last_name", "email", "resume_upload"],
+  "cases": [
+    {
+      "field_key": "email",
+      "expected_profile_selectors": ["input[name='email']"],
+      "min_confidence_gate": 0.95,
+      "expected_manual_review": false
+    },
+    {
+      "field_key": "phone",
+      "expected_profile_selectors": ["input[name='phone']", "input[name='phone_number']"],
+      "min_confidence_gate": 0.95,
+      "expected_manual_review": false
+    },
+    {
+      "field_key": "linkedin_url",
+      "expected_profile_selectors": ["input[name='urls[LinkedIn]']", "input[name='linkedin']"],
+      "min_confidence_gate": 0.88,
+      "expected_manual_review": true
+    },
+    {
+      "field_key": "resume_upload",
+      "expected_profile_selectors": ["input[type='file'][name='resume']"],
+      "min_confidence_gate": 0.95,
+      "expected_manual_review": false
+    }
+  ]
+}

@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     extractor_threshold: float = 0.90
     field_mapping_threshold: float = 0.92
     answer_threshold: float = 0.88
+    model_call_daily_budget_usd: float = 5.0
+    model_call_weekly_budget_usd: float = 25.0
 
     @property
     def db_path(self) -> Path:

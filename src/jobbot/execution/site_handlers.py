@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from typing import Any
 
 
-_SUPPORTED_PAGE_OPEN_SITES = {"greenhouse", "lever"}
-_SUPPORTED_SUBMIT_GATE_SITES = {"greenhouse", "lever"}
+_SUPPORTED_PAGE_OPEN_SITES = {"greenhouse", "lever", "workday"}
+_SUPPORTED_SUBMIT_GATE_SITES = {"greenhouse", "lever", "workday"}
 
 
 @dataclass(frozen=True)

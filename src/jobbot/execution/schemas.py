@@ -189,6 +189,7 @@ class DraftExecutionDashboardRead(BaseModel):
     total_attempts: int
     blocked_attempts: int
     manual_review_blocked_attempts: int
+    extension_review_blocked_attempts: int
     pending_attempts: int
     review_state_attempts: int
     replay_ready_attempts: int
@@ -196,6 +197,7 @@ class DraftExecutionDashboardRead(BaseModel):
     remediation_history_limit: int
     blocked_failure_counts: dict[str, int]
     blocked_failure_classification_counts: dict[str, int]
+    linkedin_guarded_stop_reason_counts: dict[str, int]
     recent_attempts: list[DraftExecutionOverviewRead]
     blocked_recent_attempts: list[DraftExecutionOverviewRead]
     recommended_actions: list[str]
@@ -470,6 +472,7 @@ class DraftExecutionDashboardRemediationHistoryRead(BaseModel):
     failed_count: int
     failure_code: str | None = None
     failure_classification: str | None = None
+    linkedin_stop_reason: str | None = None
     manual_review_only: bool = False
     max_submit_confidence: float | None = None
     sort_by: str
@@ -545,4 +548,29 @@ class DraftLinkedInAssistPlanRead(BaseModel):
     blocked_auto_action_count: int
     recommended_mode: str
     fields: list[DraftLinkedInAssistFieldRead]
+    recommended_actions: list[str]
+
+
+class DraftLinkedInGuardedSubmitCriteriaRead(BaseModel):
+    """Read model for LinkedIn guarded-submit eligibility criteria evaluation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: int | None = None
+    attempt_id: int | None = None
+    event_id: int | None = None
+    artifact_id: int | None = None
+    artifact_path: str | None = None
+    profile_key: str
+    candidate_profile_slug: str | None = None
+    session_health: str
+    session_requires_reauth: bool
+    allow_session_automation: bool
+    question_count: int
+    assist_review_count: int
+    blocked_auto_action_count: int
+    recommended_mode: str
+    min_auto_confidence: float
+    allow_guarded_submit: bool
+    stop_reasons: list[str]
     recommended_actions: list[str]

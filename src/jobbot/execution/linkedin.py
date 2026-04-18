@@ -8,10 +8,12 @@ from html import unescape
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from jobbot.browser.service import get_browser_profile_policy
 from jobbot.db.models import CandidateProfile
 from jobbot.execution.schemas import (
     DraftLinkedInAssistFieldRead,
     DraftLinkedInAssistPlanRead,
+    DraftLinkedInGuardedSubmitCriteriaRead,
     DraftLinkedInQuestionExtractionRead,
     DraftLinkedInQuestionRead,
 )
@@ -195,6 +197,75 @@ def build_linkedin_assist_plan(
         blocked_auto_action_count=blocked_auto_action_count,
         recommended_mode=recommended_mode,
         fields=fields,
+        recommended_actions=recommended_actions,
+    )
+
+
+def evaluate_linkedin_guarded_submit_criteria(
+    session: Session,
+    *,
+    profile_key: str,
+    page_html: str,
+    candidate_profile_slug: str | None = None,
+    min_auto_confidence: float = 0.8,
+) -> DraftLinkedInGuardedSubmitCriteriaRead:
+    """Evaluate deterministic LinkedIn guarded-submit eligibility criteria."""
+
+    if min_auto_confidence < 0.0 or min_auto_confidence > 1.0:
+        raise ValueError("invalid_linkedin_assist_confidence_threshold")
+
+    try:
+        policy = get_browser_profile_policy(session, profile_key)
+    except ValueError as exc:
+        detail = str(exc)
+        if detail.startswith("Unknown browser profile key:"):
+            raise ValueError("browser_profile_not_found") from exc
+        raise
+
+    plan = build_linkedin_assist_plan(
+        session,
+        page_html=page_html,
+        candidate_profile_slug=candidate_profile_slug,
+        min_auto_confidence=min_auto_confidence,
+    )
+
+    stop_reasons: list[str] = []
+    if not policy.allow_application:
+        stop_reasons.append(f"linkedin_session_not_ready:{policy.session_health.value}")
+    if plan.recommended_mode != "draft":
+        stop_reasons.append("linkedin_assist_mode_required")
+    if plan.assist_review_count > 0:
+        stop_reasons.append(f"assist_review_required:{plan.assist_review_count}")
+    if plan.blocked_auto_action_count > 0:
+        stop_reasons.append(f"blocked_auto_actions:{plan.blocked_auto_action_count}")
+
+    allow_guarded_submit = len(stop_reasons) == 0
+    recommended_actions = [
+        "Allow LinkedIn guarded submit only when browser session health is application-ready.",
+        "Allow LinkedIn guarded submit only when assist-plan mode stays draft with zero assist-review blockers.",
+    ]
+    if not policy.allow_application:
+        recommended_actions.append(
+            f"LinkedIn browser profile requires remediation before submit: {policy.recommended_action}."
+        )
+    if plan.assist_review_count > 0:
+        recommended_actions.append(
+            "Resolve LinkedIn assist-review questions and rerun guarded-submit criteria."
+        )
+
+    return DraftLinkedInGuardedSubmitCriteriaRead(
+        profile_key=profile_key,
+        candidate_profile_slug=candidate_profile_slug,
+        session_health=policy.session_health.value,
+        session_requires_reauth=policy.requires_reauth,
+        allow_session_automation=policy.allow_application,
+        question_count=plan.question_count,
+        assist_review_count=plan.assist_review_count,
+        blocked_auto_action_count=plan.blocked_auto_action_count,
+        recommended_mode=plan.recommended_mode,
+        min_auto_confidence=min_auto_confidence,
+        allow_guarded_submit=allow_guarded_submit,
+        stop_reasons=stop_reasons,
         recommended_actions=recommended_actions,
     )
 

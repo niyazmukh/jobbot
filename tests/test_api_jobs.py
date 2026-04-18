@@ -1858,7 +1858,7 @@ def test_execution_api_guarded_submit_returns_conflict_when_submit_interaction_f
     assert attempt_detail_response.json()["failure_code"] == "guarded_submit_interaction_failed"
 
 
-def test_execution_api_guarded_submit_returns_not_found_for_unsupported_site(tmp_path):
+def test_execution_api_guarded_submit_returns_probe_conflict_for_workday_without_probe_match(tmp_path):
     session = make_session()
     ingest_discovery_batch(session, load_greenhouse_batch())
     candidate = CandidateProfile(
@@ -1933,7 +1933,7 @@ def test_execution_api_guarded_submit_returns_not_found_for_unsupported_site(tmp
                 application_id=application.id,
                 attempt_id=attempt_id,
                 event_type="draft_target_opened",
-                message="Synthetic target-open event for unsupported-site endpoint test.",
+                message="Synthetic target-open event for Workday probe-fail endpoint test.",
                 payload={"target_url": "https://example.com/workday/job/1"},
                 created_at=models.utcnow(),
             )
@@ -1943,7 +1943,7 @@ def test_execution_api_guarded_submit_returns_not_found_for_unsupported_site(tmp
                 application_id=application.id,
                 attempt_id=attempt_id,
                 event_type="draft_submit_gate_evaluated",
-                message="Synthetic gate event for unsupported-site endpoint test.",
+                message="Synthetic gate event for Workday probe-fail endpoint test.",
                 payload={"allow_submit": True, "confidence_score": 0.99},
                 created_at=models.utcnow(),
             )
@@ -1954,8 +1954,8 @@ def test_execution_api_guarded_submit_returns_not_found_for_unsupported_site(tmp
         app.dependency_overrides.clear()
         session.close()
 
-    assert submit_response.status_code == 404
-    assert submit_response.json()["detail"] == "guarded_submit_not_supported_for_site"
+    assert submit_response.status_code == 409
+    assert submit_response.json()["detail"] == "guarded_submit_probe_failed"
 
 
 def test_inbox_api_and_html_surface_blocked_execution_summary(tmp_path):
@@ -2731,6 +2731,325 @@ def test_execution_overview_and_dashboard_api_support_manual_review_only_filter(
     assert payload["blocked_failure_classification_counts"] == {"unknown_classification": 1}
     assert payload["recent_attempts"][0]["attempt_id"] == manual_attempt_id
     assert any("manual-review-required failures only" in action for action in payload["recommended_actions"])
+
+
+def test_execution_dashboard_api_counts_extension_review_blockers(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={
+            "email": "alex@example.com",
+            "phone": "+1-555-0100",
+            "location": "Remote",
+            "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+        },
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    browser = models.BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    first_job.ats_vendor = "greenhouse"
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+        bootstrap = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe?browser_profile_key=apply-main"
+        )
+        attempt_id = bootstrap.json()["attempt_id"]
+        attempt = session.query(models.ApplicationAttempt).filter_by(id=attempt_id).one()
+        attempt.result = "blocked"
+        attempt.failure_code = "extension_review_required"
+        session.commit()
+
+        dashboard_response = client.get("/api/execution/dashboard/alex-doe")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert dashboard_response.status_code == 200
+    payload = dashboard_response.json()
+    assert payload["blocked_attempts"] == 1
+    assert payload["manual_review_blocked_attempts"] == 0
+    assert payload["extension_review_blocked_attempts"] == 1
+    assert payload["blocked_failure_counts"] == {"extension_review_required": 1}
+    assert any("extension-review blockers" in action for action in payload["recommended_actions"])
+
+
+def test_execution_dashboard_api_includes_linkedin_guarded_stop_reason_counts(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={"email": "alex@example.com"},
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add(
+        CandidateFact(
+            candidate_profile_id=candidate.id,
+            fact_key="skills-001",
+            category="skills",
+            content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+        )
+    )
+    browser = models.BrowserProfile(
+        profile_key="linkedin-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="LinkedIn Main",
+        storage_path="/profiles/linkedin-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    first_job.ats_vendor = "linkedin"
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+        bootstrap = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe?browser_profile_key=linkedin-main"
+        )
+        attempt_id = bootstrap.json()["attempt_id"]
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/start")
+        browser.session_health = "checkpointed"
+        browser.validation_details = {"reasons": ["checkpoint_required"]}
+        session.commit()
+        criteria_response = client.post(
+            f"/api/execution/draft-attempts/{attempt_id}/linkedin-guarded-submit-criteria",
+            params={"page_html": "<form><input name='customQuestion_77' type='text'></form>"},
+        )
+        dashboard_response = client.get("/api/execution/dashboard/alex-doe")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert criteria_response.status_code == 200
+    assert dashboard_response.status_code == 200
+    payload = dashboard_response.json()
+    assert payload["blocked_failure_counts"] == {"linkedin_guarded_submit_criteria_blocked": 1}
+    assert payload["linkedin_guarded_stop_reason_counts"]["linkedin_assist_mode_required"] == 1
+    assert payload["linkedin_guarded_stop_reason_counts"]["linkedin_session_not_ready:checkpointed"] == 1
+    assert any(
+        action.startswith("Top LinkedIn guarded-submit stop reason is ")
+        for action in payload["recommended_actions"]
+    )
+
+
+def test_execution_dashboard_and_bulk_api_support_linkedin_stop_reason_filter(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={"email": "alex@example.com"},
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add(
+        CandidateFact(
+            candidate_profile_id=candidate.id,
+            fact_key="skills-001",
+            category="skills",
+            content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+        )
+    )
+    session.add_all(
+        [
+            models.BrowserProfile(
+                profile_key="linkedin-healthy",
+                profile_type=BrowserProfileType.APPLICATION,
+                display_name="LinkedIn Healthy",
+                storage_path="/profiles/linkedin-healthy",
+                session_health="healthy",
+                validation_details={"reasons": ["session_healthy"]},
+            ),
+                models.BrowserProfile(
+                    profile_key="linkedin-checkpointed",
+                    profile_type=BrowserProfileType.APPLICATION,
+                    display_name="LinkedIn Checkpointed",
+                    storage_path="/profiles/linkedin-checkpointed",
+                    session_health="healthy",
+                    validation_details={"reasons": ["session_healthy"]},
+                ),
+        ]
+    )
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    first_job.ats_vendor = "linkedin"
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+
+        healthy = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe?browser_profile_key=linkedin-healthy"
+        )
+        healthy_attempt_id = healthy.json()["attempt_id"]
+        client.post(f"/api/execution/draft-attempts/{healthy_attempt_id}/start")
+        client.post(
+            f"/api/execution/draft-attempts/{healthy_attempt_id}/linkedin-guarded-submit-criteria",
+            params={"page_html": "<form><input name='customQuestion_77' type='text'></form>"},
+        )
+
+        checkpointed = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe?browser_profile_key=linkedin-checkpointed"
+        )
+        checkpointed_attempt_id = checkpointed.json()["attempt_id"]
+        client.post(f"/api/execution/draft-attempts/{checkpointed_attempt_id}/start")
+        checkpointed_profile = (
+            session.query(models.BrowserProfile)
+            .filter_by(profile_key="linkedin-checkpointed")
+            .one()
+        )
+        checkpointed_profile.session_health = "checkpointed"
+        checkpointed_profile.validation_details = {"reasons": ["checkpoint_required"]}
+        session.commit()
+        client.post(
+            f"/api/execution/draft-attempts/{checkpointed_attempt_id}/linkedin-guarded-submit-criteria",
+            params={"page_html": "<form><input name='customQuestion_77' type='text'></form>"},
+        )
+
+        dashboard_response = client.get(
+            "/api/execution/dashboard/alex-doe?linkedin_stop_reason=linkedin_session_not_ready:checkpointed"
+        )
+        dashboard_html_response = client.get("/execution/dashboard/alex-doe")
+        bulk_response = client.post(
+            "/api/execution/dashboard/alex-doe/bulk-remediate-submit"
+            "?linkedin_stop_reason=linkedin_session_not_ready:checkpointed&limit=10"
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert dashboard_response.status_code == 200
+    assert dashboard_html_response.status_code == 200
+    payload = dashboard_response.json()
+    assert payload["total_attempts"] == 1
+    assert payload["blocked_attempts"] == 1
+    assert payload["blocked_failure_counts"] == {"linkedin_guarded_submit_criteria_blocked": 1}
+    assert any(
+        "linkedin_stop_reason=linkedin_session_not_ready:checkpointed" in action
+        for action in payload["recommended_actions"]
+    )
+    assert (
+        "/execution/overview/alex-doe?blocked_only=true&linkedin_stop_reason=linkedin_session_not_ready%3Acheckpointed"
+        in dashboard_html_response.text
+    )
+    assert (
+        "/execution/dashboard/alex-doe/bulk-remediate-submit?linkedin_stop_reason=linkedin_session_not_ready%3Acheckpointed"
+        in dashboard_html_response.text
+    )
+    assert bulk_response.status_code == 200
+    assert bulk_response.json()["targeted_attempt_ids"] == [checkpointed_attempt_id]
 
 
 def test_execution_overview_api_supports_confidence_sort_and_invalid_sort(tmp_path):
@@ -4409,3 +4728,156 @@ def test_linkedin_assist_plan_endpoint_blocks_low_confidence_auto_actions():
     assert payload["assist_review_count"] == 1
     assert payload["blocked_auto_action_count"] == 1
     assert payload["recommended_mode"] == "assist"
+
+
+def test_linkedin_guarded_submit_criteria_endpoint_blocks_unhealthy_session():
+    session = make_session()
+    profile = models.BrowserProfile(
+        profile_key="linkedin-main",
+        profile_type=models.BrowserProfileType.APPLICATION,
+        display_name="LinkedIn Main",
+        storage_path="C:/profiles/linkedin-main",
+        session_health=models.SessionHealth.CHECKPOINTED.value,
+        validation_details={"reasons": ["checkpoint_detected"]},
+    )
+    session.add(profile)
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/api/execution/linkedin/guarded-submit-criteria",
+            params={
+                "profile_key": "linkedin-main",
+                "page_html": (
+                    "<form>"
+                    "<label for='emailAddress'>Email address</label>"
+                    "<input id='emailAddress' name='emailAddress' type='email'>"
+                    "</form>"
+                ),
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["allow_session_automation"] is False
+    assert payload["allow_guarded_submit"] is False
+    assert "linkedin_session_not_ready:checkpointed" in payload["stop_reasons"]
+
+
+def test_execution_attempt_linkedin_criteria_endpoint_persists_lifecycle_state(tmp_path):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={
+            "email": "alex@example.com",
+            "phone": "+1-555-0100",
+            "location": "Remote",
+            "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+        },
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    session.add_all(
+        [
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="skills-001",
+                category="skills",
+                content="Senior backend engineer with Python SQL AWS experience and 8 years experience",
+            ),
+            CandidateFact(
+                candidate_profile_id=candidate.id,
+                fact_key="employment-002",
+                category="employment",
+                content="Led backend systems used by internal analytics teams.",
+            ),
+        ]
+    )
+    browser = models.BrowserProfile(
+        profile_key="linkedin-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="LinkedIn Main",
+        storage_path="/profiles/linkedin-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    first_job = session.query(models.Job).order_by(models.Job.id).first()
+    first_job.requirements_structured = {
+        "required_skills": ["python", "sql", "aws"],
+        "seniority_signals": ["senior"],
+        "required_years_experience": 5,
+    }
+    first_job.ats_vendor = "linkedin"
+    session.commit()
+    score_job_for_candidate(session, first_job.id, "alex-doe")
+    prepare_job_for_candidate(
+        session,
+        job_id=first_job.id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+    review = session.query(models.ReviewQueueItem).filter_by(entity_type="generated_document").one()
+    review.status = "approved"
+    document = session.query(models.GeneratedDocument).one()
+    document.review_status = "approved"
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
+        bootstrap_response = client.post(
+            f"/api/execution/draft-attempts/jobs/{first_job.id}/alex-doe?browser_profile_key=linkedin-main"
+        )
+        attempt_id = bootstrap_response.json()["attempt_id"]
+        client.post(f"/api/execution/draft-attempts/{attempt_id}/start")
+        response = client.post(
+            f"/api/execution/draft-attempts/{attempt_id}/linkedin-guarded-submit-criteria",
+            params={
+                "page_html": (
+                    "<form>"
+                    "<label for='emailAddress'>Email address</label>"
+                    "<input id='emailAddress' name='emailAddress' type='email'>"
+                    "<input name='customQuestion_77' type='text'>"
+                    "</form>"
+                ),
+                "min_auto_confidence": 0.8,
+            },
+        )
+        replay_response = client.get(f"/api/execution/replay/{attempt_id}")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["attempt_id"] == attempt_id
+    assert payload["allow_guarded_submit"] is False
+    assert payload["artifact_id"] is not None
+    assert "linkedin_assist_mode_required" in payload["stop_reasons"]
+
+    assert replay_response.status_code == 200
+    replay_assets = replay_response.json()["assets"]
+    assert any(asset["label"] == "linkedin_guarded_submit_criteria" for asset in replay_assets)

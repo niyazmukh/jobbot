@@ -15,6 +15,7 @@ from jobbot.execution.service import (
     bootstrap_draft_application_attempt,
     build_draft_field_plan,
     build_site_field_overlay,
+    evaluate_linkedin_guarded_submit_criteria_for_attempt,
     execute_guarded_submit,
     evaluate_submit_gate,
     get_execution_artifact_detail,
@@ -39,11 +40,20 @@ def make_session():
     return sessionmaker(bind=engine, autoflush=False, autocommit=False)()
 
 
-def seed_candidate_job_and_ready_snapshot(session, tmp_path: Path):
+def seed_candidate_job_and_ready_snapshot(
+    session,
+    tmp_path: Path,
+    *,
+    enable_tier3_extensions: bool = False,
+):
     candidate = CandidateProfile(
         name="Alex Doe",
         slug="alex-doe",
-        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        target_preferences={
+            "preferred_locations": ["Remote"],
+            "remote": True,
+            "enable_tier3_extensions": enable_tier3_extensions,
+        },
         source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
     )
     session.add(candidate)
@@ -750,6 +760,120 @@ def test_evaluate_submit_gate_supports_lever_and_tracks_required_fields(tmp_path
     assert "manual_review_required:why_this_role" in gate.stop_reasons
 
 
+def test_evaluate_submit_gate_blocks_unapproved_extension_answers(tmp_path: Path):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(
+        session,
+        tmp_path,
+        enable_tier3_extensions=True,
+    )
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "greenhouse"
+    browser = BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+    start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+    build_draft_field_plan(session, attempt_id=attempt.attempt_id)
+    build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+    open_site_target_page(session, attempt_id=attempt.attempt_id)
+    mappings = session.query(models.FieldMapping).filter_by(attempt_id=attempt.attempt_id).all()
+    for mapping in mappings:
+        parsed = json.loads(mapping.raw_dom_signature or "{}")
+        parsed["manual_review_required"] = False
+        parsed["resolution_status"] = "resolved"
+        if not parsed.get("resolved_selector"):
+            parsed["resolved_selector"] = "input[name='autofill']"
+        mapping.raw_dom_signature = json.dumps(parsed, ensure_ascii=True)
+    session.commit()
+
+    gate = evaluate_submit_gate(session, attempt_id=attempt.attempt_id)
+
+    assert gate.allow_submit is False
+    assert gate.failure_code == "extension_review_required"
+    assert any(reason.startswith("extension_review_required:") for reason in gate.stop_reasons)
+
+
+def test_evaluate_linkedin_guarded_submit_criteria_for_attempt_persists_event_and_artifact(tmp_path: Path):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "linkedin"
+    browser = BrowserProfile(
+        profile_key="linkedin-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="LinkedIn Main",
+        storage_path="/profiles/linkedin-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="linkedin-main",
+    )
+    start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+
+    criteria = evaluate_linkedin_guarded_submit_criteria_for_attempt(
+        session,
+        attempt_id=attempt.attempt_id,
+        page_html=(
+            "<form>"
+            "<label for='emailAddress'>Email address</label>"
+            "<input id='emailAddress' name='emailAddress' type='email'>"
+            "<input name='customQuestion_77' type='text'>"
+            "</form>"
+        ),
+        min_auto_confidence=0.8,
+    )
+
+    persisted_attempt = session.query(models.ApplicationAttempt).filter_by(id=attempt.attempt_id).one()
+    event = session.query(models.ApplicationEvent).filter_by(
+        attempt_id=attempt.attempt_id,
+        event_type="draft_linkedin_guarded_submit_criteria_evaluated",
+    ).one()
+    artifact = session.query(models.Artifact).filter_by(id=criteria.artifact_id).one()
+
+    assert criteria.attempt_id == attempt.attempt_id
+    assert criteria.allow_guarded_submit is False
+    assert "linkedin_assist_mode_required" in criteria.stop_reasons
+    assert persisted_attempt.result == "blocked"
+    assert persisted_attempt.failure_code == "linkedin_guarded_submit_criteria_blocked"
+    assert event.payload["allow_guarded_submit"] is False
+    assert artifact.path.endswith("linkedin_guarded_submit_criteria.json")
+    assert Path(artifact.path).exists()
+
+
 def test_execute_guarded_submit_succeeds_after_passing_submit_gate(tmp_path: Path, monkeypatch):
     session = make_session()
     job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
@@ -1226,6 +1350,15 @@ def test_build_submit_remediation_guidance_covers_known_classifications():
         assert expected_keyword.lower() in str(guidance["message"]).lower()
         assert guidance["primary_route"] is not None
 
+    extension_guidance = _build_submit_remediation_guidance(
+        failure_code="extension_review_required",
+        failure_classification=None,
+        **base_kwargs,
+    )
+    assert extension_guidance["message"] is not None
+    assert "extension" in str(extension_guidance["message"]).lower()
+    assert extension_guidance["primary_route"] == "/execution/attempts/11"
+
 
 def test_run_submit_remediation_action_replays_refresh_steps_for_probe_failure(
     tmp_path: Path, monkeypatch
@@ -1426,6 +1559,72 @@ def test_run_dashboard_bulk_submit_remediation_continues_on_attempt_failures(
     assert bulk.failures[0].error_code == "draft_field_plan_not_created"
 
 
+def test_run_dashboard_bulk_submit_remediation_scopes_by_linkedin_stop_reason(tmp_path: Path):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {"email": "alex@example.com"}
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "linkedin"
+    healthy = BrowserProfile(
+        profile_key="linkedin-healthy",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="LinkedIn Healthy",
+        storage_path="/profiles/linkedin-healthy",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    checkpointed = BrowserProfile(
+        profile_key="linkedin-checkpointed",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="LinkedIn Checkpointed",
+        storage_path="/profiles/linkedin-checkpointed",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add_all([healthy, checkpointed])
+    session.commit()
+
+    healthy_attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="linkedin-healthy",
+    )
+    start_draft_execution_attempt(session, attempt_id=healthy_attempt.attempt_id)
+    evaluate_linkedin_guarded_submit_criteria_for_attempt(
+        session,
+        attempt_id=healthy_attempt.attempt_id,
+        page_html="<form><input name='customQuestion_77' type='text'></form>",
+    )
+
+    checkpointed_attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="linkedin-checkpointed",
+    )
+    start_draft_execution_attempt(session, attempt_id=checkpointed_attempt.attempt_id)
+    checkpointed.session_health = "checkpointed"
+    checkpointed.validation_details = {"reasons": ["checkpoint_required"]}
+    session.commit()
+    evaluate_linkedin_guarded_submit_criteria_for_attempt(
+        session,
+        attempt_id=checkpointed_attempt.attempt_id,
+        page_html="<form><input name='customQuestion_77' type='text'></form>",
+    )
+
+    bulk = run_dashboard_bulk_submit_remediation(
+        session,
+        candidate_profile_slug="alex-doe",
+        linkedin_stop_reason="linkedin_session_not_ready:checkpointed",
+        limit=10,
+    )
+
+    assert bulk.requested_count == 1
+    assert bulk.targeted_attempt_ids == [checkpointed_attempt.attempt_id]
+
+
 def test_execute_guarded_submit_is_idempotent_after_first_success(tmp_path: Path):
     session = make_session()
     job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
@@ -1553,7 +1752,7 @@ def test_execute_guarded_submit_succeeds_for_lever_with_vendor_mode_and_plan(
     assert event.payload["submit_probe"]["probe_available"] is True
 
 
-def test_execute_guarded_submit_rejects_unsupported_site_even_with_gate_event(tmp_path: Path):
+def test_execute_guarded_submit_blocks_workday_when_submit_probe_has_no_selector_match(tmp_path: Path):
     session = make_session()
     job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
     job = session.query(models.Job).filter_by(id=job_id).one()
@@ -1570,7 +1769,7 @@ def test_execute_guarded_submit_rejects_unsupported_site_even_with_gate_event(tm
             application_id=application.id,
             attempt_id=attempt.attempt_id,
             event_type="draft_target_opened",
-            message="Synthetic target-open event for unsupported-site guard test.",
+            message="Synthetic target-open event for Workday probe-fail guard test.",
             payload={"target_url": "https://example.com/workday/job/1"},
             created_at=models.utcnow(),
         )
@@ -1580,7 +1779,7 @@ def test_execute_guarded_submit_rejects_unsupported_site_even_with_gate_event(tm
             application_id=application.id,
             attempt_id=attempt.attempt_id,
             event_type="draft_submit_gate_evaluated",
-            message="Synthetic gate event for unsupported-site guard test.",
+            message="Synthetic gate event for Workday probe-fail guard test.",
             payload={"allow_submit": True, "confidence_score": 0.99},
             created_at=models.utcnow(),
         )
@@ -1589,9 +1788,13 @@ def test_execute_guarded_submit_rejects_unsupported_site_even_with_gate_event(tm
 
     try:
         execute_guarded_submit(session, attempt_id=attempt.attempt_id)
-        assert False, "expected unsupported-site guarded-submit error"
+        assert False, "expected Workday guarded-submit probe-failed error"
     except ValueError as exc:
-        assert str(exc) == "guarded_submit_not_supported_for_site"
+        assert str(exc) == "guarded_submit_probe_failed"
+
+    refreshed_attempt = session.query(models.ApplicationAttempt).filter_by(id=attempt.attempt_id).one()
+    assert refreshed_attempt.result == "blocked"
+    assert refreshed_attempt.failure_code == "guarded_submit_probe_failed"
 
 
 def test_list_execution_overview_returns_blocked_attempts_with_job_context(tmp_path: Path):
@@ -1817,6 +2020,53 @@ def test_execution_overview_and_dashboard_support_manual_review_only_filter(tmp_
     assert dashboard.blocked_failure_classification_counts == {"unknown_classification": 1}
     assert dashboard.recent_attempts[0].attempt_id == manual_attempt.attempt_id
     assert any("manual-review-required failures only" in action for action in dashboard.recommended_actions)
+
+
+def test_execution_dashboard_counts_extension_review_blockers(tmp_path: Path):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "greenhouse"
+    browser = BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+
+    extension_attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+    persisted_extension = session.query(models.ApplicationAttempt).filter_by(id=extension_attempt.attempt_id).one()
+    persisted_extension.result = "blocked"
+    persisted_extension.failure_code = "extension_review_required"
+    session.commit()
+
+    dashboard = get_execution_dashboard(
+        session,
+        candidate_profile_slug="alex-doe",
+        limit=10,
+    )
+
+    assert dashboard.blocked_attempts == 1
+    assert dashboard.manual_review_blocked_attempts == 0
+    assert dashboard.extension_review_blocked_attempts == 1
+    assert dashboard.blocked_failure_counts == {"extension_review_required": 1}
+    assert any("extension-review blockers" in action for action in dashboard.recommended_actions)
 
 
 def test_execution_overview_supports_submit_confidence_sort_and_invalid_sort(tmp_path: Path):
@@ -2081,6 +2331,57 @@ def test_get_execution_replay_bundle_returns_replay_assets_and_actions(tmp_path:
         for asset in replay.assets
     )
     assert any("Resolve manual-review" in action for action in replay.recommended_actions)
+
+
+def test_get_execution_replay_bundle_includes_linkedin_criteria_asset(tmp_path: Path):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "linkedin"
+    browser = BrowserProfile(
+        profile_key="linkedin-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="LinkedIn Main",
+        storage_path="/profiles/linkedin-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="linkedin-main",
+    )
+    start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+    evaluate_linkedin_guarded_submit_criteria_for_attempt(
+        session,
+        attempt_id=attempt.attempt_id,
+        page_html=(
+            "<form>"
+            "<label for='emailAddress'>Email address</label>"
+            "<input id='emailAddress' name='emailAddress' type='email'>"
+            "<input name='customQuestion_77' type='text'>"
+            "</form>"
+        ),
+        min_auto_confidence=0.8,
+    )
+
+    replay = get_execution_replay_bundle(session, attempt_id=attempt.attempt_id)
+
+    criteria_asset = next(asset for asset in replay.assets if asset.label == "linkedin_guarded_submit_criteria")
+    assert criteria_asset.exists is True
+    assert criteria_asset.artifact_id is not None
+    assert any("linkedin_guarded_submit_criteria" in action for action in replay.recommended_actions)
 
 
 def test_get_execution_replay_bundle_exposes_playwright_trace_asset_launch_metadata(
@@ -2390,6 +2691,55 @@ def test_execution_dashboard_recommended_actions_include_retention_pressure_guid
     assert dashboard.remediation_history_limit == 2
     assert any(
         "Remediation history exceeds configured limit" in action
+        for action in dashboard.recommended_actions
+    )
+
+
+def test_execution_dashboard_surfaces_linkedin_guarded_stop_reasons(tmp_path: Path):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {"email": "alex@example.com"}
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "linkedin"
+    browser = BrowserProfile(
+        profile_key="linkedin-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="LinkedIn Main",
+        storage_path="/profiles/linkedin-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="linkedin-main",
+    )
+    start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+    browser.session_health = "checkpointed"
+    browser.validation_details = {"reasons": ["checkpoint_required"]}
+    session.commit()
+    evaluate_linkedin_guarded_submit_criteria_for_attempt(
+        session,
+        attempt_id=attempt.attempt_id,
+        page_html="<form><input name='customQuestion_77' type='text'></form>",
+    )
+
+    dashboard = get_execution_dashboard(
+        session,
+        candidate_profile_slug="alex-doe",
+        limit=10,
+    )
+
+    assert dashboard.blocked_failure_counts == {"linkedin_guarded_submit_criteria_blocked": 1}
+    assert dashboard.linkedin_guarded_stop_reason_counts["linkedin_assist_mode_required"] == 1
+    assert dashboard.linkedin_guarded_stop_reason_counts["linkedin_session_not_ready:checkpointed"] == 1
+    assert any(
+        action.startswith("Top LinkedIn guarded-submit stop reason is ")
         for action in dashboard.recommended_actions
     )
 

@@ -41,12 +41,15 @@ from jobbot.execution import (
     DraftSubmitGateRead,
     DraftTargetOpenRead,
     DraftLinkedInAssistPlanRead,
+    DraftLinkedInGuardedSubmitCriteriaRead,
     DraftLinkedInQuestionExtractionRead,
     build_linkedin_assist_plan,
     bootstrap_draft_application_attempt,
     build_draft_field_plan,
     build_site_field_overlay,
     execute_guarded_submit,
+    evaluate_linkedin_guarded_submit_criteria,
+    evaluate_linkedin_guarded_submit_criteria_for_attempt,
     extract_linkedin_question_widgets,
     evaluate_submit_gate,
     get_execution_artifact_detail,
@@ -77,6 +80,7 @@ from jobbot.discovery.inbox import (
     list_ready_to_apply_jobs,
 )
 from jobbot.models.enums import ReviewStatus
+from jobbot.model_calls import ModelCostDashboardRead, get_model_cost_dashboard
 from jobbot.preparation import PreparedJobRead, get_prepared_job_read
 from jobbot.review.schemas import ReviewQueueRead
 from jobbot.review.service import list_review_queue, queue_score_review, set_review_status
@@ -117,6 +121,30 @@ def create_app() -> FastAPI:
             "database_url": settings.resolved_database_url,
         }
 
+    @app.get("/api/model-calls/dashboard", response_model=ModelCostDashboardRead)
+    def model_calls_dashboard_endpoint(
+        db: DbSession,
+        lookback_days: Annotated[int, Query(ge=1, le=365)] = 7,
+        daily_budget_usd: Annotated[float, Query(ge=0.0)] = 5.0,
+        weekly_budget_usd: Annotated[float, Query(ge=0.0)] = 25.0,
+    ) -> ModelCostDashboardRead:
+        """Return model-call cost and budget telemetry for dashboard use."""
+
+        try:
+            return get_model_cost_dashboard(
+                db,
+                lookback_days=lookback_days,
+                daily_budget_usd=daily_budget_usd,
+                weekly_budget_usd=weekly_budget_usd,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "invalid_model_cost_lookback_days":
+                raise HTTPException(status_code=400, detail="invalid_model_cost_lookback_days") from exc
+            if detail == "invalid_model_cost_budget":
+                raise HTTPException(status_code=400, detail="invalid_model_cost_budget") from exc
+            raise
+
     @app.post(
         "/api/execution/linkedin/question-extraction",
         response_model=DraftLinkedInQuestionExtractionRead,
@@ -149,6 +177,40 @@ def create_app() -> FastAPI:
             )
         except ValueError as exc:
             detail = str(exc)
+            if detail == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
+            if detail == "invalid_linkedin_assist_confidence_threshold":
+                raise HTTPException(
+                    status_code=400,
+                    detail="invalid_linkedin_assist_confidence_threshold",
+                ) from exc
+            raise
+
+    @app.post(
+        "/api/execution/linkedin/guarded-submit-criteria",
+        response_model=DraftLinkedInGuardedSubmitCriteriaRead,
+    )
+    def evaluate_linkedin_guarded_submit_criteria_endpoint(
+        db: DbSession,
+        profile_key: str,
+        page_html: str,
+        candidate_profile_slug: str | None = None,
+        min_auto_confidence: Annotated[float, Query(ge=0.0, le=1.0)] = 0.8,
+    ) -> DraftLinkedInGuardedSubmitCriteriaRead:
+        """Evaluate deterministic LinkedIn guarded-submit criteria before any submit attempt."""
+
+        try:
+            return evaluate_linkedin_guarded_submit_criteria(
+                db,
+                profile_key=profile_key,
+                page_html=page_html,
+                candidate_profile_slug=candidate_profile_slug,
+                min_auto_confidence=min_auto_confidence,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "browser_profile_not_found":
+                raise HTTPException(status_code=404, detail="browser_profile_not_found") from exc
             if detail == "candidate_profile_not_found":
                 raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
             if detail == "invalid_linkedin_assist_confidence_threshold":
@@ -282,6 +344,8 @@ def create_app() -> FastAPI:
         blocked_only: bool = False,
         manual_review_only: bool = False,
         failure_code: str | None = None,
+        failure_classification: str | None = None,
+        linkedin_stop_reason: str | None = None,
         max_submit_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
         sort_by: str = "started_at",
         descending: bool = True,
@@ -296,6 +360,8 @@ def create_app() -> FastAPI:
                 blocked_only=blocked_only,
                 manual_review_only=manual_review_only,
                 failure_code=failure_code,
+                failure_classification=failure_classification,
+                linkedin_stop_reason=linkedin_stop_reason,
                 max_submit_confidence=max_submit_confidence,
                 sort_by=sort_by,
                 descending=descending,
@@ -322,6 +388,7 @@ def create_app() -> FastAPI:
         manual_review_only: bool = False,
         failure_code: str | None = None,
         failure_classification: str | None = None,
+        linkedin_stop_reason: str | None = None,
         max_submit_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
         sort_by: str = "started_at",
         descending: bool = True,
@@ -347,6 +414,7 @@ def create_app() -> FastAPI:
                 manual_review_only=manual_review_only,
                 failure_code=failure_code,
                 failure_classification=failure_classification,
+                linkedin_stop_reason=linkedin_stop_reason,
                 max_submit_confidence=max_submit_confidence,
                 sort_by=sort_by,
                 descending=descending,
@@ -400,6 +468,7 @@ def create_app() -> FastAPI:
         manual_review_only: bool = False,
         failure_code: str | None = None,
         failure_classification: str | None = None,
+        linkedin_stop_reason: str | None = None,
         max_submit_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
         sort_by: str = "started_at",
         descending: bool = True,
@@ -414,6 +483,7 @@ def create_app() -> FastAPI:
                 manual_review_only=manual_review_only,
                 failure_code=failure_code,
                 failure_classification=failure_classification,
+                linkedin_stop_reason=linkedin_stop_reason,
                 max_submit_confidence=max_submit_confidence,
                 sort_by=sort_by,
                 descending=descending,
@@ -426,6 +496,7 @@ def create_app() -> FastAPI:
                 manual_review_only=manual_review_only,
                 failure_code=failure_code,
                 failure_classification=failure_classification,
+                linkedin_stop_reason=linkedin_stop_reason,
                 max_submit_confidence=max_submit_confidence,
                 sort_by=sort_by,
                 descending=descending,
@@ -948,6 +1019,7 @@ def create_app() -> FastAPI:
         manual_review_only: bool = False,
         failure_code: str | None = None,
         failure_classification: str | None = None,
+        linkedin_stop_reason: str | None = None,
         max_submit_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
         sort_by: str = "started_at",
         descending: bool = True,
@@ -963,6 +1035,7 @@ def create_app() -> FastAPI:
                 manual_review_only=manual_review_only,
                 failure_code=failure_code,
                 failure_classification=failure_classification,
+                linkedin_stop_reason=linkedin_stop_reason,
                 max_submit_confidence=max_submit_confidence,
                 sort_by=sort_by,
                 descending=descending,
@@ -985,6 +1058,7 @@ def create_app() -> FastAPI:
         manual_review_only: bool = False,
         failure_code: str | None = None,
         failure_classification: str | None = None,
+        linkedin_stop_reason: str | None = None,
         max_submit_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
         sort_by: str = "started_at",
         descending: bool = True,
@@ -999,6 +1073,7 @@ def create_app() -> FastAPI:
                 manual_review_only=manual_review_only,
                 failure_code=failure_code,
                 failure_classification=failure_classification,
+                linkedin_stop_reason=linkedin_stop_reason,
                 max_submit_confidence=max_submit_confidence,
                 sort_by=sort_by,
                 descending=descending,
@@ -1097,6 +1172,7 @@ def create_app() -> FastAPI:
         manual_review_only: bool = False,
         failure_code: str | None = None,
         failure_classification: str | None = None,
+        linkedin_stop_reason: str | None = None,
         max_submit_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
         sort_by: str = "started_at",
         descending: bool = True,
@@ -1111,6 +1187,7 @@ def create_app() -> FastAPI:
                 manual_review_only=manual_review_only,
                 failure_code=failure_code,
                 failure_classification=failure_classification,
+                linkedin_stop_reason=linkedin_stop_reason,
                 max_submit_confidence=max_submit_confidence,
                 sort_by=sort_by,
                 descending=descending,
@@ -1424,6 +1501,41 @@ def create_app() -> FastAPI:
                 "submit_gate_not_supported_for_site",
                 "draft_field_plan_empty",
             }:
+                raise HTTPException(status_code=404, detail=detail) from exc
+            raise
+
+    @app.post(
+        "/api/execution/draft-attempts/{attempt_id}/linkedin-guarded-submit-criteria",
+        response_model=DraftLinkedInGuardedSubmitCriteriaRead,
+    )
+    def evaluate_linkedin_guarded_submit_criteria_for_attempt_endpoint(
+        attempt_id: int,
+        db: DbSession,
+        page_html: str,
+        min_auto_confidence: Annotated[float, Query(ge=0.0, le=1.0)] = 0.8,
+    ) -> DraftLinkedInGuardedSubmitCriteriaRead:
+        """Persist LinkedIn guarded-submit criteria for one draft attempt and expose lifecycle state."""
+
+        try:
+            return evaluate_linkedin_guarded_submit_criteria_for_attempt(
+                db,
+                attempt_id=attempt_id,
+                page_html=page_html,
+                min_auto_confidence=min_auto_confidence,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "application_attempt_not_found":
+                raise HTTPException(status_code=404, detail="application_attempt_not_found") from exc
+            if detail in {
+                "application_attempt_not_draft",
+                "linkedin_guarded_submit_not_supported_for_site",
+                "browser_profile_required_for_linkedin_criteria",
+                "draft_execution_not_started",
+                "invalid_linkedin_assist_confidence_threshold",
+            }:
+                raise HTTPException(status_code=409, detail=detail) from exc
+            if detail in {"browser_profile_not_found", "candidate_profile_not_found"}:
                 raise HTTPException(status_code=404, detail=detail) from exc
             raise
 
@@ -2246,6 +2358,7 @@ def _render_execution_dashboard_page(
             key=lambda item: (-item[1], item[0]),
         )
     ) or "<li>No blocked classifications recorded.</li>"
+    linkedin_guarded_stop_reason_html = ""
 
     top_failure_code = "submit_gate_blocked"
     if detail.blocked_failure_counts:
@@ -2259,6 +2372,12 @@ def _render_execution_dashboard_page(
             detail.blocked_failure_classification_counts.items(),
             key=lambda item: item[1],
         )[0]
+    top_linkedin_stop_reason: str | None = None
+    if detail.linkedin_guarded_stop_reason_counts:
+        top_linkedin_stop_reason = max(
+            detail.linkedin_guarded_stop_reason_counts.items(),
+            key=lambda item: item[1],
+        )[0]
     base_bulk_route = (
         f"/execution/dashboard/{escape(detail.candidate_profile_slug)}/bulk-remediate-submit"
     )
@@ -2267,12 +2386,46 @@ def _render_execution_dashboard_page(
     bulk_by_classification_route = (
         f"{base_bulk_route}?failure_classification={quote(top_failure_classification, safe='')}"
     )
+    bulk_by_linkedin_stop_reason_route = (
+        f"{base_bulk_route}?linkedin_stop_reason={quote(top_linkedin_stop_reason, safe='')}"
+        if top_linkedin_stop_reason is not None
+        else None
+    )
     history_limit_route = (
         f"/execution/dashboard/{escape(detail.candidate_profile_slug)}/remediation-history/limit"
     )
     history_prune_route = (
         f"/execution/dashboard/{escape(detail.candidate_profile_slug)}/remediation-history/prune"
     )
+    overview_base_route = f"/execution/overview/{escape(detail.candidate_profile_slug)}"
+    if detail.linkedin_guarded_stop_reason_counts:
+        linkedin_items: list[str] = []
+        for reason, count in sorted(
+            detail.linkedin_guarded_stop_reason_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        ):
+            encoded_reason = quote(reason, safe="")
+            scoped_overview_route = (
+                f"{overview_base_route}?blocked_only=true&linkedin_stop_reason={encoded_reason}"
+            )
+            scoped_bulk_route = f"{base_bulk_route}?linkedin_stop_reason={encoded_reason}"
+            linkedin_items.append(
+                "<li>"
+                f"{escape(reason)}: {count}"
+                f" | <a href='{scoped_overview_route}'>view attempts</a>"
+                f" | <a href='{scoped_bulk_route}'>remediate scope</a>"
+                "</li>"
+            )
+        linkedin_guarded_stop_reason_html = "\n".join(linkedin_items)
+    else:
+        linkedin_guarded_stop_reason_html = "<li>No LinkedIn guarded stop reasons recorded.</li>"
+    bulk_by_linkedin_stop_reason_html = ""
+    if bulk_by_linkedin_stop_reason_route is not None:
+        bulk_by_linkedin_stop_reason_html = (
+            f"<form method=\"post\" action=\"{bulk_by_linkedin_stop_reason_route}\">"
+            "<button type=\"submit\">Run LinkedIn stop-reason remediation</button>"
+            "</form>"
+        )
 
     actions_html = "\n".join(f"<li>{escape(action)}</li>" for action in detail.recommended_actions)
     bulk_feedback_html = ""
@@ -2352,6 +2505,8 @@ def _render_execution_dashboard_page(
                 scopes.append(f"failure_code={row.failure_code}")
             if row.failure_classification:
                 scopes.append(f"failure_classification={row.failure_classification}")
+            if row.linkedin_stop_reason:
+                scopes.append(f"linkedin_stop_reason={row.linkedin_stop_reason}")
             if row.manual_review_only:
                 scopes.append("manual_review_only=true")
             scope_line = f"<br><small>{escape(' | '.join(scopes))}</small>" if scopes else ""
@@ -2454,6 +2609,7 @@ def _render_execution_dashboard_page(
         <form method="post" action="{bulk_by_classification_route}">
           <button type="submit">Run classification remediation</button>
         </form>
+        {bulk_by_linkedin_stop_reason_html}
       </section>
       <section class="grid">{metric_cards}</section>
       <section class="panel">
@@ -2467,6 +2623,10 @@ def _render_execution_dashboard_page(
       <section class="panel">
         <h2>Blocked Failure Classification Breakdown</h2>
         <ul>{blocked_failure_classification_html}</ul>
+      </section>
+      <section class="panel">
+        <h2>LinkedIn Guarded Stop Reasons</h2>
+        <ul>{linkedin_guarded_stop_reason_html}</ul>
       </section>
       <section class="panel">
         <h2>Recent Attempts</h2>

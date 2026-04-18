@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from jobbot.config import get_settings
 from jobbot.browser.service import get_browser_profile_policy
 from jobbot.db.models import (
+    Answer,
     Application,
     ApplicationAttempt,
     ApplicationEligibility,
@@ -55,7 +56,9 @@ from jobbot.execution.schemas import (
     DraftSiteFieldPlanEntryRead,
     DraftSiteFieldPlanRead,
     DraftTargetOpenRead,
+    DraftLinkedInGuardedSubmitCriteriaRead,
 )
+from jobbot.execution.linkedin import evaluate_linkedin_guarded_submit_criteria as evaluate_linkedin_guarded_submit_criteria_for_profile
 from jobbot.execution.site_handlers import (
     build_guarded_submit_artifact_payload,
     build_guarded_submit_attempt_note,
@@ -74,6 +77,7 @@ from jobbot.models.enums import (
     ArtifactType,
     AttemptResult,
     BrowserProfileType,
+    ReviewStatus,
     TruthTier,
 )
 from jobbot.preparation import get_prepared_job_read
@@ -281,6 +285,7 @@ def list_execution_overview(
     manual_review_only: bool = False,
     failure_code: str | None = None,
     failure_classification: str | None = None,
+    linkedin_stop_reason: str | None = None,
     max_submit_confidence: float | None = None,
     sort_by: str = "started_at",
     descending: bool = True,
@@ -482,6 +487,17 @@ def list_execution_overview(
             for item in items
             if (item.failure_classification or "").strip().lower() == normalized
         ]
+    if linkedin_stop_reason is not None:
+        normalized = linkedin_stop_reason.strip().lower()
+        stop_reason_map = _build_linkedin_guarded_stop_reason_map(
+            session=session,
+            attempt_ids=[item.attempt_id for item in items],
+        )
+        items = [
+            item
+            for item in items
+            if normalized in stop_reason_map.get(item.attempt_id, set())
+        ]
     if max_submit_confidence is not None:
         items = [
             item
@@ -519,6 +535,7 @@ def get_execution_dashboard(
     manual_review_only: bool = False,
     failure_code: str | None = None,
     failure_classification: str | None = None,
+    linkedin_stop_reason: str | None = None,
     max_submit_confidence: float | None = None,
     sort_by: str = "started_at",
     descending: bool = True,
@@ -533,6 +550,7 @@ def get_execution_dashboard(
         manual_review_only=manual_review_only,
         failure_code=failure_code,
         failure_classification=failure_classification,
+        linkedin_stop_reason=linkedin_stop_reason,
         max_submit_confidence=max_submit_confidence,
         sort_by=sort_by,
         descending=descending,
@@ -553,6 +571,22 @@ def get_execution_dashboard(
         for code, count in blocked_failure_counts.items()
         if code.startswith("manual_review_required:")
     )
+    extension_review_blocked_attempts = blocked_failure_counts.get("extension_review_required", 0)
+    linkedin_guarded_stop_reason_counts: dict[str, int] = {}
+    linkedin_blocked_attempt_ids = [
+        row.attempt_id
+        for row in blocked_rows
+        if row.failure_code == "linkedin_guarded_submit_criteria_blocked"
+    ]
+    stop_reason_map = _build_linkedin_guarded_stop_reason_map(
+        session=session,
+        attempt_ids=linkedin_blocked_attempt_ids,
+    )
+    for reasons in stop_reason_map.values():
+        for reason in reasons:
+            linkedin_guarded_stop_reason_counts[reason] = (
+                linkedin_guarded_stop_reason_counts.get(reason, 0) + 1
+            )
     pending_rows = [row for row in rows if row.attempt_result is None]
     review_application_ids = {
         row.application_id
@@ -579,6 +613,19 @@ def get_execution_dashboard(
     ]
     if blocked_rows:
         recommended_actions.append("Prioritize attempts with submit_gate_blocked failure codes and manual-review stop reasons.")
+        if extension_review_blocked_attempts:
+            recommended_actions.append(
+                "Resolve extension-review blockers by approving or replacing Tier 3 extension answers before guarded-submit retries."
+            )
+        if linkedin_guarded_stop_reason_counts:
+            top_linkedin_stop_reason, top_linkedin_stop_reason_count = max(
+                linkedin_guarded_stop_reason_counts.items(),
+                key=lambda item: item[1],
+            )
+            recommended_actions.append(
+                "Top LinkedIn guarded-submit stop reason is "
+                f"{top_linkedin_stop_reason} ({top_linkedin_stop_reason_count} attempts)."
+            )
         top_failure_code, top_failure_count = max(
             blocked_failure_counts.items(),
             key=lambda item: item[1],
@@ -600,6 +647,10 @@ def get_execution_dashboard(
         recommended_actions.append(
             f"Execution view is scoped to failure_classification={failure_classification}."
         )
+    if linkedin_stop_reason:
+        recommended_actions.append(
+            f"Execution view is scoped to linkedin_stop_reason={linkedin_stop_reason}."
+        )
     if manual_review_only:
         recommended_actions.append("Execution view is scoped to manual-review-required failures only.")
     if max_submit_confidence is not None:
@@ -619,6 +670,7 @@ def get_execution_dashboard(
         total_attempts=len(rows),
         blocked_attempts=len(blocked_rows),
         manual_review_blocked_attempts=manual_review_blocked_attempts,
+        extension_review_blocked_attempts=extension_review_blocked_attempts,
         pending_attempts=len(pending_rows),
         review_state_attempts=len(review_application_ids),
         replay_ready_attempts=len(replay_ready_rows),
@@ -626,6 +678,7 @@ def get_execution_dashboard(
         remediation_history_limit=remediation_history_limit,
         blocked_failure_counts=blocked_failure_counts,
         blocked_failure_classification_counts=blocked_failure_classification_counts,
+        linkedin_guarded_stop_reason_counts=linkedin_guarded_stop_reason_counts,
         recent_attempts=rows[:limit],
         blocked_recent_attempts=blocked_rows[:limit],
         recommended_actions=recommended_actions,
@@ -878,6 +931,7 @@ def get_execution_replay_bundle(
     overlay_event = _event_by_type(events, "draft_site_field_overlay_created")
     target_event = _event_by_type(events, "draft_target_opened")
     submit_gate_event = _event_by_type(events, "draft_submit_gate_evaluated")
+    linkedin_criteria_event = _event_by_type(events, "draft_linkedin_guarded_submit_criteria_evaluated")
     guarded_submit_event = _event_by_type(events, "draft_submit_executed")
     latest_event = events[-1] if events else None
 
@@ -941,6 +995,12 @@ def get_execution_replay_bundle(
         ),
         _build_replay_asset(
             attempt_id=attempt.id,
+            label="linkedin_guarded_submit_criteria",
+            artifact=_artifact_from_event_payload(artifacts, linkedin_criteria_event, "artifact_id"),
+            fallback_path=_payload_value(linkedin_criteria_event, "artifact_path"),
+        ),
+        _build_replay_asset(
+            attempt_id=attempt.id,
             label="guarded_submit",
             artifact=_artifact_from_event_payload(artifacts, guarded_submit_event, "artifact_id"),
             fallback_path=_payload_value(guarded_submit_event, "artifact_path"),
@@ -966,6 +1026,10 @@ def get_execution_replay_bundle(
         recommended_actions.append(f"Use startup_dir for local replay inputs: {startup_dir}")
     if attempt.result == AttemptResult.BLOCKED.value:
         recommended_actions.append("Resolve manual-review or unresolved fields before attempting guarded submit again.")
+    if linkedin_criteria_event is not None:
+        recommended_actions.append(
+            "Inspect linkedin_guarded_submit_criteria before LinkedIn submit attempts to confirm session/assist gates."
+        )
     if attempt.result == AttemptResult.SUCCESS.value:
         recommended_actions.append("Inspect guarded_submit artifacts to verify submission evidence and post-submit diagnostics.")
 
@@ -1758,7 +1822,17 @@ def evaluate_submit_gate(
     resolved_required_fields = signals.resolved_required_fields
     manual_review_fields = signals.manual_review_fields
     unresolved_fields = signals.unresolved_fields
-    stop_reasons = signals.stop_reasons
+    stop_reasons = list(signals.stop_reasons)
+    extension_review_fields = _collect_unapproved_extension_fields(
+        session,
+        mappings=mappings,
+    )
+    if extension_review_fields:
+        for field_key in extension_review_fields:
+            stop_reason = f"extension_review_required:{field_key}"
+            if stop_reason not in stop_reasons:
+                stop_reasons.append(stop_reason)
+        manual_review_fields = sorted(set(manual_review_fields + extension_review_fields))
 
     confidence_score = _compute_submit_confidence(
         required_fields=required_fields,
@@ -1773,7 +1847,10 @@ def evaluate_submit_gate(
         attempt.failure_code = None
     else:
         attempt.result = AttemptResult.BLOCKED.value
-        attempt.failure_code = "submit_gate_blocked"
+        if any(reason.startswith("extension_review_required:") for reason in stop_reasons):
+            attempt.failure_code = "extension_review_required"
+        else:
+            attempt.failure_code = "submit_gate_blocked"
         application.current_state = ApplicationState.REVIEW.value
     attempt.notes = build_submit_gate_attempt_note(
         allow_submit=allow_submit,
@@ -1855,6 +1932,153 @@ def evaluate_submit_gate(
         manual_review_fields=manual_review_fields,
         artifact_id=artifact.id,
         artifact_path=str(artifact_path),
+    )
+
+
+def evaluate_linkedin_guarded_submit_criteria_for_attempt(
+    session: Session,
+    *,
+    attempt_id: int,
+    page_html: str,
+    min_auto_confidence: float = 0.8,
+) -> DraftLinkedInGuardedSubmitCriteriaRead:
+    """Evaluate and persist LinkedIn guarded-submit criteria for one draft attempt."""
+
+    row = session.execute(
+        select(ApplicationAttempt, Application, CandidateProfile, Job)
+        .join(Application, Application.id == ApplicationAttempt.application_id)
+        .join(CandidateProfile, CandidateProfile.id == Application.candidate_profile_id)
+        .join(Job, Job.id == Application.job_id)
+        .where(ApplicationAttempt.id == attempt_id)
+    ).first()
+    if row is None:
+        raise ValueError("application_attempt_not_found")
+
+    attempt, application, candidate, job = row
+    if attempt.mode != ApplicationMode.DRAFT:
+        raise ValueError("application_attempt_not_draft")
+    if str(job.ats_vendor or "").strip().lower() != "linkedin":
+        raise ValueError("linkedin_guarded_submit_not_supported_for_site")
+    if not attempt.browser_profile_key:
+        raise ValueError("browser_profile_required_for_linkedin_criteria")
+
+    startup_event = session.scalar(
+        select(ApplicationEvent).where(
+            ApplicationEvent.attempt_id == attempt.id,
+            ApplicationEvent.event_type == "draft_execution_started",
+        )
+    )
+    if startup_event is None:
+        raise ValueError("draft_execution_not_started")
+
+    existing_event = session.scalar(
+        select(ApplicationEvent).where(
+            ApplicationEvent.attempt_id == attempt.id,
+            ApplicationEvent.event_type == "draft_linkedin_guarded_submit_criteria_evaluated",
+        )
+    )
+    if existing_event is not None:
+        return _build_linkedin_guarded_submit_criteria_read_from_event(
+            application_id=application.id,
+            attempt_id=attempt.id,
+            event=existing_event,
+        )
+
+    criteria = evaluate_linkedin_guarded_submit_criteria_for_profile(
+        session,
+        profile_key=attempt.browser_profile_key,
+        page_html=page_html,
+        candidate_profile_slug=candidate.slug,
+        min_auto_confidence=min_auto_confidence,
+    )
+
+    startup_payload = startup_event.payload or {}
+    startup_dir = Path(
+        str(
+            startup_payload.get("startup_dir")
+            or _execution_startup_dir(candidate.slug, application.job_id, attempt.id)
+        )
+    )
+    startup_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = startup_dir / "linkedin_guarded_submit_criteria.json"
+    artifact_payload = criteria.model_dump(mode="json")
+    artifact_path.write_text(
+        json.dumps(artifact_payload, indent=2, ensure_ascii=True),
+        encoding="utf-8",
+    )
+
+    now = utcnow()
+    artifact = Artifact(
+        attempt_id=attempt.id,
+        artifact_type=ArtifactType.MODEL_IO,
+        path=str(artifact_path),
+        size_bytes=artifact_path.stat().st_size,
+        retention_days=get_settings().artifact_retention_days,
+        created_at=now,
+    )
+    session.add(artifact)
+    session.flush()
+
+    event_payload = {
+        "profile_key": criteria.profile_key,
+        "candidate_profile_slug": criteria.candidate_profile_slug,
+        "session_health": criteria.session_health,
+        "session_requires_reauth": criteria.session_requires_reauth,
+        "allow_session_automation": criteria.allow_session_automation,
+        "question_count": criteria.question_count,
+        "assist_review_count": criteria.assist_review_count,
+        "blocked_auto_action_count": criteria.blocked_auto_action_count,
+        "recommended_mode": criteria.recommended_mode,
+        "min_auto_confidence": criteria.min_auto_confidence,
+        "allow_guarded_submit": criteria.allow_guarded_submit,
+        "stop_reasons": list(criteria.stop_reasons),
+        "recommended_actions": list(criteria.recommended_actions),
+        "artifact_id": artifact.id,
+        "artifact_path": str(artifact_path),
+    }
+    event = ApplicationEvent(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_type="draft_linkedin_guarded_submit_criteria_evaluated",
+        message="LinkedIn guarded-submit criteria evaluated from session health and assist-plan confidence.",
+        payload=event_payload,
+        created_at=now,
+    )
+    session.add(event)
+
+    if criteria.allow_guarded_submit:
+        if attempt.failure_code == "linkedin_guarded_submit_criteria_blocked":
+            attempt.result = None
+            attempt.failure_code = None
+        attempt.notes = "LinkedIn guarded-submit criteria passed."
+    else:
+        attempt.result = AttemptResult.BLOCKED.value
+        attempt.failure_code = "linkedin_guarded_submit_criteria_blocked"
+        attempt.notes = "LinkedIn guarded-submit criteria blocked this attempt."
+        application.current_state = ApplicationState.REVIEW.value
+    application.updated_at = now
+    session.commit()
+    session.refresh(event)
+
+    return DraftLinkedInGuardedSubmitCriteriaRead(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_id=event.id,
+        artifact_id=artifact.id,
+        artifact_path=str(artifact_path),
+        profile_key=criteria.profile_key,
+        candidate_profile_slug=criteria.candidate_profile_slug,
+        session_health=criteria.session_health,
+        session_requires_reauth=criteria.session_requires_reauth,
+        allow_session_automation=criteria.allow_session_automation,
+        question_count=criteria.question_count,
+        assist_review_count=criteria.assist_review_count,
+        blocked_auto_action_count=criteria.blocked_auto_action_count,
+        recommended_mode=criteria.recommended_mode,
+        min_auto_confidence=criteria.min_auto_confidence,
+        allow_guarded_submit=criteria.allow_guarded_submit,
+        stop_reasons=list(criteria.stop_reasons),
+        recommended_actions=list(criteria.recommended_actions),
     )
 
 
@@ -2323,6 +2547,7 @@ def run_dashboard_bulk_submit_remediation(
     manual_review_only: bool = False,
     failure_code: str | None = None,
     failure_classification: str | None = None,
+    linkedin_stop_reason: str | None = None,
     max_submit_confidence: float | None = None,
     sort_by: str = "started_at",
     descending: bool = True,
@@ -2337,6 +2562,7 @@ def run_dashboard_bulk_submit_remediation(
         manual_review_only=manual_review_only,
         failure_code=failure_code,
         failure_classification=failure_classification,
+        linkedin_stop_reason=linkedin_stop_reason,
         max_submit_confidence=max_submit_confidence,
         sort_by=sort_by,
         descending=descending,
@@ -2375,6 +2601,7 @@ def record_execution_dashboard_bulk_history(
     manual_review_only: bool = False,
     failure_code: str | None = None,
     failure_classification: str | None = None,
+    linkedin_stop_reason: str | None = None,
     max_submit_confidence: float | None = None,
     sort_by: str = "started_at",
     descending: bool = True,
@@ -2406,6 +2633,7 @@ def record_execution_dashboard_bulk_history(
             "failed_count": remediation_batch.failed_count,
             "failure_code": failure_code,
             "failure_classification": failure_classification,
+            "linkedin_stop_reason": linkedin_stop_reason,
             "manual_review_only": bool(manual_review_only),
             "max_submit_confidence": max_submit_confidence,
             "sort_by": sort_by,
@@ -2588,6 +2816,9 @@ def replay_execution_dashboard_bulk_history_by_id(
         failure_classification=(
             str(row["failure_classification"]) if row.get("failure_classification") else None
         ),
+        linkedin_stop_reason=(
+            str(row["linkedin_stop_reason"]) if row.get("linkedin_stop_reason") else None
+        ),
         max_submit_confidence=(
             float(row["max_submit_confidence"])
             if row.get("max_submit_confidence") is not None
@@ -2605,6 +2836,9 @@ def replay_execution_dashboard_bulk_history_by_id(
         failure_code=(str(row["failure_code"]) if row.get("failure_code") else None),
         failure_classification=(
             str(row["failure_classification"]) if row.get("failure_classification") else None
+        ),
+        linkedin_stop_reason=(
+            str(row["linkedin_stop_reason"]) if row.get("linkedin_stop_reason") else None
         ),
         max_submit_confidence=(
             float(row["max_submit_confidence"])
@@ -2648,6 +2882,11 @@ def list_execution_dashboard_bulk_history_reads(
                 failure_classification=(
                     str(row["failure_classification"])
                     if row.get("failure_classification") is not None
+                    else None
+                ),
+                linkedin_stop_reason=(
+                    str(row["linkedin_stop_reason"])
+                    if row.get("linkedin_stop_reason") is not None
                     else None
                 ),
                 manual_review_only=bool(row.get("manual_review_only", False)),
@@ -2893,6 +3132,40 @@ def _extract_failure_classification_from_event(event: ApplicationEvent | None) -
     return None
 
 
+def _build_linkedin_guarded_stop_reason_map(
+    *,
+    session: Session,
+    attempt_ids: list[int],
+) -> dict[int, set[str]]:
+    """Return latest LinkedIn guarded-submit stop reasons keyed by attempt id."""
+
+    if not attempt_ids:
+        return {}
+    events = session.scalars(
+        select(ApplicationEvent)
+        .where(
+            ApplicationEvent.attempt_id.in_(attempt_ids),
+            ApplicationEvent.event_type == "draft_linkedin_guarded_submit_criteria_evaluated",
+        )
+        .order_by(ApplicationEvent.created_at.desc(), ApplicationEvent.id.desc())
+    ).all()
+    latest_by_attempt: dict[int, ApplicationEvent] = {}
+    for event in events:
+        if event.attempt_id not in latest_by_attempt:
+            latest_by_attempt[event.attempt_id] = event
+
+    reason_map: dict[int, set[str]] = {}
+    for attempt_id, event in latest_by_attempt.items():
+        payload = event.payload or {}
+        reasons: set[str] = set()
+        for value in list(payload.get("stop_reasons") or []):
+            reason = str(value).strip().lower()
+            if reason:
+                reasons.add(reason)
+        reason_map[int(attempt_id)] = reasons
+    return reason_map
+
+
 def _resolve_attempt_failure_classification(
     *,
     session: Session,
@@ -3115,6 +3388,12 @@ def _build_submit_remediation_guidance(
         )
         primary_route = attempt_route
         primary_label = "Inspect attempt detail"
+    elif normalized_failure_code == "extension_review_required":
+        message = (
+            "Tier 3 extension content is awaiting approval; approve or replace extension-tier answers before retrying guarded submit."
+        )
+        primary_route = attempt_route
+        primary_label = "Inspect attempt detail"
     elif classification:
         message = (
             "Review submit diagnostics and replay evidence before retrying this blocked attempt."
@@ -3168,6 +3447,8 @@ def _resolve_submit_remediation_action(
     normalized_failure_code = (failure_code or "").strip().lower()
     if classification == "authentication_session_issue":
         return "reauth_then_refresh_target_and_submit_gate"
+    if normalized_failure_code == "extension_review_required":
+        return "approve_or_replace_extension_answers_then_refresh_submit_gate"
     if normalized_failure_code == "submit_gate_blocked":
         return "refresh_submit_gate_after_manual_resolution"
     return "refresh_target_and_submit_gate"
@@ -3333,6 +3614,36 @@ def _compute_submit_confidence(
     if manual_review_fields:
         confidence -= min(len(manual_review_fields) * 0.08, 0.24)
     return round(max(0.0, min(confidence, 1.0)), 4)
+
+
+def _collect_unapproved_extension_fields(
+    session: Session,
+    *,
+    mappings: list[FieldMapping],
+) -> list[str]:
+    """Return field keys mapped to extension-tier answers that are not approved yet."""
+
+    extension_map = {
+        int(mapping.answer_id): mapping.field_key
+        for mapping in mappings
+        if mapping.answer_id is not None and mapping.truth_tier == TruthTier.EXTENSION
+    }
+    if not extension_map:
+        return []
+
+    answers = session.scalars(
+        select(Answer).where(Answer.id.in_(list(extension_map.keys())))
+    ).all()
+    blocked_fields: list[str] = []
+    for answer in answers:
+        if (
+            answer.approval_status != ReviewStatus.APPROVED.value
+            or not bool(answer.extension_approved)
+        ):
+            field_key = extension_map.get(answer.id)
+            if field_key:
+                blocked_fields.append(field_key)
+    return blocked_fields
 
 
 def _split_name(full_name: str) -> tuple[str, str]:
@@ -3765,6 +4076,45 @@ def _payload_value(event: ApplicationEvent | None, key: str) -> str | None:
         return None
     value = event.payload.get(key)
     return None if value is None else str(value)
+
+
+def _build_linkedin_guarded_submit_criteria_read_from_event(
+    *,
+    application_id: int,
+    attempt_id: int,
+    event: ApplicationEvent,
+) -> DraftLinkedInGuardedSubmitCriteriaRead:
+    """Build typed LinkedIn criteria read model from persisted event payload."""
+
+    payload = event.payload or {}
+    return DraftLinkedInGuardedSubmitCriteriaRead(
+        application_id=application_id,
+        attempt_id=attempt_id,
+        event_id=event.id,
+        artifact_id=(
+            int(payload["artifact_id"])
+            if isinstance(payload.get("artifact_id"), int)
+            else None
+        ),
+        artifact_path=(str(payload["artifact_path"]) if payload.get("artifact_path") else None),
+        profile_key=str(payload.get("profile_key") or ""),
+        candidate_profile_slug=(
+            str(payload["candidate_profile_slug"])
+            if payload.get("candidate_profile_slug") is not None
+            else None
+        ),
+        session_health=str(payload.get("session_health") or ""),
+        session_requires_reauth=bool(payload.get("session_requires_reauth")),
+        allow_session_automation=bool(payload.get("allow_session_automation")),
+        question_count=int(payload.get("question_count") or 0),
+        assist_review_count=int(payload.get("assist_review_count") or 0),
+        blocked_auto_action_count=int(payload.get("blocked_auto_action_count") or 0),
+        recommended_mode=str(payload.get("recommended_mode") or "assist"),
+        min_auto_confidence=float(payload.get("min_auto_confidence") or 0.8),
+        allow_guarded_submit=bool(payload.get("allow_guarded_submit")),
+        stop_reasons=[str(value) for value in list(payload.get("stop_reasons") or [])],
+        recommended_actions=[str(value) for value in list(payload.get("recommended_actions") or [])],
+    )
 
 
 def _build_replay_asset(

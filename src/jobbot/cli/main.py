@@ -31,6 +31,7 @@ from jobbot.execution.service import (
     build_draft_field_plan,
     build_site_field_overlay,
     execute_guarded_submit,
+    evaluate_linkedin_guarded_submit_criteria_for_attempt,
     evaluate_submit_gate,
     get_execution_artifact_detail,
     get_execution_attempt_detail,
@@ -42,10 +43,13 @@ from jobbot.execution.service import (
     open_site_target_page,
     prune_execution_dashboard_bulk_history,
     replay_execution_dashboard_bulk_history_by_id,
+    run_dashboard_bulk_submit_remediation,
+    run_submit_remediation_action,
     set_execution_dashboard_bulk_history_limit,
     start_draft_execution_attempt,
 )
 from jobbot.execution.linkedin import build_linkedin_assist_plan, extract_linkedin_question_widgets
+from jobbot.execution.linkedin import evaluate_linkedin_guarded_submit_criteria
 from jobbot.discovery.inbox import list_inbox_jobs, list_ready_to_apply_jobs
 from jobbot.enrichment.service import enrich_job
 from jobbot.models.enums import BrowserProfileType, ReviewStatus, SessionHealth
@@ -531,6 +535,7 @@ def list_execution_overview_cmd(
     manual_review_only: bool = typer.Option(False, "--manual-review-only"),
     failure_code: str | None = typer.Option(None, "--failure-code"),
     failure_classification: str | None = typer.Option(None, "--failure-classification"),
+    linkedin_stop_reason: str | None = typer.Option(None, "--linkedin-stop-reason"),
     max_submit_confidence: float | None = typer.Option(
         None,
         "--max-submit-confidence",
@@ -552,6 +557,7 @@ def list_execution_overview_cmd(
             manual_review_only=manual_review_only,
             failure_code=failure_code,
             failure_classification=failure_classification,
+            linkedin_stop_reason=linkedin_stop_reason,
             max_submit_confidence=max_submit_confidence,
             sort_by=sort_by,
             descending=descending,
@@ -599,6 +605,7 @@ def show_execution_dashboard_cmd(
     manual_review_only: bool = typer.Option(False, "--manual-review-only"),
     failure_code: str | None = typer.Option(None, "--failure-code"),
     failure_classification: str | None = typer.Option(None, "--failure-classification"),
+    linkedin_stop_reason: str | None = typer.Option(None, "--linkedin-stop-reason"),
     max_submit_confidence: float | None = typer.Option(
         None,
         "--max-submit-confidence",
@@ -619,6 +626,7 @@ def show_execution_dashboard_cmd(
             manual_review_only=manual_review_only,
             failure_code=failure_code,
             failure_classification=failure_classification,
+            linkedin_stop_reason=linkedin_stop_reason,
             max_submit_confidence=max_submit_confidence,
             sort_by=sort_by,
             descending=descending,
@@ -656,6 +664,15 @@ def show_execution_dashboard_cmd(
             )
         )
         console.print(f"Blocked failure classification breakdown: {class_breakdown}")
+    if detail.linkedin_guarded_stop_reason_counts:
+        linkedin_breakdown = ", ".join(
+            f"{reason}={count}"
+            for reason, count in sorted(
+                detail.linkedin_guarded_stop_reason_counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+        )
+        console.print(f"LinkedIn guarded stop-reason breakdown: {linkedin_breakdown}")
 
     blocked_table = Table(title="Blocked Attempts", show_header=True, header_style="bold cyan")
     blocked_table.add_column("Attempt", justify="right")
@@ -737,6 +754,8 @@ def list_remediation_history_cmd(
             scope_bits.append(f"failure_code={row.failure_code}")
         if row.failure_classification:
             scope_bits.append(f"failure_classification={row.failure_classification}")
+        if row.linkedin_stop_reason:
+            scope_bits.append(f"linkedin_stop_reason={row.linkedin_stop_reason}")
         if row.manual_review_only:
             scope_bits.append("manual_review_only=true")
         first_failure = ""
@@ -795,6 +814,124 @@ def replay_remediation_history_cmd(
         "[green]Replayed remediation scope:[/green] "
         f"targeted={batch.requested_count} remediated={batch.remediated_count} failed={batch.failed_count}"
     )
+
+
+@app.command("run-bulk-submit-remediation")
+def run_bulk_submit_remediation_cmd(
+    candidate_profile: str = typer.Option(..., "--candidate-profile"),
+    manual_review_only: bool = typer.Option(False, "--manual-review-only"),
+    failure_code: str | None = typer.Option(None, "--failure-code"),
+    failure_classification: str | None = typer.Option(None, "--failure-classification"),
+    linkedin_stop_reason: str | None = typer.Option(None, "--linkedin-stop-reason"),
+    max_submit_confidence: float | None = typer.Option(
+        None,
+        "--max-submit-confidence",
+        min=0.0,
+        max=1.0,
+    ),
+    sort_by: str = typer.Option("started_at", "--sort-by"),
+    descending: bool = typer.Option(True, "--descending/--ascending"),
+    limit: int = typer.Option(25, "--limit", min=1, max=100),
+) -> None:
+    """Run dashboard-scoped bulk submit remediation directly from CLI."""
+
+    session = SessionLocal()
+    try:
+        batch = run_dashboard_bulk_submit_remediation(
+            session,
+            candidate_profile_slug=candidate_profile,
+            manual_review_only=manual_review_only,
+            failure_code=failure_code,
+            failure_classification=failure_classification,
+            linkedin_stop_reason=linkedin_stop_reason,
+            max_submit_confidence=max_submit_confidence,
+            sort_by=sort_by,
+            descending=descending,
+            limit=limit,
+        )
+    except ValueError as exc:
+        session.close()
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        session.close()
+
+    console.print(
+        "[green]Bulk remediation run:[/green] "
+        f"targeted={batch.requested_count} remediated={batch.remediated_count} failed={batch.failed_count}"
+    )
+    if batch.targeted_attempt_ids:
+        console.print(
+            "Targeted attempts: "
+            + ", ".join(str(attempt_id) for attempt_id in batch.targeted_attempt_ids)
+        )
+    if batch.failures:
+        for failure in batch.failures:
+            console.print(
+                f"- failure attempt={failure.source_attempt_id} code={failure.error_code}"
+            )
+
+
+@app.command("retry-submit-attempt")
+def retry_submit_attempt_cmd(
+    attempt_id: int = typer.Option(..., "--attempt-id", min=1),
+) -> None:
+    """Run deterministic remediation retry orchestration for one attempt."""
+
+    session = SessionLocal()
+    try:
+        result = run_submit_remediation_action(
+            session,
+            attempt_id=attempt_id,
+        )
+    except ValueError as exc:
+        session.close()
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        session.close()
+
+    console.print(
+        "[green]Retried submit remediation:[/green] "
+        f"source_attempt={result.source_attempt_id} new_attempt={result.attempt_id}"
+    )
+    console.print(
+        f"action={result.remediation_action} "
+        f"allow_submit={result.allow_submit} "
+        f"final_result={result.final_attempt_result or 'pending'} "
+        f"final_failure={result.final_failure_code or 'none'}"
+    )
+
+
+@app.command("reauth-browser-profile")
+def reauth_browser_profile_cmd(
+    profile_key: str = typer.Option(..., "--profile-key"),
+    notes: str | None = typer.Option(
+        "manual_reauth_completed",
+        "--notes",
+        help="Optional note persisted to the profile after reauth.",
+    ),
+) -> None:
+    """Mark a browser profile reauthenticated and healthy for automation."""
+
+    session = SessionLocal()
+    try:
+        profile = update_browser_profile_health(
+            session,
+            profile_key=profile_key,
+            payload=BrowserProfileHealthUpdate(
+                session_health=SessionHealth.HEALTHY,
+                notes=notes,
+            ),
+        )
+    except ValueError as exc:
+        session.close()
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        session.close()
+
+    console.print(f"[green]Reauth completed for browser profile:[/green] {profile.profile_key}")
+    console.print(f"Health: {profile.session_health}")
+    if profile.notes:
+        console.print(f"Notes: {profile.notes}")
 
 
 @app.command("set-remediation-history-limit")
@@ -1106,6 +1243,41 @@ def evaluate_submit_gate_cmd(
     console.print(f"Stop reasons: {gate.stop_reasons}")
 
 
+@app.command("evaluate-linkedin-guarded-submit-attempt")
+def evaluate_linkedin_guarded_submit_attempt_cmd(
+    attempt_id: int = typer.Option(..., "--attempt-id", min=1),
+    file: Path = typer.Option(..., "--file", exists=True, file_okay=True, dir_okay=False),
+    min_auto_confidence: float = typer.Option(
+        0.8,
+        "--min-auto-confidence",
+        min=0.0,
+        max=1.0,
+    ),
+) -> None:
+    """Persist LinkedIn guarded-submit criteria for one draft execution attempt."""
+
+    session = SessionLocal()
+    try:
+        criteria = evaluate_linkedin_guarded_submit_criteria_for_attempt(
+            session,
+            attempt_id=attempt_id,
+            page_html=file.read_text(encoding="utf-8"),
+            min_auto_confidence=min_auto_confidence,
+        )
+    except ValueError as exc:
+        session.close()
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        session.close()
+
+    console.print(f"[green]Evaluated LinkedIn guarded-submit criteria:[/green] {criteria.attempt_id}")
+    console.print(f"Profile key: {criteria.profile_key}")
+    console.print(f"Session health: {criteria.session_health}")
+    console.print(f"Allow guarded submit: {criteria.allow_guarded_submit}")
+    console.print(f"Artifact path: {criteria.artifact_path or 'n/a'}")
+    console.print(f"Stop reasons: {criteria.stop_reasons}")
+
+
 @app.command("execute-guarded-submit")
 def execute_guarded_submit_cmd(
     attempt_id: int = typer.Option(..., "--attempt-id", min=1),
@@ -1355,6 +1527,51 @@ def build_linkedin_assist_plan_cmd(
             row.reason,
         )
     console.print(table)
+
+
+@app.command("evaluate-linkedin-guarded-submit-criteria")
+def evaluate_linkedin_guarded_submit_criteria_cmd(
+    profile_key: str = typer.Option(..., "--profile-key"),
+    file: Path = typer.Option(..., "--file", exists=True, file_okay=True, dir_okay=False),
+    candidate_profile: str | None = typer.Option(None, "--candidate-profile"),
+    min_auto_confidence: float = typer.Option(
+        0.8,
+        "--min-auto-confidence",
+        min=0.0,
+        max=1.0,
+    ),
+) -> None:
+    """Evaluate deterministic LinkedIn guarded-submit criteria from HTML capture + session health."""
+
+    session = SessionLocal()
+    try:
+        result = evaluate_linkedin_guarded_submit_criteria(
+            session,
+            profile_key=profile_key,
+            page_html=file.read_text(encoding="utf-8"),
+            candidate_profile_slug=candidate_profile,
+            min_auto_confidence=min_auto_confidence,
+        )
+    except ValueError as exc:
+        session.close()
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        session.close()
+
+    console.print(f"[bold]Profile key:[/bold] {result.profile_key}")
+    console.print(f"[bold]Session health:[/bold] {result.session_health}")
+    console.print(f"[bold]Allow guarded submit:[/bold] {result.allow_guarded_submit}")
+    console.print(f"[bold]Question count:[/bold] {result.question_count}")
+    console.print(f"[bold]Assist review count:[/bold] {result.assist_review_count}")
+    console.print(f"[bold]Blocked auto actions:[/bold] {result.blocked_auto_action_count}")
+    if result.stop_reasons:
+        console.print("[bold]Stop reasons:[/bold]")
+        for reason in result.stop_reasons:
+            console.print(f"- {reason}")
+    if result.recommended_actions:
+        console.print("[bold]Recommended actions:[/bold]")
+        for action in result.recommended_actions:
+            console.print(f"- {action}")
 
 
 if __name__ == "__main__":

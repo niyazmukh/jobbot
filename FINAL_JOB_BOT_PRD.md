@@ -126,6 +126,11 @@ Every significant step must be logged with enough data to explain:
 ### 3.5 Human Approval for Low Confidence
 The system must stop and request review whenever field mapping, answer generation, or submit readiness falls below configured thresholds.
 
+Review writeback policy:
+
+- when a `generated_document` or deterministic preparation `answer` review item changes status, the system must rematerialize the `application_eligibility` snapshot for that candidate/job pair
+- this keeps execution handoff state synchronized with review approvals/rejections without requiring a separate manual eligibility refresh step
+
 ## 4. Scope
 
 ### 4.1 In Scope
@@ -173,6 +178,12 @@ The system must stop and request review whenever field mapping, answer generatio
 - `review`: human approval queue
 - `tracking`: persistence, artifacts, analytics
 - `ui`: local dashboard and workflow control
+
+Execution architecture requirement:
+
+- ATS-specific execution behavior (selectors, required fields, submit gating rules) must be isolated in vendor profile/handler modules so adding new ATS support does not expand a single monolithic execution service.
+- ATS-specific execution artifacts and event payload builders must live with vendor handlers, not inside the core execution orchestrator.
+- Vendor execution handlers should be registered through a deterministic registry/factory instead of hardcoded branching in the core execution service.
 
 ### 6.2 Runtime Topology
 
@@ -718,6 +729,7 @@ Core tables:
 - `artifacts`
 - `model_calls`
 - `review_queue`
+- `application_eligibility`
 
 Minimum schema details:
 

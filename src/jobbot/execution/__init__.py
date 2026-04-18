@@ -28,13 +28,19 @@ from jobbot.execution.schemas import (
     DraftLinkedInQuestionExtractionRead,
     DraftLinkedInAssistFieldRead,
     DraftLinkedInAssistPlanRead,
+    DraftLinkedInGuardedSubmitCriteriaRead,
 )
-from jobbot.execution.linkedin import build_linkedin_assist_plan, extract_linkedin_question_widgets
+from jobbot.execution.linkedin import (
+    build_linkedin_assist_plan,
+    evaluate_linkedin_guarded_submit_criteria,
+    extract_linkedin_question_widgets,
+)
 from jobbot.execution.service import (
     bootstrap_draft_application_attempt,
     build_draft_field_plan,
     build_site_field_overlay,
     execute_guarded_submit,
+    evaluate_linkedin_guarded_submit_criteria_for_attempt,
     evaluate_submit_gate,
     get_execution_artifact_detail,
     get_execution_artifact_file,
@@ -86,12 +92,15 @@ __all__ = [
     "DraftLinkedInQuestionExtractionRead",
     "DraftLinkedInAssistFieldRead",
     "DraftLinkedInAssistPlanRead",
+    "DraftLinkedInGuardedSubmitCriteriaRead",
     "extract_linkedin_question_widgets",
     "build_linkedin_assist_plan",
+    "evaluate_linkedin_guarded_submit_criteria",
     "bootstrap_draft_application_attempt",
     "build_draft_field_plan",
     "build_site_field_overlay",
     "execute_guarded_submit",
+    "evaluate_linkedin_guarded_submit_criteria_for_attempt",
     "evaluate_submit_gate",
     "get_execution_artifact_detail",
     "get_execution_artifact_file",

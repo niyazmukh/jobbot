@@ -5,6 +5,7 @@
 - Overall status: `in_progress`
 - Implementation mode: `local-first, deterministic-first`
 - Primary spec: `FINAL_JOB_BOT_PRD.md`
+- Latest validation: `215 passed` (`.venv\\Scripts\\python -m pytest -q`)
 
 ## Completed
 - Created persistent roadmap and ADR structure.
@@ -168,19 +169,74 @@
   - CLI: `build-linkedin-assist-plan`
 - Reduced discovery adapter duplication by centralizing remote-type inference into shared normalization helper (`infer_remote_type`) and removing repeated adapter-local implementations.
 - Removed/cleaned dead code and hygiene drift surfaced by static analysis (unused imports, unused test assignment, missing schema type import in API renderer).
+- Added deterministic Tier 3 preparation scaffolding gated by candidate preferences (`enable_tier3_extensions`) so preparation can emit extension-tier answer plans with explicit review queue routing (`tier3_first_use_answer_review`).
+- Hardened preparation persistence so extension-tier answers are always persisted as pending-review artifacts (not auto-approved), preserving auditability before execution use.
+- Added guarded-submit submit-gate enforcement for unapproved extension-tier mapped answers (`extension_review_required:*`) to block auto-submit until explicit extension approval lands.
+- Added extension-aware submit failure coding/remediation guidance (`extension_review_required`) so blocked Tier 3 runs get explicit operator next-actions in execution diagnostics.
+- Added extension-review blocker dashboard visibility (`extension_review_blocked_attempts`) with extension-specific recommended-action guidance across execution service/API reads.
+- Added deterministic LinkedIn guarded-submit criteria evaluation (`evaluate_linkedin_guarded_submit_criteria`) that gates submit eligibility from browser session-health policy plus assist-plan confidence outcomes.
+- Surfaced LinkedIn guarded-submit criteria checks through API/CLI:
+  - API: `POST /api/execution/linkedin/guarded-submit-criteria`
+  - CLI: `evaluate-linkedin-guarded-submit-criteria`
+- Integrated LinkedIn guarded-submit criteria into draft execution lifecycle state via attempt-scoped orchestration (`evaluate_linkedin_guarded_submit_criteria_for_attempt`) with persisted artifacts/events and replay-bundle asset visibility.
+- Surfaced attempt-scoped LinkedIn criteria lifecycle checks through API/CLI:
+  - API: `POST /api/execution/draft-attempts/{attempt_id}/linkedin-guarded-submit-criteria`
+  - CLI: `evaluate-linkedin-guarded-submit-attempt`
+- Added LinkedIn-specific execution dashboard stop-reason aggregation (`linkedin_guarded_stop_reason_counts`) for `linkedin_guarded_submit_criteria_blocked` attempts, plus top-stop-reason recommendation guidance.
+- Surfaced LinkedIn guarded stop-reason breakdown on the execution dashboard HTML for operator triage without opening raw attempt events.
+- Added LinkedIn stop-reason scoped execution filters/remediation (`linkedin_stop_reason`) across service + API + HTML dashboard flows, including bulk-remediation targeting and persisted remediation-history scope replay.
+- Added row-level LinkedIn stop-reason dashboard drill-down links (`view attempts` + `remediate scope`) so operators can jump directly into stop-reason scoped triage/remediation.
+- Added CLI parity for LinkedIn stop-reason scoped triage by introducing `--linkedin-stop-reason` filters on execution overview/dashboard commands and surfacing LinkedIn stop-reason breakdowns/scopes in dashboard and remediation-history CLI output.
+- Added a first-class bulk remediation CLI command (`run-bulk-submit-remediation`) with full scope filters including `--linkedin-stop-reason`, so stop-reason targeted remediation no longer requires API/HTML entrypoints.
+- Added explicit operational CLI commands for retry/reauth workflows:
+  - `retry-submit-attempt` for deterministic single-attempt remediation replay.
+  - `reauth-browser-profile` to mark browser profiles healthy after manual reauthentication.
+- Added model-call telemetry service scaffolding for PRD §21.4 cost control:
+  - `record_model_call` persistence helper (stage/provider/model/prompt-version + token/cost telemetry).
+  - `get_model_cost_dashboard` aggregation helper (lookback daily buckets, stage breakdown, daily/weekly budget pressure flags).
+- Surfaced model-call cost telemetry through API:
+  - API: `GET /api/model-calls/dashboard` with lookback + budget query controls.
+- Added hard budget-ceiling guardrails for non-essential model calls:
+  - `allow_non_essential_model_call` enforces daily/weekly budget ceilings and records blocked-call telemetry when over budget.
+  - Preparation Tier 3 extension-answer generation now honors budget ceilings and skips extension generation once non-essential budget is exhausted.
+- Added deterministic Workday execution support to the ATS execution matrix:
+  - Registered Workday in execution vendor registry (`workday_guarded_submit` mode).
+  - Added Workday selector overlays, required-field profile, and guarded-submit strategy plan.
+  - Enabled Workday target-open and submit-gate support through site handler capability gates.
+  - Updated API/service execution tests to validate Workday guarded-submit probe-failure behavior (`guarded_submit_probe_failed`) instead of unsupported-site behavior.
+- Added PRD §21.5 prompt-versioning contract baseline through a central prompt registry:
+  - Added `model_calls/prompts.py` with stable prompt keys/IDs and deterministic registry listing.
+  - Added replay-compatibility helpers (`is_prompt_replay_compatible`, `assert_prompt_replay_compatible`) for old-vs-new prompt checks.
+  - Wired model-call budget guardrail writes to resolve prompt version IDs from registry defaults.
+  - Added prompt-registry and compatibility tests plus guardrail prompt-version wiring coverage.
+- Extended model-call dashboard telemetry with blocked-call visibility:
+  - `blocked_non_essential_call_count`
+  - `blocked_non_essential_stage_counts`
 - Brought the scoped JobBot test suite to green in `.venv` with `183 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `185 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `187 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `191 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `195 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `197 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `199 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `202 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `203 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `205 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `208 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `210 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `215 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.
 - Deciding where app-level validation should wrap DB string state columns.
 - Extending enrichment from deterministic extraction into richer preparation inputs.
-- Converting deterministic preparation outputs into explicit claim-level structures before LLM-assisted tailoring exists.
 - Building out Phase 4 from draft attempt bootstrap into real browser-backed guarded execution.
 - Upgrading execution capture from HTTP-backed target-open to full Playwright session capture and trace/screenshot artifacts.
 - Extending execution checkpoint state into broader operational filters and dashboards beyond inbox/detail reads.
 - Extending the replay bundle into direct artifact opening and browser replay actions beyond bounded preview reads.
 - Converting the new green `.venv` test workflow into routine validation for each major Phase 4 iteration.
 - Investigating a local Windows temp-directory ACL issue that is currently breaking fresh pytest temp-root cleanup despite the repo code remaining importable and manually verifiable.
+- Expanding Tier 3 truth-tier handling from answer-plan scaffolding into explicit generated-claim provenance and review-state propagation across readiness summaries and dashboards.
 
 ## Blocked
 - None currently.
@@ -188,7 +244,8 @@
 ## Next Tasks
 1. Promote the replay bundle and dashboard into a broader multi-ATS execution control center once multiple handlers exist.
 2. Tighten guarded-submit interaction policies from simulated fallback toward stricter browser-executed submit evidence as profile/session reliability instrumentation improves.
-3. Add LinkedIn guarded-submit criteria scaffolding that explicitly gates submit eligibility from session-health + assist-plan confidence outcomes.
+3. Extend Tier 3 extension gating from answer-level blocking into generated-document claim-level execution checks.
+4. Add LinkedIn stop-reason scoped drill-down links from dashboard breakdown rows into filtered overview/replay bundles for one-click operator triage.
 
 ## Decisions
 - New implementation lives in `src/jobbot/` instead of modifying existing bot repos.

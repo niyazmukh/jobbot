@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import re
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from jobbot.db.models import Answer, CandidateProfile, GeneratedDocument, Job, JobScore, ReviewQueueItem, utcnow
+from jobbot.eligibility.service import materialize_application_eligibility
 from jobbot.models.enums import ReviewStatus, TruthTier
 from jobbot.review.schemas import ReviewQueueRead
+
+_PREPARED_ANSWER_SOURCE_RE = re.compile(r"^deterministic_prepare_v1:job:(\d+):candidate:(\d+)$")
 
 
 def queue_score_review(
@@ -102,6 +107,7 @@ def set_review_status(
     *,
     review_id: int,
     status: ReviewStatus,
+    rematerialize_eligibility: bool = True,
 ) -> ReviewQueueRead:
     """Update the status of a review queue item."""
 
@@ -113,6 +119,11 @@ def set_review_status(
     item.updated_at = utcnow()
     _apply_review_status_writeback(session, item, status)
     session.commit()
+    _maybe_rematerialize_eligibility(
+        session,
+        item=item,
+        enabled=rematerialize_eligibility,
+    )
     session.refresh(item)
 
     score = None
@@ -130,6 +141,72 @@ def set_review_status(
             candidate_slug = candidate.slug
 
     return _to_review_read(item, score=score, candidate_slug=candidate_slug, job=job)
+
+
+def _maybe_rematerialize_eligibility(
+    session: Session,
+    *,
+    item: ReviewQueueItem,
+    enabled: bool,
+) -> None:
+    """Refresh persisted readiness when review-governed preparation entities change."""
+
+    if not enabled:
+        return
+
+    target = _resolve_eligibility_target(session, item)
+    if target is None:
+        return
+    job_id, candidate_slug = target
+
+    try:
+        materialize_application_eligibility(
+            session,
+            job_id=job_id,
+            candidate_profile_slug=candidate_slug,
+        )
+    except ValueError:
+        # Keep review-state updates durable even if readiness refresh cannot be computed.
+        return
+
+
+def _resolve_eligibility_target(
+    session: Session,
+    item: ReviewQueueItem,
+) -> tuple[int, str] | None:
+    """Resolve a candidate/job pair from a review queue item when possible."""
+
+    if item.entity_type == "generated_document":
+        document = session.scalar(select(GeneratedDocument).where(GeneratedDocument.id == item.entity_id))
+        if (
+            document is None
+            or document.job_id is None
+            or document.candidate_profile_id is None
+        ):
+            return None
+        candidate = session.scalar(
+            select(CandidateProfile).where(CandidateProfile.id == document.candidate_profile_id)
+        )
+        if candidate is None:
+            return None
+        return (document.job_id, candidate.slug)
+
+    if item.entity_type == "answer":
+        answer = session.scalar(select(Answer).where(Answer.id == item.entity_id))
+        if answer is None:
+            return None
+        match = _PREPARED_ANSWER_SOURCE_RE.match(answer.source_type or "")
+        if match is None:
+            return None
+
+        job_id = int(match.group(1))
+        candidate_id = int(match.group(2))
+        candidate = session.scalar(select(CandidateProfile).where(CandidateProfile.id == candidate_id))
+        if candidate is None:
+            return None
+        return (job_id, candidate.slug)
+
+    return None
 
 
 def _default_review_reason(payload: dict) -> str:
@@ -158,7 +235,10 @@ def _apply_review_status_writeback(
         answer = session.scalar(select(Answer).where(Answer.id == item.entity_id))
         if answer is not None:
             answer.approval_status = status.value
-            answer.extension_approved = status == ReviewStatus.APPROVED
+            if answer.truth_tier == TruthTier.EXTENSION:
+                answer.extension_approved = status == ReviewStatus.APPROVED
+            else:
+                answer.extension_approved = False
 
 
 def _to_review_read(
