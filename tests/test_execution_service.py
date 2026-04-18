@@ -9,10 +9,12 @@ from jobbot.db import models  # noqa: F401
 from jobbot.db.models import BrowserProfile, CandidateFact, CandidateProfile, Job
 from jobbot.eligibility.service import materialize_application_eligibility
 from jobbot.execution.service import (
+    _selector_matches_html,
     _capture_target_page_html,
     bootstrap_draft_application_attempt,
     build_draft_field_plan,
     build_site_field_overlay,
+    execute_guarded_submit,
     evaluate_submit_gate,
     get_execution_artifact_detail,
     get_execution_attempt_detail,
@@ -245,6 +247,77 @@ def test_start_draft_execution_attempt_creates_startup_artifacts_and_event(tmp_p
     assert payload["readiness_state"] == "ready_to_apply"
 
 
+def test_start_draft_execution_attempt_uses_live_target_capture_when_browser_profile_available(
+    tmp_path: Path, monkeypatch
+):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    browser = BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_html",
+        lambda **kwargs: (
+            "<html><body>startup-live-capture</body></html>",
+            {"capture_method": "playwright", "status_code": 200, "final_url": kwargs["target_url"]},
+        ),
+    )
+
+    startup = start_draft_execution_attempt(
+        session,
+        attempt_id=attempt.attempt_id,
+    )
+
+    event = session.query(models.ApplicationEvent).filter_by(
+        attempt_id=attempt.attempt_id,
+        event_type="draft_execution_started",
+    ).one()
+    target_path = Path(startup.startup_dir) / "target_page.html"
+    assert target_path.exists()
+    assert "startup-live-capture" in target_path.read_text(encoding="utf-8")
+    assert event.payload["target_capture"]["capture_method"] == "playwright"
+
+    context_path = Path(startup.startup_dir) / "startup_context.json"
+    payload = json.loads(context_path.read_text(encoding="utf-8"))
+    assert payload["target_capture"]["capture_method"] == "playwright"
+
+
+def test_start_draft_execution_attempt_uses_stub_capture_without_browser_profile(tmp_path: Path):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+    )
+
+    startup = start_draft_execution_attempt(
+        session,
+        attempt_id=attempt.attempt_id,
+    )
+
+    event = session.query(models.ApplicationEvent).filter_by(
+        attempt_id=attempt.attempt_id,
+        event_type="draft_execution_started",
+    ).one()
+    target_path = Path(startup.startup_dir) / "target_page.html"
+    assert target_path.exists()
+    assert "Draft Execution Target" in target_path.read_text(encoding="utf-8")
+    assert event.payload["target_capture"]["capture_method"] == "stub_startup"
+
 def test_start_draft_execution_attempt_is_idempotent_once_started(tmp_path: Path):
     session = make_session()
     job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
@@ -336,6 +409,42 @@ def test_build_site_field_overlay_persists_greenhouse_selectors(tmp_path: Path):
     assert any(entry.field_key == "why_this_role" and entry.manual_review_required for entry in overlay.entries)
 
 
+def test_build_site_field_overlay_persists_lever_selectors(tmp_path: Path):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "lever"
+    session.commit()
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+    )
+    start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+    build_draft_field_plan(session, attempt_id=attempt.attempt_id)
+
+    overlay = build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+
+    mappings = session.query(models.FieldMapping).filter_by(attempt_id=attempt.attempt_id).all()
+    full_name_mapping = next(mapping for mapping in mappings if mapping.field_key == "full_name")
+    email_mapping = next(mapping for mapping in mappings if mapping.field_key == "email")
+    resume_mapping = next(mapping for mapping in mappings if mapping.field_key == "resume_upload")
+
+    assert overlay.site_vendor == "lever"
+    assert overlay.entry_count == len(mappings)
+    assert Path(overlay.artifact_path).exists()
+    assert "input[name='name']" in full_name_mapping.raw_dom_signature
+    assert "input[name='email']" in email_mapping.raw_dom_signature
+    assert "input[type='file'][name='resume']" in resume_mapping.raw_dom_signature
+
+
 def test_open_site_target_page_creates_resolution_bundle_for_greenhouse(tmp_path: Path):
     session = make_session()
     job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
@@ -378,17 +487,155 @@ def test_open_site_target_page_creates_resolution_bundle_for_greenhouse(tmp_path
 
     assert opened.site_vendor == "greenhouse"
     assert opened.browser_profile_key == "apply-main"
-    assert opened.capture_method in {"http_get", "stub_fallback"}
+    assert opened.capture_method in {"playwright", "http_get", "stub_fallback"}
     assert opened.resolved_count > 0
     assert opened.unresolved_count >= 0
     assert any(entry.field_key == "email" and entry.resolution_status == "resolved" for entry in opened.entries)
     assert any(entry.field_key == "why_this_role" and entry.resolution_status == "manual_review" for entry in opened.entries)
     assert Path(next(artifact.path for artifact in session.query(models.Artifact).filter_by(id=opened.opened_page_artifact_id))).exists()
     assert event.payload["resolved_count"] == opened.resolved_count
-    assert event.payload["target_capture"]["capture_method"] in {"http_get", "stub_fallback"}
+    assert event.payload["target_capture"]["capture_method"] in {
+        "playwright",
+        "http_get",
+        "stub_fallback",
+    }
     persisted_attempt = session.query(models.ApplicationAttempt).filter_by(id=attempt.attempt_id).one()
     assert "Target opened via" in persisted_attempt.notes
     assert any("resolved_selector" in (mapping.raw_dom_signature or "") for mapping in mappings)
+
+
+def test_open_site_target_page_persists_screenshot_artifact_for_playwright_capture(
+    tmp_path: Path, monkeypatch
+):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "greenhouse"
+    browser = BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+    start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+    build_draft_field_plan(session, attempt_id=attempt.attempt_id)
+    build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_html",
+        lambda **kwargs: (
+            "<html><body>playwright</body></html>",
+            {"capture_method": "playwright", "status_code": 200, "final_url": kwargs["target_url"]},
+        ),
+    )
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_screenshot_via_playwright",
+        lambda **kwargs: b"\x89PNG\r\n\x1a\nplaywright-fake",
+    )
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_trace_via_playwright",
+        lambda **kwargs: b"PK\x03\x04playwright-trace",
+    )
+
+    opened = open_site_target_page(session, attempt_id=attempt.attempt_id)
+
+    event = session.query(models.ApplicationEvent).filter_by(
+        attempt_id=attempt.attempt_id,
+        event_type="draft_target_opened",
+    ).one()
+    screenshot_id = opened.screenshot_artifact_id
+    assert screenshot_id is not None
+    screenshot_artifact = session.query(models.Artifact).filter_by(id=screenshot_id).one()
+    assert screenshot_artifact.artifact_type.value == "screenshot"
+    assert Path(screenshot_artifact.path).exists()
+    assert event.payload["screenshot_artifact_id"] == screenshot_id
+    trace_id = opened.trace_artifact_id
+    assert trace_id is not None
+    trace_artifact = session.query(models.Artifact).filter_by(id=trace_id).one()
+    assert trace_artifact.artifact_type.value == "trace"
+    assert Path(trace_artifact.path).exists()
+    assert event.payload["trace_artifact_id"] == trace_id
+    assert "trace_error" not in event.payload["target_capture"]
+
+
+def test_open_site_target_page_keeps_flow_running_when_trace_capture_fails(
+    tmp_path: Path, monkeypatch
+):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "greenhouse"
+    browser = BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+    start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+    build_draft_field_plan(session, attempt_id=attempt.attempt_id)
+    build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_html",
+        lambda **kwargs: (
+            "<html><body>playwright</body></html>",
+            {"capture_method": "playwright", "status_code": 200, "final_url": kwargs["target_url"]},
+        ),
+    )
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_screenshot_via_playwright",
+        lambda **kwargs: b"\x89PNG\r\n\x1a\nplaywright-fake",
+    )
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_trace_via_playwright",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("trace_capture_failed")),
+    )
+
+    opened = open_site_target_page(session, attempt_id=attempt.attempt_id)
+
+    event = session.query(models.ApplicationEvent).filter_by(
+        attempt_id=attempt.attempt_id,
+        event_type="draft_target_opened",
+    ).one()
+    assert opened.screenshot_artifact_id is not None
+    assert opened.trace_artifact_id is None
+    assert event.payload["screenshot_artifact_id"] == opened.screenshot_artifact_id
+    assert event.payload["trace_artifact_id"] is None
+    assert event.payload["target_capture"]["trace_error"] == "RuntimeError"
 
 
 def test_evaluate_submit_gate_blocks_submit_when_manual_review_fields_remain(tmp_path: Path):
@@ -456,6 +703,615 @@ def test_evaluate_submit_gate_blocks_submit_when_manual_review_fields_remain(tmp
     assert listed[0].attempt_result == "blocked"
     assert listed[0].failure_code == "submit_gate_blocked"
     assert listed[0].submit_confidence == gate.confidence_score
+
+
+def test_evaluate_submit_gate_supports_lever_and_tracks_required_fields(tmp_path: Path):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "lever"
+    browser = BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+    start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+    build_draft_field_plan(session, attempt_id=attempt.attempt_id)
+    build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+    open_site_target_page(session, attempt_id=attempt.attempt_id)
+
+    gate = evaluate_submit_gate(session, attempt_id=attempt.attempt_id)
+
+    assert gate.site_vendor == "lever"
+    assert set(gate.required_fields) == {"full_name", "email", "resume_upload"}
+    assert set(gate.resolved_required_fields) == {"full_name", "email", "resume_upload"}
+    assert gate.failure_code == "submit_gate_blocked"
+    assert "manual_review_required:why_this_role" in gate.stop_reasons
+
+
+def test_execute_guarded_submit_succeeds_after_passing_submit_gate(tmp_path: Path, monkeypatch):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "greenhouse"
+    browser = BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+    start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+    build_draft_field_plan(session, attempt_id=attempt.attempt_id)
+    build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+    open_site_target_page(session, attempt_id=attempt.attempt_id)
+    mappings = session.query(models.FieldMapping).filter_by(attempt_id=attempt.attempt_id).all()
+    for mapping in mappings:
+        if mapping.field_key == "why_this_role":
+            mapping.field_key = "prepared_answer_why_role"
+        parsed = json.loads(mapping.raw_dom_signature or "{}")
+        parsed["manual_review_required"] = False
+        parsed["resolution_status"] = "resolved"
+        if not parsed.get("resolved_selector"):
+            parsed["resolved_selector"] = "input[name='autofill']"
+        mapping.raw_dom_signature = json.dumps(parsed, ensure_ascii=True)
+    session.commit()
+
+    gate = evaluate_submit_gate(session, attempt_id=attempt.attempt_id)
+    assert gate.allow_submit is True
+
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_screenshot_via_playwright",
+        lambda **kwargs: b"\x89PNG\r\n\x1a\nguarded-submit-fake",
+    )
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_trace_via_playwright",
+        lambda **kwargs: b"PK\x03\x04guarded-submit-fake",
+    )
+
+    submitted = execute_guarded_submit(session, attempt_id=attempt.attempt_id)
+    event = session.query(models.ApplicationEvent).filter_by(
+        attempt_id=attempt.attempt_id,
+        event_type="draft_submit_executed",
+    ).one()
+    persisted_attempt = session.query(models.ApplicationAttempt).filter_by(id=attempt.attempt_id).one()
+    persisted_application = session.query(models.Application).filter_by(id=persisted_attempt.application_id).one()
+
+    assert submitted.application_state == "applied"
+    assert submitted.attempt_result == "success"
+    assert submitted.failure_code is None
+    assert submitted.allow_submit is True
+    assert submitted.submission_mode == "greenhouse_guarded_submit"
+    assert submitted.screenshot_artifact_id is not None
+    assert submitted.trace_artifact_id is not None
+    assert event.payload["screenshot_artifact_id"] == submitted.screenshot_artifact_id
+    assert event.payload["trace_artifact_id"] == submitted.trace_artifact_id
+    assert event.payload["submit_plan"]["site_vendor"] == "greenhouse"
+    assert event.payload["submit_plan"]["submit_button_selectors"]
+    assert event.payload["submit_probe"]["probe_available"] is True
+    assert "matched_submit_selectors" in event.payload["submit_probe"]
+    assert persisted_attempt.result == "success"
+    assert persisted_attempt.failure_code is None
+    assert persisted_attempt.ended_at is not None
+    assert persisted_application.current_state == "applied"
+    assert persisted_application.applied_at is not None
+
+
+def test_execute_guarded_submit_blocks_when_submit_gate_disallows(tmp_path: Path):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "greenhouse"
+    browser = BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+    start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+    build_draft_field_plan(session, attempt_id=attempt.attempt_id)
+    build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+    open_site_target_page(session, attempt_id=attempt.attempt_id)
+    gate = evaluate_submit_gate(session, attempt_id=attempt.attempt_id)
+    assert gate.allow_submit is False
+
+    try:
+        execute_guarded_submit(session, attempt_id=attempt.attempt_id)
+        assert False, "expected guarded submit block error"
+    except ValueError as exc:
+        assert str(exc) == "submit_gate_blocked"
+
+    persisted_attempt = session.query(models.ApplicationAttempt).filter_by(id=attempt.attempt_id).one()
+    persisted_application = session.query(models.Application).filter_by(id=persisted_attempt.application_id).one()
+    assert persisted_attempt.result == "blocked"
+    assert persisted_attempt.failure_code == "submit_gate_blocked"
+    assert persisted_application.current_state == "review"
+
+
+def test_execute_guarded_submit_blocks_when_submit_interaction_fails(
+    tmp_path: Path, monkeypatch
+):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "greenhouse"
+    browser = BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+    start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+    build_draft_field_plan(session, attempt_id=attempt.attempt_id)
+    build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+    open_site_target_page(session, attempt_id=attempt.attempt_id)
+    mappings = session.query(models.FieldMapping).filter_by(attempt_id=attempt.attempt_id).all()
+    for mapping in mappings:
+        if mapping.field_key == "why_this_role":
+            mapping.field_key = "prepared_answer_why_role"
+        parsed = json.loads(mapping.raw_dom_signature or "{}")
+        parsed["manual_review_required"] = False
+        parsed["resolution_status"] = "resolved"
+        if not parsed.get("resolved_selector"):
+            parsed["resolved_selector"] = "input[name='autofill']"
+        mapping.raw_dom_signature = json.dumps(parsed, ensure_ascii=True)
+    session.commit()
+
+    gate = evaluate_submit_gate(session, attempt_id=attempt.attempt_id)
+    assert gate.allow_submit is True
+
+    monkeypatch.setattr(
+        "jobbot.execution.service._execute_guarded_submit_interaction",
+        lambda **kwargs: {
+            "interaction_mode": "playwright",
+            "attempted": True,
+            "clicked": False,
+            "clicked_selector": None,
+            "final_url": kwargs["target_url"],
+            "matched_confirmation_markers": [],
+            "error": "selector_click_failed",
+        },
+    )
+
+    try:
+        execute_guarded_submit(session, attempt_id=attempt.attempt_id)
+        assert False, "expected guarded submit interaction failure"
+    except ValueError as exc:
+        assert str(exc) == "guarded_submit_interaction_failed"
+
+    persisted_attempt = session.query(models.ApplicationAttempt).filter_by(id=attempt.attempt_id).one()
+    persisted_application = session.query(models.Application).filter_by(id=persisted_attempt.application_id).one()
+    blocked_event = session.query(models.ApplicationEvent).filter_by(
+        attempt_id=attempt.attempt_id,
+        event_type="draft_submit_execution_blocked",
+    ).order_by(models.ApplicationEvent.id.desc()).first()
+
+    assert persisted_attempt.result == "blocked"
+    assert persisted_attempt.failure_code == "guarded_submit_interaction_failed"
+    assert "interaction_status=selector_click_failed" in (persisted_attempt.notes or "")
+    assert persisted_application.current_state == "review"
+    assert blocked_event is not None
+    assert blocked_event.payload["submit_interaction"]["clicked"] is False
+    assert blocked_event.payload["submit_interaction"]["error"] == "selector_click_failed"
+
+
+def test_execute_guarded_submit_blocks_when_submit_selector_probe_fails(
+    tmp_path: Path, monkeypatch
+):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "greenhouse"
+    browser = BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+    start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+    build_draft_field_plan(session, attempt_id=attempt.attempt_id)
+    build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_html",
+        lambda **kwargs: (
+            "<html><body><div data-qa='application-review'>Review</div></body></html>",
+            {
+                "capture_method": "http_get",
+                "status_code": 200,
+                "final_url": kwargs["target_url"],
+            },
+        ),
+    )
+    open_site_target_page(session, attempt_id=attempt.attempt_id)
+    mappings = session.query(models.FieldMapping).filter_by(attempt_id=attempt.attempt_id).all()
+    for mapping in mappings:
+        if mapping.field_key == "why_this_role":
+            mapping.field_key = "prepared_answer_why_role"
+        parsed = json.loads(mapping.raw_dom_signature or "{}")
+        parsed["manual_review_required"] = False
+        parsed["resolution_status"] = "resolved"
+        if not parsed.get("resolved_selector"):
+            parsed["resolved_selector"] = "input[name='autofill']"
+        mapping.raw_dom_signature = json.dumps(parsed, ensure_ascii=True)
+    session.commit()
+    gate = evaluate_submit_gate(session, attempt_id=attempt.attempt_id)
+    assert gate.allow_submit is True
+
+    try:
+        execute_guarded_submit(session, attempt_id=attempt.attempt_id)
+        assert False, "expected guarded submit probe failure"
+    except ValueError as exc:
+        assert str(exc) == "guarded_submit_probe_failed"
+
+    persisted_attempt = session.query(models.ApplicationAttempt).filter_by(id=attempt.attempt_id).one()
+    persisted_application = session.query(models.Application).filter_by(id=persisted_attempt.application_id).one()
+    blocked_event = session.query(models.ApplicationEvent).filter_by(
+        attempt_id=attempt.attempt_id,
+        event_type="draft_submit_execution_blocked",
+    ).one()
+    artifacts = session.query(models.Artifact).filter_by(attempt_id=attempt.attempt_id).all()
+    probe_failed_artifact = next(
+        artifact for artifact in artifacts if artifact.path.endswith("_guarded_submit_probe_failed.json")
+    )
+    probe_payload = json.loads(Path(probe_failed_artifact.path).read_text(encoding="utf-8"))
+
+    assert persisted_attempt.result == "blocked"
+    assert persisted_attempt.failure_code == "guarded_submit_probe_failed"
+    assert "classification=page_changed_still_recognizable" in (persisted_attempt.notes or "")
+    assert persisted_application.current_state == "review"
+    assert blocked_event.payload["allow_submit"] is False
+    assert blocked_event.payload["submit_probe"]["blocked_reason"] == "submit_selector_not_found"
+    assert (
+        blocked_event.payload["submit_probe"]["failure_classification"]
+        == "page_changed_still_recognizable"
+    )
+    assert probe_payload["submit_probe"]["blocked_reason"] == "submit_selector_not_found"
+    assert (
+        probe_payload["submit_probe"]["failure_classification"]
+        == "page_changed_still_recognizable"
+    )
+
+    overview_rows = list_execution_overview(
+        session,
+        candidate_profile_slug="alex-doe",
+        limit=10,
+    )
+    assert len(overview_rows) == 1
+    assert overview_rows[0].failure_code == "guarded_submit_probe_failed"
+    assert overview_rows[0].failure_classification == "page_changed_still_recognizable"
+
+    detail = get_execution_attempt_detail(session, attempt_id=attempt.attempt_id)
+    assert detail.failure_code == "guarded_submit_probe_failed"
+    assert detail.failure_classification == "page_changed_still_recognizable"
+
+
+def test_execute_guarded_submit_probe_failure_classifies_authentication_session_issue(
+    tmp_path: Path, monkeypatch
+):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "greenhouse"
+    browser = BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+    start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+    build_draft_field_plan(session, attempt_id=attempt.attempt_id)
+    build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_html",
+        lambda **kwargs: (
+            "<html><body><div class='auth-required'>Session expired</div></body></html>",
+            {
+                "capture_method": "http_get",
+                "status_code": 200,
+                "final_url": kwargs["target_url"],
+                "error": "session_expired_login_required",
+            },
+        ),
+    )
+    open_site_target_page(session, attempt_id=attempt.attempt_id)
+    mappings = session.query(models.FieldMapping).filter_by(attempt_id=attempt.attempt_id).all()
+    for mapping in mappings:
+        if mapping.field_key == "why_this_role":
+            mapping.field_key = "prepared_answer_why_role"
+        parsed = json.loads(mapping.raw_dom_signature or "{}")
+        parsed["manual_review_required"] = False
+        parsed["resolution_status"] = "resolved"
+        if not parsed.get("resolved_selector"):
+            parsed["resolved_selector"] = "input[name='autofill']"
+        mapping.raw_dom_signature = json.dumps(parsed, ensure_ascii=True)
+    session.commit()
+    gate = evaluate_submit_gate(session, attempt_id=attempt.attempt_id)
+    assert gate.allow_submit is True
+
+    try:
+        execute_guarded_submit(session, attempt_id=attempt.attempt_id)
+        assert False, "expected guarded submit probe failure"
+    except ValueError as exc:
+        assert str(exc) == "guarded_submit_probe_failed"
+
+    blocked_event = session.query(models.ApplicationEvent).filter_by(
+        attempt_id=attempt.attempt_id,
+        event_type="draft_submit_execution_blocked",
+    ).one()
+    assert (
+        blocked_event.payload["submit_probe"]["failure_classification"]
+        == "authentication_session_issue"
+    )
+
+
+def test_execute_guarded_submit_is_idempotent_after_first_success(tmp_path: Path):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "greenhouse"
+    browser = BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+    start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+    build_draft_field_plan(session, attempt_id=attempt.attempt_id)
+    build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+    open_site_target_page(session, attempt_id=attempt.attempt_id)
+    mappings = session.query(models.FieldMapping).filter_by(attempt_id=attempt.attempt_id).all()
+    for mapping in mappings:
+        if mapping.field_key == "why_this_role":
+            mapping.field_key = "prepared_answer_why_role"
+        parsed = json.loads(mapping.raw_dom_signature or "{}")
+        parsed["manual_review_required"] = False
+        parsed["resolution_status"] = "resolved"
+        if not parsed.get("resolved_selector"):
+            parsed["resolved_selector"] = "input[name='autofill']"
+        mapping.raw_dom_signature = json.dumps(parsed, ensure_ascii=True)
+    session.commit()
+    gate = evaluate_submit_gate(session, attempt_id=attempt.attempt_id)
+    assert gate.allow_submit is True
+
+    first = execute_guarded_submit(session, attempt_id=attempt.attempt_id)
+    second = execute_guarded_submit(session, attempt_id=attempt.attempt_id)
+
+    events = session.query(models.ApplicationEvent).filter_by(
+        attempt_id=attempt.attempt_id,
+        event_type="draft_submit_executed",
+    ).all()
+    assert len(events) == 1
+    assert second.event_id == first.event_id
+
+
+def test_execute_guarded_submit_succeeds_for_lever_with_vendor_mode_and_plan(
+    tmp_path: Path, monkeypatch
+):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "lever"
+    browser = BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+    start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+    build_draft_field_plan(session, attempt_id=attempt.attempt_id)
+    build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+    open_site_target_page(session, attempt_id=attempt.attempt_id)
+    mappings = session.query(models.FieldMapping).filter_by(attempt_id=attempt.attempt_id).all()
+    for mapping in mappings:
+        if mapping.field_key == "why_this_role":
+            mapping.field_key = "prepared_answer_why_role"
+        parsed = json.loads(mapping.raw_dom_signature or "{}")
+        parsed["manual_review_required"] = False
+        parsed["resolution_status"] = "resolved"
+        if not parsed.get("resolved_selector"):
+            parsed["resolved_selector"] = "input[name='autofill']"
+        mapping.raw_dom_signature = json.dumps(parsed, ensure_ascii=True)
+    session.commit()
+    gate = evaluate_submit_gate(session, attempt_id=attempt.attempt_id)
+    assert gate.allow_submit is True
+
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_screenshot_via_playwright",
+        lambda **kwargs: b"\x89PNG\r\n\x1a\nlever-submit-fake",
+    )
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_trace_via_playwright",
+        lambda **kwargs: b"PK\x03\x04lever-submit-trace",
+    )
+
+    submitted = execute_guarded_submit(session, attempt_id=attempt.attempt_id)
+    event = session.query(models.ApplicationEvent).filter_by(
+        attempt_id=attempt.attempt_id,
+        event_type="draft_submit_executed",
+    ).one()
+
+    assert submitted.submission_mode == "lever_guarded_submit"
+    assert event.payload["submission_mode"] == "lever_guarded_submit"
+    assert event.payload["submit_plan"]["site_vendor"] == "lever"
+    assert event.payload["submit_plan"]["submit_button_selectors"]
+    assert event.payload["submit_probe"]["probe_available"] is True
+
+
+def test_execute_guarded_submit_rejects_unsupported_site_even_with_gate_event(tmp_path: Path):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "workday"
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+    )
+    start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+    application = session.query(models.Application).filter_by(id=attempt.application_id).one()
+    session.add(
+        models.ApplicationEvent(
+            application_id=application.id,
+            attempt_id=attempt.attempt_id,
+            event_type="draft_target_opened",
+            message="Synthetic target-open event for unsupported-site guard test.",
+            payload={"target_url": "https://example.com/workday/job/1"},
+            created_at=models.utcnow(),
+        )
+    )
+    session.add(
+        models.ApplicationEvent(
+            application_id=application.id,
+            attempt_id=attempt.attempt_id,
+            event_type="draft_submit_gate_evaluated",
+            message="Synthetic gate event for unsupported-site guard test.",
+            payload={"allow_submit": True, "confidence_score": 0.99},
+            created_at=models.utcnow(),
+        )
+    )
+    session.commit()
+
+    try:
+        execute_guarded_submit(session, attempt_id=attempt.attempt_id)
+        assert False, "expected unsupported-site guarded-submit error"
+    except ValueError as exc:
+        assert str(exc) == "guarded_submit_not_supported_for_site"
 
 
 def test_list_execution_overview_returns_blocked_attempts_with_job_context(tmp_path: Path):
@@ -573,7 +1429,17 @@ def test_list_execution_overview_and_dashboard_support_failure_and_confidence_fi
     assert len(filtered_rows) == 1
     assert filtered_rows[0].attempt_id == blocked_attempt.attempt_id
     assert filtered_rows[0].failure_code == "submit_gate_blocked"
+    assert filtered_rows[0].failure_classification == "unknown_classification"
     assert filtered_rows[0].submit_confidence == gate.confidence_score
+
+    classification_rows = list_execution_overview(
+        session,
+        candidate_profile_slug="alex-doe",
+        failure_classification="unknown_classification",
+        limit=10,
+    )
+    assert len(classification_rows) == 1
+    assert classification_rows[0].attempt_id == blocked_attempt.attempt_id
 
     empty_rows = list_execution_overview(
         session,
@@ -596,6 +1462,7 @@ def test_list_execution_overview_and_dashboard_support_failure_and_confidence_fi
     assert dashboard.manual_review_blocked_attempts == 0
     assert dashboard.pending_attempts == 0
     assert dashboard.blocked_failure_counts == {"submit_gate_blocked": 1}
+    assert dashboard.blocked_failure_classification_counts == {"unknown_classification": 1}
     assert dashboard.recent_attempts[0].attempt_id == blocked_attempt.attempt_id
     assert any("failure_code=submit_gate_blocked" in action for action in dashboard.recommended_actions)
 
@@ -666,6 +1533,7 @@ def test_execution_overview_and_dashboard_support_manual_review_only_filter(tmp_
     assert dashboard.blocked_attempts == 1
     assert dashboard.manual_review_blocked_attempts == 1
     assert dashboard.blocked_failure_counts == {"manual_review_required:unresolved_required": 1}
+    assert dashboard.blocked_failure_classification_counts == {"unknown_classification": 1}
     assert dashboard.recent_attempts[0].attempt_id == manual_attempt.attempt_id
     assert any("manual-review-required failures only" in action for action in dashboard.recommended_actions)
 
@@ -934,6 +1802,221 @@ def test_get_execution_replay_bundle_returns_replay_assets_and_actions(tmp_path:
     assert any("Resolve manual-review" in action for action in replay.recommended_actions)
 
 
+def test_get_execution_replay_bundle_exposes_playwright_trace_asset_launch_metadata(
+    tmp_path: Path, monkeypatch
+):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "greenhouse"
+    browser = BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+    start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+    build_draft_field_plan(session, attempt_id=attempt.attempt_id)
+    build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_html",
+        lambda **kwargs: (
+            "<html><body>playwright</body></html>",
+            {"capture_method": "playwright", "status_code": 200, "final_url": kwargs["target_url"]},
+        ),
+    )
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_screenshot_via_playwright",
+        lambda **kwargs: b"\x89PNG\r\n\x1a\nplaywright-fake",
+    )
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_trace_via_playwright",
+        lambda **kwargs: b"PK\x03\x04playwright-trace",
+    )
+    open_site_target_page(session, attempt_id=attempt.attempt_id)
+
+    replay = get_execution_replay_bundle(session, attempt_id=attempt.attempt_id)
+    trace_asset = next(asset for asset in replay.assets if asset.label == "opened_target_trace")
+
+    assert trace_asset.exists
+    assert trace_asset.artifact_type == "trace"
+    assert trace_asset.openable_locally
+    assert trace_asset.open_hint == "open_trace"
+    assert trace_asset.launch_label == "Download trace"
+    assert trace_asset.launch_target == "download_trace"
+    assert trace_asset.launch_route is not None
+
+
+def test_get_execution_replay_bundle_includes_guarded_submit_assets_after_success(
+    tmp_path: Path, monkeypatch
+):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "greenhouse"
+    browser = BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+    start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+    build_draft_field_plan(session, attempt_id=attempt.attempt_id)
+    build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+    open_site_target_page(session, attempt_id=attempt.attempt_id)
+    mappings = session.query(models.FieldMapping).filter_by(attempt_id=attempt.attempt_id).all()
+    for mapping in mappings:
+        if mapping.field_key == "why_this_role":
+            mapping.field_key = "prepared_answer_why_role"
+        parsed = json.loads(mapping.raw_dom_signature or "{}")
+        parsed["manual_review_required"] = False
+        parsed["resolution_status"] = "resolved"
+        if not parsed.get("resolved_selector"):
+            parsed["resolved_selector"] = "input[name='autofill']"
+        mapping.raw_dom_signature = json.dumps(parsed, ensure_ascii=True)
+    session.commit()
+    gate = evaluate_submit_gate(session, attempt_id=attempt.attempt_id)
+    assert gate.allow_submit is True
+
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_screenshot_via_playwright",
+        lambda **kwargs: b"\x89PNG\r\n\x1a\nguarded-submit-fake",
+    )
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_trace_via_playwright",
+        lambda **kwargs: b"PK\x03\x04guarded-submit-trace",
+    )
+    execute_guarded_submit(session, attempt_id=attempt.attempt_id)
+
+    replay = get_execution_replay_bundle(session, attempt_id=attempt.attempt_id)
+
+    assert replay.attempt_result == "success"
+    assert replay.latest_event_type == "draft_submit_executed"
+    assert any(asset.label == "guarded_submit" and asset.artifact_id is not None for asset in replay.assets)
+    assert any(
+        asset.label == "guarded_submit_screenshot"
+        and asset.artifact_type == "screenshot"
+        and asset.launch_label == "View image"
+        and asset.launch_target == "inspect_image"
+        for asset in replay.assets
+    )
+    assert any(
+        asset.label == "guarded_submit_trace"
+        and asset.artifact_type == "trace"
+        and asset.launch_label == "Download trace"
+        and asset.launch_target == "download_trace"
+        for asset in replay.assets
+    )
+    assert any("Inspect guarded_submit artifacts" in action for action in replay.recommended_actions)
+
+
+def test_list_execution_overview_prefers_latest_visual_evidence_after_guarded_submit(
+    tmp_path: Path, monkeypatch
+):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "greenhouse"
+    browser = BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+    start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+    build_draft_field_plan(session, attempt_id=attempt.attempt_id)
+    build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+    open_site_target_page(session, attempt_id=attempt.attempt_id)
+    mappings = session.query(models.FieldMapping).filter_by(attempt_id=attempt.attempt_id).all()
+    for mapping in mappings:
+        if mapping.field_key == "why_this_role":
+            mapping.field_key = "prepared_answer_why_role"
+        parsed = json.loads(mapping.raw_dom_signature or "{}")
+        parsed["manual_review_required"] = False
+        parsed["resolution_status"] = "resolved"
+        if not parsed.get("resolved_selector"):
+            parsed["resolved_selector"] = "input[name='autofill']"
+        mapping.raw_dom_signature = json.dumps(parsed, ensure_ascii=True)
+    session.commit()
+    gate = evaluate_submit_gate(session, attempt_id=attempt.attempt_id)
+    assert gate.allow_submit is True
+
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_screenshot_via_playwright",
+        lambda **kwargs: b"\x89PNG\r\n\x1a\nguarded-submit-fake",
+    )
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_trace_via_playwright",
+        lambda **kwargs: b"PK\x03\x04guarded-submit-trace",
+    )
+    execute_guarded_submit(session, attempt_id=attempt.attempt_id)
+
+    rows = list_execution_overview(
+        session,
+        candidate_profile_slug="alex-doe",
+        limit=10,
+    )
+
+    assert len(rows) == 1
+    assert rows[0].attempt_result == "success"
+    assert rows[0].latest_event_type == "draft_submit_executed"
+    assert rows[0].visual_evidence_label == "Download trace"
+
+
 def test_get_execution_dashboard_returns_summary_counts(tmp_path: Path):
     session = make_session()
     job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
@@ -990,6 +2073,7 @@ def test_get_execution_dashboard_returns_summary_counts(tmp_path: Path):
     assert dashboard.review_state_attempts == 1
     assert dashboard.replay_ready_attempts == 1
     assert dashboard.blocked_failure_counts == {"submit_gate_blocked": 1}
+    assert dashboard.blocked_failure_classification_counts == {"unknown_classification": 1}
     assert dashboard.blocked_recent_attempts[0].attempt_id == blocked_attempt.attempt_id
     assert any(row.attempt_id == pending_attempt.attempt_id for row in dashboard.recent_attempts)
     assert any("Resolve blocked guarded attempts" in action for action in dashboard.recommended_actions)
@@ -1027,6 +2111,20 @@ def test_capture_target_page_html_uses_http_get_when_available(monkeypatch):
     assert metadata["status_code"] == 200
 
 
+def test_selector_matches_html_detects_attribute_and_id_signatures():
+    html = """
+    <html><body>
+      <button id="submit_app" type="submit" data-qa="submit-application" class="postings-btn--large">Apply</button>
+      <div class="application-review"></div>
+    </body></html>
+    """
+    assert _selector_matches_html("button[type='submit']", html)
+    assert _selector_matches_html("button#submit_app", html)
+    assert _selector_matches_html("button[data-qa='submit-application']", html)
+    assert _selector_matches_html(".application-review", html)
+    assert not _selector_matches_html("button[data-qa='not-there']", html)
+
+
 def test_capture_target_page_html_falls_back_to_stub_on_error(monkeypatch):
     monkeypatch.setattr(
         "jobbot.execution.service.urlopen",
@@ -1043,3 +2141,68 @@ def test_capture_target_page_html_falls_back_to_stub_on_error(monkeypatch):
     assert "Opened target URL" in html
     assert metadata["capture_method"] == "stub_fallback"
     assert metadata["error"].startswith("os_error:")
+
+
+def test_capture_target_page_html_prefers_playwright_capture_when_available(monkeypatch):
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_html_via_playwright",
+        lambda **kwargs: (
+            "<html><body>playwright</body></html>",
+            {
+                "capture_method": "playwright",
+                "status_code": 200,
+                "final_url": kwargs["target_url"],
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        "jobbot.execution.service.urlopen",
+        lambda request, timeout=0: (_ for _ in ()).throw(AssertionError("http should not be used")),
+    )
+
+    html, metadata = _capture_target_page_html(
+        target_url="https://example.com/jobs/42",
+        job_title="Senior Backend Engineer",
+        browser_profile_key="apply-main",
+        candidate_profile_slug="alex-doe",
+    )
+
+    assert "<body>playwright</body>" in html
+    assert metadata["capture_method"] == "playwright"
+    assert metadata["status_code"] == 200
+
+
+def test_capture_target_page_html_falls_back_to_http_after_playwright_error(monkeypatch):
+    class FakeResponse:
+        status = 200
+        url = "https://example.com/jobs/42"
+        headers = {"Content-Type": "text/html; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def read(self, _max_bytes):
+            return b"<html><body>http-fallback</body></html>"
+
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_html_via_playwright",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("playwright_not_available")),
+    )
+    monkeypatch.setattr(
+        "jobbot.execution.service.urlopen",
+        lambda request, timeout=0: FakeResponse(),
+    )
+
+    html, metadata = _capture_target_page_html(
+        target_url="https://example.com/jobs/42",
+        job_title="Senior Backend Engineer",
+        browser_profile_key="apply-main",
+        candidate_profile_slug="alex-doe",
+    )
+
+    assert "<body>http-fallback</body>" in html
+    assert metadata["capture_method"] == "http_get"
+    assert metadata.get("playwright_error") == "RuntimeError"

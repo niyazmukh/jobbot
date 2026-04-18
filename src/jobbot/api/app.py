@@ -24,6 +24,7 @@ from jobbot.execution import (
     DraftExecutionAttemptDetailRead,
     DraftExecutionOverviewRead,
     DraftExecutionReplayBundleRead,
+    DraftGuardedSubmitRead,
     DraftExecutionStartupRead,
     DraftFieldPlanRead,
     DraftSiteFieldPlanRead,
@@ -32,6 +33,7 @@ from jobbot.execution import (
     bootstrap_draft_application_attempt,
     build_draft_field_plan,
     build_site_field_overlay,
+    execute_guarded_submit,
     evaluate_submit_gate,
     get_execution_artifact_detail,
     get_execution_artifact_file,
@@ -618,6 +620,7 @@ def create_app() -> FastAPI:
         blocked_only: bool = False,
         manual_review_only: bool = False,
         failure_code: str | None = None,
+        failure_classification: str | None = None,
         max_submit_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
         sort_by: str = "started_at",
         descending: bool = True,
@@ -632,6 +635,7 @@ def create_app() -> FastAPI:
                 blocked_only=blocked_only,
                 manual_review_only=manual_review_only,
                 failure_code=failure_code,
+                failure_classification=failure_classification,
                 max_submit_confidence=max_submit_confidence,
                 sort_by=sort_by,
                 descending=descending,
@@ -653,6 +657,7 @@ def create_app() -> FastAPI:
         db: DbSession,
         manual_review_only: bool = False,
         failure_code: str | None = None,
+        failure_classification: str | None = None,
         max_submit_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
         sort_by: str = "started_at",
         descending: bool = True,
@@ -666,6 +671,7 @@ def create_app() -> FastAPI:
                 candidate_profile_slug=candidate_profile_slug,
                 manual_review_only=manual_review_only,
                 failure_code=failure_code,
+                failure_classification=failure_classification,
                 max_submit_confidence=max_submit_confidence,
                 sort_by=sort_by,
                 descending=descending,
@@ -955,6 +961,39 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=404, detail=detail) from exc
             raise
 
+    @app.post(
+        "/api/execution/draft-attempts/{attempt_id}/guarded-submit",
+        response_model=DraftGuardedSubmitRead,
+    )
+    def execute_guarded_submit_endpoint(
+        attempt_id: int,
+        db: DbSession,
+    ) -> DraftGuardedSubmitRead:
+        """Execute guarded submit after submit-gate approval."""
+
+        try:
+            return execute_guarded_submit(
+                db,
+                attempt_id=attempt_id,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail in {
+                "application_attempt_not_found",
+                "application_attempt_not_draft",
+                "draft_submit_gate_not_evaluated",
+                "draft_target_not_opened",
+                "guarded_submit_not_supported_for_site",
+            }:
+                raise HTTPException(status_code=404, detail=detail) from exc
+            if detail in {
+                "submit_gate_blocked",
+                "guarded_submit_probe_failed",
+                "guarded_submit_interaction_failed",
+            }:
+                raise HTTPException(status_code=409, detail=detail) from exc
+            raise
+
     @app.get("/api/review-queue", response_model=list[ReviewQueueRead])
     def list_review_queue_endpoint(
         db: DbSession,
@@ -1211,6 +1250,7 @@ def _render_job_card(job: InboxJobRow, candidate_profile_slug: str | None) -> st
             "<div class='score'>"
             f"<div>Execution result: {escape(str(job.execution_summary.get('attempt_result') or 'pending'))}</div>"
             f"<div>Failure code: {escape(str(job.execution_summary.get('failure_code') or 'none'))}</div>"
+            f"<div>Failure class: {escape(str(job.execution_summary.get('failure_classification') or 'none'))}</div>"
             f"<div>Submit confidence: {escape(str(job.execution_summary.get('submit_confidence')))}</div>"
             "</div>"
         )
@@ -1293,6 +1333,7 @@ def _render_job_detail_page(detail: InboxJobDetail) -> str:
             f"<p>Application state: {escape(str(detail.execution_summary.get('application_state')))}</p>"
             f"<p>Attempt result: {escape(str(detail.execution_summary.get('attempt_result') or 'pending'))}</p>"
             f"<p>Failure code: {escape(str(detail.execution_summary.get('failure_code') or 'none'))}</p>"
+            f"<p>Failure class: {escape(str(detail.execution_summary.get('failure_classification') or 'none'))}</p>"
             f"<p>Submit confidence: {escape(str(detail.execution_summary.get('submit_confidence')))}</p>"
             f"<p>Notes: {escape(str(detail.execution_summary.get('notes') or ''))}</p>"
             "</section>"
@@ -1478,6 +1519,7 @@ def _render_execution_overview_page(
             f"Readiness: {escape(row.readiness_state)}</div>"
             f"<div class='status'>Result: {escape(str(row.attempt_result or 'pending'))} | "
             f"Failure: {escape(str(row.failure_code or 'none'))}</div>"
+            f"<div class='status'>Failure class: {escape(str(row.failure_classification or 'none'))}</div>"
             f"<div class='status'>Confidence: {escape(str(row.submit_confidence))} | "
             f"Session: {escape(str(row.session_health or 'unknown'))}</div>"
             f"<div class='status'>Latest stage: {escape(str(row.latest_event_type or 'none'))}</div>"
@@ -1587,7 +1629,8 @@ def _render_execution_dashboard_page(detail: DraftExecutionDashboardRead) -> str
     blocked_html = "\n".join(
         (
             "<li>"
-            f"Attempt #{row.attempt_id} | {escape(row.failure_code or 'none')} | {escape(row.job_title)}"
+            f"Attempt #{row.attempt_id} | {escape(row.failure_code or 'none')} "
+            f"({escape(row.failure_classification or 'none')}) | {escape(row.job_title)}"
             f" | <a href='{escape(row.primary_action_route)}'>{escape(row.primary_action_label)}</a>"
             f" | <a href='{escape(row.attempt_route)}'>attempt</a>"
             f"{_dashboard_evidence_link(row)}"
@@ -1603,6 +1646,13 @@ def _render_execution_dashboard_page(detail: DraftExecutionDashboardRead) -> str
             key=lambda item: (-item[1], item[0]),
         )
     ) or "<li>No blocked failures recorded.</li>"
+    blocked_failure_classification_html = "\n".join(
+        f"<li>{escape(classification)}: {count}</li>"
+        for classification, count in sorted(
+            detail.blocked_failure_classification_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    ) or "<li>No blocked classifications recorded.</li>"
 
     actions_html = "\n".join(f"<li>{escape(action)}</li>" for action in detail.recommended_actions)
 
@@ -1667,6 +1717,10 @@ def _render_execution_dashboard_page(detail: DraftExecutionDashboardRead) -> str
       <section class="panel">
         <h2>Blocked Failure Breakdown</h2>
         <ul>{blocked_failure_html}</ul>
+      </section>
+      <section class="panel">
+        <h2>Blocked Failure Classification Breakdown</h2>
+        <ul>{blocked_failure_classification_html}</ul>
       </section>
       <section class="panel">
         <h2>Recent Attempts</h2>
@@ -1763,6 +1817,7 @@ def _render_execution_attempt_detail_page(detail: DraftExecutionAttemptDetailRea
         <p>Attempt #{detail.attempt_id} | Job #{detail.job_id} | Candidate {escape(detail.candidate_profile_slug)}</p>
         <p>Application state: {escape(detail.application_state)} | Result: {escape(str(detail.attempt_result or 'pending'))}</p>
         <p>Failure: {escape(str(detail.failure_code or 'none'))} | Confidence: {escape(str(detail.submit_confidence))}</p>
+        <p>Failure class: {escape(str(detail.failure_classification or 'none'))}</p>
         <p>Browser: {escape(str(detail.browser_profile_key or 'none'))} | Session: {escape(str(detail.session_health or 'unknown'))}</p>
         <p>Notes: {escape(str(detail.notes or ''))}</p>
         <p><a href="/execution/replay/{detail.attempt_id}">Open replay bundle</a></p>

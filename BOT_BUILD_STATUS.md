@@ -96,13 +96,44 @@
 - Added blocked-failure breakdown metrics (`blocked_failure_counts`, `manual_review_blocked_attempts`) to execution dashboard service/API/HTML/CLI surfaces for deterministic triage prioritization.
 - Added `manual_review_only` filtering across execution overview/dashboard service/API/HTML/CLI surfaces so unresolved-manual-review failures can be isolated in one deterministic operations view.
 - Added deterministic execution sort controls (`sort_by`, `descending`) across execution overview/dashboard service/API/HTML/CLI surfaces with invalid-sort guardrails.
+- Added automatic eligibility rematerialization on review-status changes for `generated_document` and deterministic preparation `answer` entities.
+- Added deterministic Lever execution support for site overlays, target-open resolution, and guarded submit-gate evaluation.
+- Extracted ATS-specific execution selector/required-field profiles into `execution/site_profiles.py` and rewired execution service to use modular vendor profiles.
+- Extracted ATS-specific target-open and submit-gate handling logic into `execution/site_handlers.py` and rewired execution service for modular handler-based resolution/stop-reason decisions.
+- Extracted ATS-specific target-open and submit-gate artifact/event payload builders into `execution/site_handlers.py` so execution service remains orchestration-first.
+- Extracted vendor flow mapping loops into `execution/vendor_flows.py` for overlay entry construction, target-open resolution mutation, and submit-gate signal derivation.
+- Added a deterministic execution vendor handler registry (`execution/vendor_registry.py`) and rewired `execution/service.py` to dispatch overlay, target-open, and submit-gate behavior through registered ATS handlers instead of hardcoded vendor branches.
+- Added fixture-backed ATS execution selector profile regressions (`fixtures/execution/ats_profiles/*.json`) for Greenhouse and Lever and hardened selector overlays against observed field variants.
+- Added Playwright-first target-open capture wiring with deterministic HTTP and stub fallbacks, plus capture metadata propagation (`playwright_error`) for execution diagnostics.
+- Added Playwright-backed target-open screenshot capture with persisted `SCREENSHOT` artifacts, replay-bundle asset wiring, and non-blocking screenshot error diagnostics.
+- Added Playwright-backed target-open trace capture with persisted `TRACE` artifacts, replay-bundle trace asset wiring, and non-blocking trace error diagnostics.
+- Added Playwright trace robustness tests for non-blocking trace-capture failures and replay-bundle trace launch metadata (`open_trace`/`download_trace`) coverage.
+- Added Playwright-first startup target-page capture in `start_draft_execution_attempt` with persisted startup capture metadata (`target_capture`) and deterministic stub fallback when no browser profile is assigned.
+- Added real guarded-submit execution (`execute_guarded_submit`) with persisted submit artifacts/events, idempotent re-reads, and deterministic state transitions to `applied` on passing submit gates.
+- Added guarded-submit API/CLI surfaces (`/api/execution/draft-attempts/{attempt_id}/guarded-submit`, `execute-guarded-submit`) and conflict semantics for blocked submit-gate attempts.
+- Added guarded-submit artifact/event/note builders in site handler utilities for orchestration-first execution service composition.
+- Added guarded-submit replay continuity so replay bundles now expose `guarded_submit`, `guarded_submit_screenshot`, and `guarded_submit_trace` assets with launch metadata.
+- Added post-submit execution visibility so overview rows use the latest visual evidence artifact (not the oldest), allowing guarded-submit traces/screenshots to become the primary operator jump target.
+- Routed guarded submit execution through the ATS vendor registry so vendor-specific submit modes are no longer hardcoded in the core execution orchestrator.
+- Added explicit unsupported-site guardrails for guarded submit (`guarded_submit_not_supported_for_site`) across service/API flows.
+- Added deterministic ATS-specific guarded-submit strategy plans (submit selectors/review markers/confirmation markers) via execution site profiles and vendor handler dispatch.
+- Added Lever guarded-submit success coverage so vendor mode + strategy propagation is validated beyond Greenhouse.
+- Added guarded-submit HTML probe evidence (`submit_probe`) that evaluates vendor submit selectors/review markers/confirmation markers against captured target pages and persists results in submit artifacts/events.
+- Enforced guarded-submit probe safety by blocking submit execution when no vendor submit selector matches captured target HTML, persisting explicit `guarded_submit_probe_failed` artifacts/events and review-state transitions.
+- Added guarded-submit probe-failure conflict semantics (`409`) on the execution API plus deterministic service/API regressions for probe-fail and probe-pass guarded-submit paths.
+- Added deterministic guarded-submit probe-failure classification (`page_changed_still_recognizable`, `unsupported_variant`, `authentication_session_issue`, `browser_runtime_issue`) to blocked execution artifacts/events for ATS handler triage.
+- Hardened selector signature probing to require composite selector components (tag/attributes/id/classes) together, preventing partial-match false positives on changed pages.
+- Surfaced guarded-submit `failure_classification` across execution overview/attempt detail and inbox execution summaries so operators can triage blocked attempts without opening raw artifact payloads.
+- Added classification-aware execution triage controls: overview/dashboard filters by `failure_classification`, dashboard classification breakdown metrics, and CLI/API/HTML surfacing for classification-scoped blocked-attempt analysis.
+- Expanded guarded-submit execution into deterministic ATS submit-interaction attempts with Playwright-first execution, persisted `submit_interaction` evidence, simulated probe fallback when Playwright is unavailable, and explicit `guarded_submit_interaction_failed` blocked-state conflict semantics (`409`) across service/API paths.
+- Hardened selector probing with CSS-like signature matching tests to prevent false positives on mismatched attribute selectors.
 - Added a repo-local `.venv` workflow for JobBot development and validation without relying on global Python packages.
 - Added missing dev test dependency coverage (`httpx`) and repo-scoped `pytest` configuration so `pytest` targets JobBot tests instead of bundled comparison bots.
 - Fixed draft execution startup artifact serialization for JSON-safe answer packs.
 - Fixed guarded submit stop-reason classification so unresolved manual-review fields remain explicit `manual_review_required:*` blockers.
 - Fixed execution bootstrap/dashboard state handling so blocked applications preserve `review` state across later draft attempts and dashboard review counts aggregate by application instead of double-counting attempts.
 - Tightened deterministic enrichment/scoring rules for preferred-skill extraction and location mismatch detection.
-- Brought the scoped JobBot test suite to green in `.venv` with `105 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `146 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.
@@ -120,12 +151,9 @@
 - None currently.
 
 ## Next Tasks
-1. Decide whether review approval/rejection should automatically rematerialize eligibility or if that should stay explicit.
-2. Add Playwright-backed page-open startup with real session capture on top of the current HTTP-backed Greenhouse target-open flow.
-3. Convert the current Greenhouse target-open and submit-gate layers into a real guarded submit handler with attempt-level screenshots/traces.
-4. Expand screenshot/trace launch handling from inspect/download routing into richer browser-assisted replay actions.
-5. Add Playwright-specific tests once browser-backed execution replaces the current HTTP/stub target-open flow.
-6. Promote the replay bundle and dashboard into a broader multi-ATS execution control center once multiple handlers exist.
+1. Expand execution detail/overview HTML/API surfaces with submit-stage-first operator actions (e.g., explicit post-submit diagnostics panel).
+2. Promote the replay bundle and dashboard into a broader multi-ATS execution control center once multiple handlers exist.
+3. Tighten guarded-submit interaction policies from simulated fallback toward stricter browser-executed submit evidence as profile/session reliability instrumentation improves.
 
 ## Decisions
 - New implementation lives in `src/jobbot/` instead of modifying existing bot repos.

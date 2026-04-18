@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import re
+import tempfile
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -34,6 +36,7 @@ from jobbot.execution.schemas import (
     DraftExecutionDashboardRead,
     DraftExecutionAttemptDetailRead,
     DraftExecutionEventRead,
+    DraftGuardedSubmitRead,
     DraftExecutionOverviewRead,
     DraftExecutionReplayAssetRead,
     DraftExecutionReplayBundleRead,
@@ -46,6 +49,18 @@ from jobbot.execution.schemas import (
     DraftSiteFieldPlanRead,
     DraftTargetOpenRead,
 )
+from jobbot.execution.site_handlers import (
+    build_guarded_submit_artifact_payload,
+    build_guarded_submit_attempt_note,
+    build_guarded_submit_event_payload,
+    build_submit_gate_artifact_payload,
+    build_submit_gate_attempt_note,
+    build_submit_gate_event_payload,
+    build_target_open_attempt_note,
+    build_target_open_event_payload,
+    build_target_resolution_artifact_payload,
+)
+from jobbot.execution.vendor_registry import get_vendor_execution_handler
 from jobbot.models.enums import (
     ApplicationMode,
     ApplicationState,
@@ -258,6 +273,7 @@ def list_execution_overview(
     blocked_only: bool = False,
     manual_review_only: bool = False,
     failure_code: str | None = None,
+    failure_classification: str | None = None,
     max_submit_confidence: float | None = None,
     sort_by: str = "started_at",
     descending: bool = True,
@@ -297,6 +313,19 @@ def list_execution_overview(
             .order_by(ApplicationEvent.created_at.desc(), ApplicationEvent.id.desc())
             .limit(1)
         ).scalar_one_or_none()
+        attempt_failure_classification = _resolve_attempt_failure_classification(
+            session=session,
+            attempt_id=attempt.id,
+            latest_event=latest_event,
+        )
+        if (
+            attempt.result == AttemptResult.BLOCKED.value
+            and (
+                attempt_failure_classification is None
+                or not attempt_failure_classification.strip()
+            )
+        ):
+            attempt_failure_classification = "unknown_classification"
         artifacts = session.scalars(
             select(Artifact).where(Artifact.attempt_id == attempt.id)
         ).all()
@@ -331,7 +360,7 @@ def list_execution_overview(
         visual_artifact = next(
             (
                 artifact
-                for artifact in artifacts
+                for artifact in reversed(artifacts)
                 if artifact.artifact_type in {ArtifactType.SCREENSHOT, ArtifactType.HTML_SNAPSHOT, ArtifactType.TRACE}
             ),
             None,
@@ -360,6 +389,7 @@ def list_execution_overview(
                 attempt_mode=attempt.mode.value,
                 attempt_result=attempt.result,
                 failure_code=attempt.failure_code,
+                failure_classification=attempt_failure_classification,
                 submit_confidence=attempt.submit_confidence,
                 browser_profile_key=attempt.browser_profile_key,
                 session_health=attempt.session_health,
@@ -398,6 +428,13 @@ def list_execution_overview(
             for item in items
             if (item.failure_code or "").strip().lower() == normalized
         ]
+    if failure_classification is not None:
+        normalized = failure_classification.strip().lower()
+        items = [
+            item
+            for item in items
+            if (item.failure_classification or "").strip().lower() == normalized
+        ]
     if max_submit_confidence is not None:
         items = [
             item
@@ -418,6 +455,11 @@ def list_execution_overview(
         null_items = [item for item in items if item.failure_code is None]
         non_null.sort(key=lambda item: item.failure_code or "", reverse=descending)
         items = non_null + null_items
+    elif sort_by == "failure_classification":
+        non_null = [item for item in items if item.failure_classification is not None]
+        null_items = [item for item in items if item.failure_classification is None]
+        non_null.sort(key=lambda item: item.failure_classification or "", reverse=descending)
+        items = non_null + null_items
     else:
         raise ValueError("invalid_execution_overview_sort")
     return items
@@ -429,6 +471,7 @@ def get_execution_dashboard(
     candidate_profile_slug: str,
     manual_review_only: bool = False,
     failure_code: str | None = None,
+    failure_classification: str | None = None,
     max_submit_confidence: float | None = None,
     sort_by: str = "started_at",
     descending: bool = True,
@@ -442,6 +485,7 @@ def get_execution_dashboard(
         blocked_only=False,
         manual_review_only=manual_review_only,
         failure_code=failure_code,
+        failure_classification=failure_classification,
         max_submit_confidence=max_submit_confidence,
         sort_by=sort_by,
         descending=descending,
@@ -449,9 +493,14 @@ def get_execution_dashboard(
     )
     blocked_rows = [row for row in rows if row.attempt_result == AttemptResult.BLOCKED.value]
     blocked_failure_counts: dict[str, int] = {}
+    blocked_failure_classification_counts: dict[str, int] = {}
     for row in blocked_rows:
         key = row.failure_code or "unknown_failure"
         blocked_failure_counts[key] = blocked_failure_counts.get(key, 0) + 1
+        class_key = row.failure_classification or "unknown_classification"
+        blocked_failure_classification_counts[class_key] = (
+            blocked_failure_classification_counts.get(class_key, 0) + 1
+        )
     manual_review_blocked_attempts = sum(
         count
         for code, count in blocked_failure_counts.items()
@@ -479,8 +528,20 @@ def get_execution_dashboard(
         recommended_actions.append(
             f"Top blocked failure code is {top_failure_code} ({top_failure_count} attempts)."
         )
+        top_failure_classification, top_failure_classification_count = max(
+            blocked_failure_classification_counts.items(),
+            key=lambda item: item[1],
+        )
+        recommended_actions.append(
+            "Top blocked failure classification is "
+            f"{top_failure_classification} ({top_failure_classification_count} attempts)."
+        )
     if failure_code:
         recommended_actions.append(f"Execution view is scoped to failure_code={failure_code}.")
+    if failure_classification:
+        recommended_actions.append(
+            f"Execution view is scoped to failure_classification={failure_classification}."
+        )
     if manual_review_only:
         recommended_actions.append("Execution view is scoped to manual-review-required failures only.")
     if max_submit_confidence is not None:
@@ -500,6 +561,7 @@ def get_execution_dashboard(
         review_state_attempts=len(review_application_ids),
         replay_ready_attempts=len(replay_ready_rows),
         blocked_failure_counts=blocked_failure_counts,
+        blocked_failure_classification_counts=blocked_failure_classification_counts,
         recent_attempts=rows[:limit],
         blocked_recent_attempts=blocked_rows[:limit],
         recommended_actions=recommended_actions,
@@ -535,6 +597,12 @@ def get_execution_attempt_detail(
         .where(ApplicationEvent.attempt_id == attempt.id)
         .order_by(ApplicationEvent.created_at, ApplicationEvent.id)
     ).all()
+    failure_classification = _resolve_attempt_failure_classification_from_events(events)
+    if (
+        attempt.result == AttemptResult.BLOCKED.value
+        and (failure_classification is None or not failure_classification.strip())
+    ):
+        failure_classification = "unknown_classification"
     artifacts = session.scalars(
         select(Artifact)
         .where(Artifact.attempt_id == attempt.id)
@@ -555,6 +623,7 @@ def get_execution_attempt_detail(
         attempt_mode=attempt.mode.value,
         attempt_result=attempt.result,
         failure_code=attempt.failure_code,
+        failure_classification=failure_classification,
         submit_confidence=attempt.submit_confidence,
         browser_profile_key=attempt.browser_profile_key,
         session_health=attempt.session_health,
@@ -713,6 +782,7 @@ def get_execution_replay_bundle(
     overlay_event = _event_by_type(events, "draft_site_field_overlay_created")
     target_event = _event_by_type(events, "draft_target_opened")
     submit_gate_event = _event_by_type(events, "draft_submit_gate_evaluated")
+    guarded_submit_event = _event_by_type(events, "draft_submit_executed")
     latest_event = events[-1] if events else None
 
     startup_payload = startup_event.payload if startup_event is not None else {}
@@ -754,6 +824,16 @@ def get_execution_replay_bundle(
         ),
         _build_replay_asset(
             attempt_id=attempt.id,
+            label="opened_target_screenshot",
+            artifact=_artifact_from_event_payload(artifacts, target_event, "screenshot_artifact_id"),
+        ),
+        _build_replay_asset(
+            attempt_id=attempt.id,
+            label="opened_target_trace",
+            artifact=_artifact_from_event_payload(artifacts, target_event, "trace_artifact_id"),
+        ),
+        _build_replay_asset(
+            attempt_id=attempt.id,
             label="field_resolution",
             artifact=_artifact_from_event_payload(artifacts, target_event, "resolution_artifact_id"),
         ),
@@ -762,6 +842,22 @@ def get_execution_replay_bundle(
             label="submit_gate",
             artifact=_artifact_from_event_payload(artifacts, submit_gate_event, "artifact_id"),
             fallback_path=_payload_value(submit_gate_event, "artifact_path"),
+        ),
+        _build_replay_asset(
+            attempt_id=attempt.id,
+            label="guarded_submit",
+            artifact=_artifact_from_event_payload(artifacts, guarded_submit_event, "artifact_id"),
+            fallback_path=_payload_value(guarded_submit_event, "artifact_path"),
+        ),
+        _build_replay_asset(
+            attempt_id=attempt.id,
+            label="guarded_submit_screenshot",
+            artifact=_artifact_from_event_payload(artifacts, guarded_submit_event, "screenshot_artifact_id"),
+        ),
+        _build_replay_asset(
+            attempt_id=attempt.id,
+            label="guarded_submit_trace",
+            artifact=_artifact_from_event_payload(artifacts, guarded_submit_event, "trace_artifact_id"),
         ),
     ]
 
@@ -774,6 +870,8 @@ def get_execution_replay_bundle(
         recommended_actions.append(f"Use startup_dir for local replay inputs: {startup_dir}")
     if attempt.result == AttemptResult.BLOCKED.value:
         recommended_actions.append("Resolve manual-review or unresolved fields before attempting guarded submit again.")
+    if attempt.result == AttemptResult.SUCCESS.value:
+        recommended_actions.append("Inspect guarded_submit artifacts to verify submission evidence and post-submit diagnostics.")
 
     return DraftExecutionReplayBundleRead(
         application_id=application.id,
@@ -890,12 +988,24 @@ def start_draft_execution_attempt(
     )
 
     target_page_path = startup_dir / "target_page.html"
-    target_page_path.write_text(
-        _render_target_page_stub(
+    if attempt.browser_profile_key:
+        target_page_html, target_capture = _capture_target_page_html(
+            target_url=target_url,
+            job_title=prepared.job_title,
+            browser_profile_key=attempt.browser_profile_key,
+            candidate_profile_slug=candidate.slug,
+        )
+    else:
+        target_page_html = _render_target_page_stub(
             job_title=prepared.job_title,
             target_url=target_url,
             candidate_profile_slug=candidate.slug,
-        ),
+        )
+        target_capture = {"capture_method": "stub_startup"}
+    target_page_path.write_text(target_page_html, encoding="utf-8")
+    startup_context_payload["target_capture"] = target_capture
+    startup_context_path.write_text(
+        json.dumps(startup_context_payload, indent=2, ensure_ascii=True),
         encoding="utf-8",
     )
 
@@ -952,6 +1062,7 @@ def start_draft_execution_attempt(
         payload={
             "startup_dir": str(startup_dir),
             "target_url": target_url,
+            "target_capture": target_capture,
             "prepared_document_count": len(prepared.documents),
             "prepared_answer_count": len(prepared.answers),
             "artifact_ids": [artifact.id for artifact in artifacts],
@@ -1172,7 +1283,8 @@ def build_site_field_overlay(
         raise ValueError("draft_field_plan_not_created")
 
     site_vendor = str(job.ats_vendor or "unknown").lower()
-    if site_vendor != "greenhouse":
+    handler = get_vendor_execution_handler(site_vendor)
+    if handler is None:
         raise ValueError("site_overlay_not_supported")
 
     existing_event = session.scalar(
@@ -1201,29 +1313,7 @@ def build_site_field_overlay(
 
     startup_dir = _execution_startup_dir(candidate.slug, application.job_id, attempt.id)
     startup_dir.mkdir(parents=True, exist_ok=True)
-    entries: list[DraftSiteFieldPlanEntryRead] = []
-    for mapping in mappings:
-        selectors, confidence_gate, manual_review_required = _greenhouse_selector_overlay(mapping.field_key)
-        mapping.raw_dom_signature = json.dumps(
-            {
-                "site_vendor": site_vendor,
-                "selectors": selectors,
-                "confidence_gate": confidence_gate,
-                "manual_review_required": manual_review_required,
-            },
-            ensure_ascii=True,
-        )
-        mapping.raw_label = _label_for_field_key(mapping.field_key)
-        entries.append(
-            DraftSiteFieldPlanEntryRead(
-                field_mapping_id=mapping.id,
-                field_key=mapping.field_key,
-                site_vendor=site_vendor,
-                selector_candidates=selectors,
-                confidence_gate=confidence_gate,
-                manual_review_required=manual_review_required,
-            )
-        )
+    entries = handler.overlay_entries(mappings)
 
     artifact_path = startup_dir / f"{site_vendor}_site_field_overlay.json"
     artifact_payload = {
@@ -1351,7 +1441,9 @@ def open_site_target_page(
             event=existing_event,
         )
 
-    if str(job.ats_vendor or "").lower() != "greenhouse":
+    site_vendor = str(job.ats_vendor or "").lower()
+    handler = get_vendor_execution_handler(site_vendor)
+    if handler is None or not handler.supports_target_open():
         raise ValueError("page_open_not_supported_for_site")
 
     startup_payload = startup_event.payload or {}
@@ -1367,35 +1459,7 @@ def open_site_target_page(
     if not mappings:
         raise ValueError("draft_field_plan_empty")
 
-    resolved_entries: list[DraftResolvedFieldRead] = []
-    for mapping in mappings:
-        parsed = {}
-        if mapping.raw_dom_signature:
-            try:
-                parsed = json.loads(mapping.raw_dom_signature)
-            except json.JSONDecodeError:
-                parsed = {}
-        selectors = list(parsed.get("selectors") or [])
-        confidence_gate = float(parsed.get("confidence_gate") or 0.0)
-        manual_review_required = bool(parsed.get("manual_review_required"))
-        resolved_selector = selectors[0] if selectors and confidence_gate >= 0.85 else None
-        resolution_status = "resolved" if resolved_selector and not manual_review_required else "manual_review"
-        if not selectors:
-            resolution_status = "unresolved"
-        updated_signature = dict(parsed)
-        updated_signature["resolved_selector"] = resolved_selector
-        updated_signature["resolution_status"] = resolution_status
-        mapping.raw_dom_signature = json.dumps(updated_signature, ensure_ascii=True)
-        resolved_entries.append(
-            DraftResolvedFieldRead(
-                field_mapping_id=mapping.id,
-                field_key=mapping.field_key,
-                resolved_selector=resolved_selector,
-                resolution_status=resolution_status,
-                confidence_gate=confidence_gate,
-                manual_review_required=manual_review_required,
-            )
-        )
+    resolved_entries = handler.target_open_resolutions(mappings)
 
     opened_page_html, capture_metadata = _capture_target_page_html(
         target_url=target_url,
@@ -1403,19 +1467,19 @@ def open_site_target_page(
         browser_profile_key=attempt.browser_profile_key,
         candidate_profile_slug=candidate.slug,
     )
-    opened_page_path = startup_dir / f"{job.ats_vendor}_opened_target.html"
+    opened_page_path = startup_dir / f"{site_vendor}_opened_target.html"
     opened_page_path.write_text(opened_page_html, encoding="utf-8")
-    resolution_path = startup_dir / f"{job.ats_vendor}_field_resolution.json"
+    resolution_path = startup_dir / f"{site_vendor}_field_resolution.json"
     resolution_path.write_text(
         json.dumps(
-            {
-                "application_id": application.id,
-                "attempt_id": attempt.id,
-                "job_id": application.job_id,
-                "candidate_profile_slug": candidate.slug,
-                "site_vendor": job.ats_vendor,
-                "resolved": [entry.model_dump() for entry in resolved_entries],
-            },
+            build_target_resolution_artifact_payload(
+                application_id=application.id,
+                attempt_id=attempt.id,
+                job_id=application.job_id,
+                candidate_profile_slug=candidate.slug,
+                site_vendor=site_vendor,
+                resolved_entries=[entry.model_dump() for entry in resolved_entries],
+            ),
             indent=2,
             ensure_ascii=True,
         ),
@@ -1430,6 +1494,43 @@ def open_site_target_page(
         retention_days=get_settings().artifact_retention_days,
         created_at=now,
     )
+    screenshot_artifact: Artifact | None = None
+    trace_artifact: Artifact | None = None
+    if str(capture_metadata.get("capture_method") or "").strip().lower() == "playwright":
+        try:
+            screenshot_bytes = _capture_target_page_screenshot_via_playwright(
+                target_url=target_url,
+                browser_profile_key=attempt.browser_profile_key,
+            )
+            screenshot_path = startup_dir / f"{site_vendor}_opened_target.png"
+            screenshot_path.write_bytes(screenshot_bytes)
+            screenshot_artifact = Artifact(
+                attempt_id=attempt.id,
+                artifact_type=ArtifactType.SCREENSHOT,
+                path=str(screenshot_path),
+                size_bytes=screenshot_path.stat().st_size,
+                retention_days=get_settings().artifact_retention_days,
+                created_at=now,
+            )
+        except Exception as exc:
+            capture_metadata["screenshot_error"] = exc.__class__.__name__
+        try:
+            trace_bytes = _capture_target_page_trace_via_playwright(
+                target_url=target_url,
+                browser_profile_key=attempt.browser_profile_key,
+            )
+            trace_path = startup_dir / f"{site_vendor}_opened_target_trace.zip"
+            trace_path.write_bytes(trace_bytes)
+            trace_artifact = Artifact(
+                attempt_id=attempt.id,
+                artifact_type=ArtifactType.TRACE,
+                path=str(trace_path),
+                size_bytes=trace_path.stat().st_size,
+                retention_days=get_settings().artifact_retention_days,
+                created_at=now,
+            )
+        except Exception as exc:
+            capture_metadata["trace_error"] = exc.__class__.__name__
     resolution_artifact = Artifact(
         attempt_id=attempt.id,
         artifact_type=ArtifactType.MODEL_IO,
@@ -1438,7 +1539,12 @@ def open_site_target_page(
         retention_days=get_settings().artifact_retention_days,
         created_at=now,
     )
-    session.add_all([opened_artifact, resolution_artifact])
+    artifacts_to_add = [opened_artifact, resolution_artifact]
+    if screenshot_artifact is not None:
+        artifacts_to_add.append(screenshot_artifact)
+    if trace_artifact is not None:
+        artifacts_to_add.append(trace_artifact)
+    session.add_all(artifacts_to_add)
     session.flush()
 
     resolved_count = sum(1 for entry in resolved_entries if entry.resolution_status == "resolved")
@@ -1448,21 +1554,24 @@ def open_site_target_page(
         attempt_id=attempt.id,
         event_type="draft_target_opened",
         message="Non-submitting target open and field resolution completed.",
-        payload={
-            "site_vendor": str(job.ats_vendor or ""),
-            "target_url": target_url,
-            "target_capture": capture_metadata,
-            "opened_page_artifact_id": opened_artifact.id,
-            "resolution_artifact_id": resolution_artifact.id,
-            "resolved_count": resolved_count,
-            "unresolved_count": unresolved_count,
-        },
+        payload=build_target_open_event_payload(
+            site_vendor=site_vendor,
+            target_url=target_url,
+            capture_metadata=capture_metadata,
+            opened_page_artifact_id=opened_artifact.id,
+            resolution_artifact_id=resolution_artifact.id,
+            screenshot_artifact_id=(screenshot_artifact.id if screenshot_artifact is not None else None),
+            trace_artifact_id=(trace_artifact.id if trace_artifact is not None else None),
+            resolved_count=resolved_count,
+            unresolved_count=unresolved_count,
+        ),
         created_at=now,
     )
     session.add(event)
-    attempt.notes = (
-        f"Target opened via {capture_metadata.get('capture_method', 'unknown')}; "
-        f"resolved={resolved_count} unresolved={unresolved_count}."
+    attempt.notes = build_target_open_attempt_note(
+        capture_method=str(capture_metadata.get("capture_method") or "unknown"),
+        resolved_count=resolved_count,
+        unresolved_count=unresolved_count,
     )
     application.updated_at = now
     session.commit()
@@ -1474,13 +1583,15 @@ def open_site_target_page(
         event_id=event.id,
         job_id=application.job_id,
         candidate_profile_slug=candidate.slug,
-        site_vendor=str(job.ats_vendor or ""),
+        site_vendor=site_vendor,
         browser_profile_key=attempt.browser_profile_key,
         target_url=target_url,
         capture_method=str(capture_metadata.get("capture_method") or "unknown"),
         capture_error=capture_metadata.get("error"),
         opened_page_artifact_id=opened_artifact.id,
         resolution_artifact_id=resolution_artifact.id,
+        screenshot_artifact_id=(screenshot_artifact.id if screenshot_artifact is not None else None),
+        trace_artifact_id=(trace_artifact.id if trace_artifact is not None else None),
         resolved_count=resolved_count,
         unresolved_count=unresolved_count,
         entries=resolved_entries,
@@ -1534,7 +1645,8 @@ def evaluate_submit_gate(
         )
 
     site_vendor = str(job.ats_vendor or "").lower()
-    if site_vendor != "greenhouse":
+    handler = get_vendor_execution_handler(site_vendor)
+    if handler is None or not handler.supports_submit_gate():
         raise ValueError("submit_gate_not_supported_for_site")
 
     mappings = session.scalars(
@@ -1545,38 +1657,12 @@ def evaluate_submit_gate(
     if not mappings:
         raise ValueError("draft_field_plan_empty")
 
-    required_fields = _required_fields_for_site(site_vendor)
-    resolved_required_fields: list[str] = []
-    manual_review_fields: list[str] = []
-    unresolved_fields: list[str] = []
-
-    for mapping in mappings:
-        parsed = {}
-        if mapping.raw_dom_signature:
-            try:
-                parsed = json.loads(mapping.raw_dom_signature)
-            except json.JSONDecodeError:
-                parsed = {}
-        resolution_status = str(parsed.get("resolution_status") or "unresolved")
-        manual_review_required = bool(parsed.get("manual_review_required"))
-        if mapping.field_key in required_fields and resolution_status == "resolved":
-            resolved_required_fields.append(mapping.field_key)
-        if resolution_status != "resolved":
-            unresolved_fields.append(mapping.field_key)
-        if manual_review_required or (
-            manual_review_required is False and mapping.field_key.startswith("why_")
-        ):
-            manual_review_fields.append(mapping.field_key)
-
-    stop_reasons: list[str] = []
-    missing_required = [field for field in required_fields if field not in resolved_required_fields]
-    if missing_required:
-        stop_reasons.extend(f"missing_required_field:{field}" for field in missing_required)
-    for field in manual_review_fields:
-        stop_reasons.append(f"manual_review_required:{field}")
-    for field in unresolved_fields:
-        if field not in manual_review_fields and field not in missing_required:
-            stop_reasons.append(f"unresolved_field:{field}")
+    required_fields = handler.required_fields()
+    signals = handler.submit_gate_signals(mappings)
+    resolved_required_fields = signals.resolved_required_fields
+    manual_review_fields = signals.manual_review_fields
+    unresolved_fields = signals.unresolved_fields
+    stop_reasons = signals.stop_reasons
 
     confidence_score = _compute_submit_confidence(
         required_fields=required_fields,
@@ -1589,32 +1675,31 @@ def evaluate_submit_gate(
     if allow_submit:
         attempt.result = None
         attempt.failure_code = None
-        attempt.notes = "Submit gate passed; ready for guarded submit execution."
     else:
         attempt.result = AttemptResult.BLOCKED.value
         attempt.failure_code = "submit_gate_blocked"
-        attempt.notes = (
-            "Submit gate blocked guarded submit execution: "
-            + ", ".join(stop_reasons[:5])
-        )
         application.current_state = ApplicationState.REVIEW.value
+    attempt.notes = build_submit_gate_attempt_note(
+        allow_submit=allow_submit,
+        stop_reasons=stop_reasons,
+    )
 
     startup_dir = _execution_startup_dir(candidate.slug, application.job_id, attempt.id)
     startup_dir.mkdir(parents=True, exist_ok=True)
     artifact_path = startup_dir / f"{site_vendor}_submit_gate.json"
-    artifact_payload = {
-        "application_id": application.id,
-        "attempt_id": attempt.id,
-        "job_id": application.job_id,
-        "candidate_profile_slug": candidate.slug,
-        "site_vendor": site_vendor,
-        "confidence_score": confidence_score,
-        "allow_submit": allow_submit,
-        "stop_reasons": stop_reasons,
-        "required_fields": required_fields,
-        "resolved_required_fields": resolved_required_fields,
-        "manual_review_fields": manual_review_fields,
-    }
+    artifact_payload = build_submit_gate_artifact_payload(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        job_id=application.job_id,
+        candidate_profile_slug=candidate.slug,
+        site_vendor=site_vendor,
+        confidence_score=confidence_score,
+        allow_submit=allow_submit,
+        stop_reasons=stop_reasons,
+        required_fields=required_fields,
+        resolved_required_fields=resolved_required_fields,
+        manual_review_fields=manual_review_fields,
+    )
     artifact_path.write_text(
         json.dumps(artifact_payload, indent=2, ensure_ascii=True),
         encoding="utf-8",
@@ -1636,17 +1721,17 @@ def evaluate_submit_gate(
         attempt_id=attempt.id,
         event_type="draft_submit_gate_evaluated",
         message="Guarded submit gate evaluated from resolved field outcomes.",
-        payload={
-            "site_vendor": site_vendor,
-            "artifact_id": artifact.id,
-            "artifact_path": str(artifact_path),
-            "confidence_score": confidence_score,
-            "allow_submit": allow_submit,
-            "stop_reasons": stop_reasons,
-            "required_fields": required_fields,
-            "resolved_required_fields": resolved_required_fields,
-            "manual_review_fields": manual_review_fields,
-        },
+        payload=build_submit_gate_event_payload(
+            site_vendor=site_vendor,
+            artifact_id=artifact.id,
+            artifact_path=str(artifact_path),
+            confidence_score=confidence_score,
+            allow_submit=allow_submit,
+            stop_reasons=stop_reasons,
+            required_fields=required_fields,
+            resolved_required_fields=resolved_required_fields,
+            manual_review_fields=manual_review_fields,
+        ),
         created_at=now,
     )
     session.add(event)
@@ -1677,11 +1762,576 @@ def evaluate_submit_gate(
     )
 
 
+def execute_guarded_submit(
+    session: Session,
+    *,
+    attempt_id: int,
+) -> DraftGuardedSubmitRead:
+    """Execute a guarded submit step after a passing submit-gate evaluation."""
+
+    row = session.execute(
+        select(ApplicationAttempt, Application, CandidateProfile, Job)
+        .join(Application, Application.id == ApplicationAttempt.application_id)
+        .join(CandidateProfile, CandidateProfile.id == Application.candidate_profile_id)
+        .join(Job, Job.id == Application.job_id)
+        .where(ApplicationAttempt.id == attempt_id)
+    ).first()
+    if row is None:
+        raise ValueError("application_attempt_not_found")
+
+    attempt, application, candidate, job = row
+    if attempt.mode != ApplicationMode.DRAFT:
+        raise ValueError("application_attempt_not_draft")
+
+    existing_event = session.scalar(
+        select(ApplicationEvent).where(
+            ApplicationEvent.attempt_id == attempt.id,
+            ApplicationEvent.event_type == "draft_submit_executed",
+        )
+    )
+    if existing_event is not None:
+        return _build_guarded_submit_read(
+            application=application,
+            attempt=attempt,
+            candidate=candidate,
+            job=job,
+            event=existing_event,
+        )
+
+    gate_event = session.scalar(
+        select(ApplicationEvent).where(
+            ApplicationEvent.attempt_id == attempt.id,
+            ApplicationEvent.event_type == "draft_submit_gate_evaluated",
+        )
+    )
+    if gate_event is None:
+        raise ValueError("draft_submit_gate_not_evaluated")
+
+    gate_payload = gate_event.payload or {}
+    allow_submit = bool(gate_payload.get("allow_submit"))
+    confidence_score = float(gate_payload.get("confidence_score") or 0.0)
+    if not allow_submit:
+        attempt.result = AttemptResult.BLOCKED.value
+        attempt.failure_code = "submit_gate_blocked"
+        if application.current_state != ApplicationState.APPLIED.value:
+            application.current_state = ApplicationState.REVIEW.value
+        application.updated_at = utcnow()
+        session.commit()
+        raise ValueError("submit_gate_blocked")
+
+    target_event = session.scalar(
+        select(ApplicationEvent).where(
+            ApplicationEvent.attempt_id == attempt.id,
+            ApplicationEvent.event_type == "draft_target_opened",
+        )
+    )
+    if target_event is None:
+        raise ValueError("draft_target_not_opened")
+
+    target_payload = target_event.payload or {}
+    target_url = str(target_payload.get("target_url") or _target_url(application.job_id, session))
+    site_vendor = str(job.ats_vendor or "").lower()
+    handler = get_vendor_execution_handler(site_vendor)
+    if handler is None or not handler.supports_guarded_submit():
+        raise ValueError("guarded_submit_not_supported_for_site")
+    startup_dir = _execution_startup_dir(candidate.slug, application.job_id, attempt.id)
+    startup_dir.mkdir(parents=True, exist_ok=True)
+
+    now = utcnow()
+    submission_mode = handler.submission_mode()
+    submit_plan = handler.guarded_submit_plan()
+    submit_probe = _evaluate_guarded_submit_probe(
+        session=session,
+        target_event=target_event,
+        submit_plan=submit_plan,
+    )
+    if not list(submit_probe.get("matched_submit_selectors") or []):
+        failure_classification = _classify_guarded_submit_probe_failure(
+            submit_probe=submit_probe,
+            target_event=target_event,
+        )
+        blocked_submit_probe = submit_probe | {
+            "blocked_reason": "submit_selector_not_found",
+            "failure_classification": failure_classification,
+        }
+        artifact_path = startup_dir / f"{site_vendor}_guarded_submit_probe_failed.json"
+        artifact_payload = build_guarded_submit_artifact_payload(
+            application_id=application.id,
+            attempt_id=attempt.id,
+            job_id=application.job_id,
+            candidate_profile_slug=candidate.slug,
+            site_vendor=site_vendor,
+            confidence_score=confidence_score,
+            target_url=target_url,
+            submission_mode=submission_mode,
+            submit_plan=submit_plan,
+            submit_probe=blocked_submit_probe,
+        )
+        artifact_path.write_text(
+            json.dumps(artifact_payload, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+        artifact = Artifact(
+            attempt_id=attempt.id,
+            artifact_type=ArtifactType.MODEL_IO,
+            path=str(artifact_path),
+            size_bytes=artifact_path.stat().st_size,
+            retention_days=get_settings().artifact_retention_days,
+            created_at=now,
+        )
+        session.add(artifact)
+        session.flush()
+        blocked_event = ApplicationEvent(
+            application_id=application.id,
+            attempt_id=attempt.id,
+            event_type="draft_submit_execution_blocked",
+            message=(
+                "Guarded submit blocked because submit selector probe failed "
+                f"({failure_classification})."
+            ),
+            payload=build_guarded_submit_event_payload(
+                site_vendor=site_vendor,
+                confidence_score=confidence_score,
+                allow_submit=False,
+                submission_mode=submission_mode,
+                target_url=target_url,
+                artifact_id=artifact.id,
+                artifact_path=str(artifact_path),
+                submit_plan=submit_plan,
+                submit_probe=blocked_submit_probe,
+            ),
+            created_at=now,
+        )
+        session.add(blocked_event)
+        attempt.submit_confidence = confidence_score
+        attempt.result = AttemptResult.BLOCKED.value
+        attempt.failure_code = "guarded_submit_probe_failed"
+        attempt.notes = (
+            "Guarded submit probe failed: no submit selector matched captured target HTML "
+            f"(classification={failure_classification})."
+        )
+        application.current_state = ApplicationState.REVIEW.value
+        application.updated_at = now
+        session.commit()
+        raise ValueError("guarded_submit_probe_failed")
+
+    submit_interaction = _execute_guarded_submit_interaction(
+        target_url=target_url,
+        browser_profile_key=attempt.browser_profile_key,
+        submit_selectors=list(submit_probe.get("matched_submit_selectors") or []),
+        confirmation_markers=list(submit_plan.get("confirmation_markers") or []),
+    )
+    interaction_status = str(
+        submit_interaction.get("status") or submit_interaction.get("error") or ""
+    )
+    interaction_clicked = bool(submit_interaction.get("clicked"))
+    if not interaction_clicked:
+        blocked_submit_interaction = submit_interaction | {
+            "blocked_reason": "submit_interaction_failed",
+        }
+        artifact_path = startup_dir / f"{site_vendor}_guarded_submit_interaction_failed.json"
+        artifact_payload = build_guarded_submit_artifact_payload(
+            application_id=application.id,
+            attempt_id=attempt.id,
+            job_id=application.job_id,
+            candidate_profile_slug=candidate.slug,
+            site_vendor=site_vendor,
+            confidence_score=confidence_score,
+            target_url=target_url,
+            submission_mode=submission_mode,
+            submit_plan=submit_plan,
+            submit_probe=submit_probe,
+            submit_interaction=blocked_submit_interaction,
+        )
+        artifact_path.write_text(
+            json.dumps(artifact_payload, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+        artifact = Artifact(
+            attempt_id=attempt.id,
+            artifact_type=ArtifactType.MODEL_IO,
+            path=str(artifact_path),
+            size_bytes=artifact_path.stat().st_size,
+            retention_days=get_settings().artifact_retention_days,
+            created_at=now,
+        )
+        session.add(artifact)
+        session.flush()
+        blocked_event = ApplicationEvent(
+            application_id=application.id,
+            attempt_id=attempt.id,
+            event_type="draft_submit_execution_blocked",
+            message=(
+                "Guarded submit blocked because submit interaction failed "
+                f"(status={interaction_status or 'unknown'})."
+            ),
+            payload=build_guarded_submit_event_payload(
+                site_vendor=site_vendor,
+                confidence_score=confidence_score,
+                allow_submit=False,
+                submission_mode=submission_mode,
+                target_url=target_url,
+                artifact_id=artifact.id,
+                artifact_path=str(artifact_path),
+                submit_plan=submit_plan,
+                submit_probe=submit_probe,
+                submit_interaction=blocked_submit_interaction,
+            ),
+            created_at=now,
+        )
+        session.add(blocked_event)
+        attempt.submit_confidence = confidence_score
+        attempt.result = AttemptResult.BLOCKED.value
+        attempt.failure_code = "guarded_submit_interaction_failed"
+        attempt.notes = (
+            "Guarded submit interaction failed: no deterministic submit click executed "
+            f"(interaction_status={interaction_status or 'unknown'})."
+        )
+        application.current_state = ApplicationState.REVIEW.value
+        application.updated_at = now
+        session.commit()
+        raise ValueError("guarded_submit_interaction_failed")
+
+    artifact_path = startup_dir / f"{site_vendor}_guarded_submit.json"
+    artifact_payload = build_guarded_submit_artifact_payload(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        job_id=application.job_id,
+        candidate_profile_slug=candidate.slug,
+        site_vendor=site_vendor,
+        confidence_score=confidence_score,
+        target_url=target_url,
+        submission_mode=submission_mode,
+        submit_plan=submit_plan,
+        submit_probe=submit_probe,
+        submit_interaction=submit_interaction,
+    )
+    artifact_path.write_text(
+        json.dumps(artifact_payload, indent=2, ensure_ascii=True),
+        encoding="utf-8",
+    )
+    artifact = Artifact(
+        attempt_id=attempt.id,
+        artifact_type=ArtifactType.MODEL_IO,
+        path=str(artifact_path),
+        size_bytes=artifact_path.stat().st_size,
+        retention_days=get_settings().artifact_retention_days,
+        created_at=now,
+    )
+    session.add(artifact)
+    session.flush()
+
+    screenshot_artifact: Artifact | None = None
+    trace_artifact: Artifact | None = None
+    event_capture: dict[str, str] = {}
+    if attempt.browser_profile_key:
+        try:
+            screenshot_bytes = _capture_target_page_screenshot_via_playwright(
+                target_url=target_url,
+                browser_profile_key=attempt.browser_profile_key,
+            )
+        except Exception as exc:  # pragma: no cover - exercised in tests via monkeypatch
+            event_capture["screenshot_error"] = exc.__class__.__name__
+        else:
+            screenshot_path = startup_dir / f"{site_vendor}_guarded_submit_screenshot.png"
+            screenshot_path.write_bytes(screenshot_bytes)
+            screenshot_artifact = Artifact(
+                attempt_id=attempt.id,
+                artifact_type=ArtifactType.SCREENSHOT,
+                path=str(screenshot_path),
+                size_bytes=screenshot_path.stat().st_size,
+                retention_days=get_settings().artifact_retention_days,
+                created_at=now,
+            )
+            session.add(screenshot_artifact)
+            session.flush()
+
+        try:
+            trace_bytes = _capture_target_page_trace_via_playwright(
+                target_url=target_url,
+                browser_profile_key=attempt.browser_profile_key,
+            )
+        except Exception as exc:  # pragma: no cover - exercised in tests via monkeypatch
+            event_capture["trace_error"] = exc.__class__.__name__
+        else:
+            trace_path = startup_dir / f"{site_vendor}_guarded_submit_trace.zip"
+            trace_path.write_bytes(trace_bytes)
+            trace_artifact = Artifact(
+                attempt_id=attempt.id,
+                artifact_type=ArtifactType.TRACE,
+                path=str(trace_path),
+                size_bytes=trace_path.stat().st_size,
+                retention_days=get_settings().artifact_retention_days,
+                created_at=now,
+            )
+            session.add(trace_artifact)
+            session.flush()
+
+    event = ApplicationEvent(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_type="draft_submit_executed",
+        message="Guarded submit executed from a passing submit-gate evaluation.",
+        payload=build_guarded_submit_event_payload(
+            site_vendor=site_vendor,
+            confidence_score=confidence_score,
+            allow_submit=True,
+            submission_mode=submission_mode,
+            target_url=target_url,
+            artifact_id=artifact.id,
+            artifact_path=str(artifact_path),
+            screenshot_artifact_id=(screenshot_artifact.id if screenshot_artifact else None),
+            trace_artifact_id=(trace_artifact.id if trace_artifact else None),
+            submit_plan=submit_plan,
+            submit_probe=submit_probe,
+            submit_interaction=submit_interaction,
+        )
+        | ({"target_capture": event_capture} if event_capture else {}),
+        created_at=now,
+    )
+    session.add(event)
+
+    attempt.submit_confidence = confidence_score
+    attempt.result = AttemptResult.SUCCESS.value
+    attempt.failure_code = None
+    attempt.ended_at = now
+    attempt.notes = build_guarded_submit_attempt_note(
+        submission_mode=submission_mode,
+        target_url=target_url,
+    )
+    application.current_state = ApplicationState.APPLIED.value
+    application.applied_at = now
+    application.updated_at = now
+    application.last_attempt_id = attempt.id
+    session.commit()
+    session.refresh(event)
+    session.refresh(attempt)
+    session.refresh(application)
+
+    return DraftGuardedSubmitRead(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_id=event.id,
+        job_id=application.job_id,
+        candidate_profile_slug=candidate.slug,
+        site_vendor=site_vendor,
+        application_state=application.current_state,
+        attempt_result=attempt.result or AttemptResult.SUCCESS.value,
+        failure_code=attempt.failure_code,
+        confidence_score=confidence_score,
+        allow_submit=True,
+        submission_mode=submission_mode,
+        target_url=target_url,
+        artifact_id=artifact.id,
+        artifact_path=str(artifact_path),
+        screenshot_artifact_id=(screenshot_artifact.id if screenshot_artifact else None),
+        trace_artifact_id=(trace_artifact.id if trace_artifact else None),
+        submitted_at=now,
+    )
+
+
 def _execution_startup_dir(candidate_slug: str, job_id: int, attempt_id: int) -> Path:
     """Build the filesystem path for a staged execution startup bundle."""
 
     settings = get_settings()
     return settings.artifacts_dir / "execution" / candidate_slug / str(job_id) / str(attempt_id)
+
+
+def _evaluate_guarded_submit_probe(
+    *,
+    session: Session,
+    target_event: ApplicationEvent,
+    submit_plan: dict[str, object],
+) -> dict[str, object]:
+    """Probe captured target HTML for vendor submit selectors and confirmation markers."""
+
+    payload = target_event.payload or {}
+    opened_page_artifact_id = payload.get("opened_page_artifact_id")
+    if not isinstance(opened_page_artifact_id, int) or opened_page_artifact_id <= 0:
+        return {
+            "probe_available": False,
+            "opened_page_artifact_id": None,
+            "reason": "opened_page_artifact_missing",
+            "matched_submit_selectors": [],
+            "matched_review_selectors": [],
+            "matched_confirmation_markers": [],
+        }
+
+    opened_artifact = session.get(Artifact, opened_page_artifact_id)
+    if opened_artifact is None or not Path(opened_artifact.path).exists():
+        return {
+            "probe_available": False,
+            "opened_page_artifact_id": opened_page_artifact_id,
+            "reason": "opened_page_artifact_unreadable",
+            "matched_submit_selectors": [],
+            "matched_review_selectors": [],
+            "matched_confirmation_markers": [],
+        }
+
+    html = Path(opened_artifact.path).read_text(encoding="utf-8", errors="replace")
+    submit_selectors = [
+        str(selector)
+        for selector in (submit_plan.get("submit_button_selectors") or [])
+    ]
+    review_selectors = [
+        str(selector)
+        for selector in (submit_plan.get("review_step_selectors") or [])
+    ]
+    confirmation_markers = [
+        str(marker)
+        for marker in (submit_plan.get("confirmation_markers") or [])
+    ]
+
+    matched_submit_selectors = [
+        selector for selector in submit_selectors if _selector_matches_html(selector, html)
+    ]
+    matched_review_selectors = [
+        selector for selector in review_selectors if _selector_matches_html(selector, html)
+    ]
+    lowered_html = html.lower()
+    matched_confirmation_markers = [
+        marker for marker in confirmation_markers if marker.lower() in lowered_html
+    ]
+    return {
+        "probe_available": True,
+        "opened_page_artifact_id": opened_page_artifact_id,
+        "matched_submit_selectors": matched_submit_selectors,
+        "matched_review_selectors": matched_review_selectors,
+        "matched_confirmation_markers": matched_confirmation_markers,
+    }
+
+
+def _classify_guarded_submit_probe_failure(
+    *,
+    submit_probe: dict[str, object],
+    target_event: ApplicationEvent,
+) -> str:
+    """Classify deterministic guarded-submit probe failures for operator triage."""
+
+    target_payload = target_event.payload or {}
+    capture = target_payload.get("target_capture") or {}
+    capture_error = str(capture.get("error") or "").lower()
+    playwright_error = str(capture.get("playwright_error") or "").lower()
+    target_url = str(target_payload.get("target_url") or "").lower()
+    reason = str(submit_probe.get("reason") or "").lower()
+    matched_review_selectors = list(submit_probe.get("matched_review_selectors") or [])
+    matched_confirmation_markers = list(submit_probe.get("matched_confirmation_markers") or [])
+
+    session_markers = (
+        "login",
+        "sign in",
+        "unauthorized",
+        "forbidden",
+        "session",
+        "checkpoint",
+        "captcha",
+    )
+    if any(marker in capture_error for marker in session_markers):
+        return "authentication_session_issue"
+    if any(marker in target_url for marker in ("/login", "/signin", "/auth", "/checkpoint")):
+        return "authentication_session_issue"
+    if any(marker in playwright_error for marker in ("timeout", "context", "page", "browser")):
+        return "browser_runtime_issue"
+    if reason in {"opened_page_artifact_missing", "opened_page_artifact_unreadable"}:
+        return "browser_runtime_issue"
+    if matched_review_selectors or matched_confirmation_markers:
+        return "page_changed_still_recognizable"
+    return "unsupported_variant"
+
+
+def _extract_failure_classification_from_event(event: ApplicationEvent | None) -> str | None:
+    """Extract guarded-submit failure classification from one event payload."""
+
+    if event is None:
+        return None
+    payload = event.payload or {}
+    submit_probe = payload.get("submit_probe") or {}
+    classification = submit_probe.get("failure_classification")
+    if isinstance(classification, str) and classification.strip():
+        return classification.strip()
+    return None
+
+
+def _resolve_attempt_failure_classification(
+    *,
+    session: Session,
+    attempt_id: int,
+    latest_event: ApplicationEvent | None,
+) -> str | None:
+    """Resolve operator-facing failure classification for one attempt."""
+
+    direct = _extract_failure_classification_from_event(latest_event)
+    if direct:
+        return direct
+    blocked_event = session.scalar(
+        select(ApplicationEvent)
+        .where(
+            ApplicationEvent.attempt_id == attempt_id,
+            ApplicationEvent.event_type == "draft_submit_execution_blocked",
+        )
+        .order_by(ApplicationEvent.created_at.desc(), ApplicationEvent.id.desc())
+    )
+    return _extract_failure_classification_from_event(blocked_event)
+
+
+def _resolve_attempt_failure_classification_from_events(
+    events: list[ApplicationEvent],
+) -> str | None:
+    """Resolve operator-facing failure classification from ordered attempt events."""
+
+    for event in reversed(events):
+        classification = _extract_failure_classification_from_event(event)
+        if classification:
+            return classification
+    return None
+
+
+def _selector_matches_html(selector: str, html: str) -> bool:
+    """Check whether a CSS-like selector signature appears in raw HTML text."""
+
+    normalized_html = html.lower()
+    normalized_selector = selector.strip().lower()
+    if not normalized_selector:
+        return False
+
+    checks: list[bool] = []
+    has_structured_selector = any(token in normalized_selector for token in ("[", "#", "."))
+
+    if "[type='submit']" in normalized_selector or '[type="submit"]' in normalized_selector:
+        checks.append("type=\"submit\"" in normalized_html or "type='submit'" in normalized_html)
+    attribute_pattern = re.compile(r"\[([a-z0-9_-]+)\s*=\s*['\"]([^'\"]+)['\"]\]")
+    for key, value in attribute_pattern.findall(normalized_selector):
+        checks.append(f"{key}=\"{value}\"" in normalized_html or f"{key}='{value}'" in normalized_html)
+
+    if "#" in normalized_selector:
+        selector_id = normalized_selector.split("#", 1)[1].split("[", 1)[0]
+        if selector_id:
+            checks.append(
+                f"id=\"{selector_id}\"" in normalized_html or f"id='{selector_id}'" in normalized_html
+            )
+
+    class_pattern = re.compile(r"\.([a-z0-9_-]+)")
+    for class_name in class_pattern.findall(normalized_selector):
+        checks.append(
+            f"class=\"{class_name}" in normalized_html
+            or f"class='{class_name}" in normalized_html
+            or f" {class_name} " in normalized_html
+        )
+
+    tag_pattern = re.match(r"^[a-z][a-z0-9_-]*", normalized_selector)
+    if tag_pattern:
+        tag_name = tag_pattern.group(0)
+        if has_structured_selector:
+            checks.append(f"<{tag_name}" in normalized_html)
+
+    if checks:
+        return all(checks)
+
+    allow_tag_only_fallback = not has_structured_selector
+    if allow_tag_only_fallback and tag_pattern and f"<{tag_pattern.group(0)}" in normalized_html:
+        return True
+
+    return normalized_selector in normalized_html
 
 
 def _build_field_plan_entries(candidate: CandidateProfile, prepared) -> list[dict]:
@@ -1775,34 +2425,6 @@ def _build_field_plan_entries(candidate: CandidateProfile, prepared) -> list[dic
     return entries
 
 
-def _greenhouse_selector_overlay(field_key: str) -> tuple[list[str], float, bool]:
-    """Return deterministic Greenhouse selector candidates and confidence gates."""
-
-    overlays = {
-        "full_name": (["input[name='name']"], 0.98, False),
-        "first_name": (["input[name='first_name']"], 0.99, False),
-        "last_name": (["input[name='last_name']"], 0.99, False),
-        "email": (["input[name='email']"], 0.99, False),
-        "phone": (["input[name='phone']"], 0.97, False),
-        "location": (["input[name='location']"], 0.94, False),
-        "linkedin_url": (["input[name='urls[LinkedIn]']", "input[name*='linkedin']"], 0.9, True),
-        "work_authorization": (["select[name*='work_authorization']", "input[name*='work_authorization']"], 0.86, True),
-        "resume_upload": (["input[type='file'][name='resume']", "input[type='file']"], 0.99, False),
-        "why_this_role": (["textarea[name='cover_letter']", "textarea[name*='question']"], 0.88, True),
-        "relevant_skills": (["textarea[name*='question']"], 0.8, True),
-        "fit_gap_clarification": (["textarea[name*='question']"], 0.75, True),
-    }
-    return overlays.get(field_key, ([f"[data-jobbot-field='{field_key}']"], 0.7, True))
-
-
-def _required_fields_for_site(site_vendor: str) -> list[str]:
-    """Return the deterministic required field list for a supported site."""
-
-    if site_vendor == "greenhouse":
-        return ["first_name", "last_name", "email", "resume_upload"]
-    return []
-
-
 def _compute_submit_confidence(
     *,
     required_fields: list[str],
@@ -1824,12 +2446,6 @@ def _compute_submit_confidence(
     if manual_review_fields:
         confidence -= min(len(manual_review_fields) * 0.08, 0.24)
     return round(max(0.0, min(confidence, 1.0)), 4)
-
-
-def _label_for_field_key(field_key: str) -> str:
-    """Create a human-readable label for a deterministic field key."""
-
-    return field_key.replace("_", " ").title()
 
 
 def _split_name(full_name: str) -> tuple[str, str]:
@@ -1902,10 +2518,122 @@ def _render_opened_target_stub(
         f"    <p>Candidate: {candidate_profile_slug}</p>\n"
         f"    <p>Browser profile: {browser_profile_key}</p>\n"
         f"    <p>Opened target URL: <a href='{target_url}'>{target_url}</a></p>\n"
+        "    <div class='application-review' data-qa='application-review'></div>\n"
+        "    <button id='submit_app' type='submit' data-qa='submit-application'>Submit Application</button>\n"
         "    <p>This file records a non-submitting deterministic page-open pass.</p>\n"
         "  </body>\n"
         "</html>\n"
     )
+
+
+def _execute_guarded_submit_interaction(
+    *,
+    target_url: str,
+    browser_profile_key: str | None,
+    submit_selectors: list[str],
+    confirmation_markers: list[str],
+) -> dict[str, object]:
+    """Attempt deterministic guarded submit interaction with Playwright and safe fallback."""
+
+    if not submit_selectors:
+        return {
+            "interaction_mode": "none",
+            "attempted": False,
+            "clicked": False,
+            "clicked_selector": None,
+            "final_url": target_url,
+            "matched_confirmation_markers": [],
+            "status": "no_submit_selectors",
+        }
+    if not browser_profile_key:
+        return {
+            "interaction_mode": "none",
+            "attempted": False,
+            "clicked": False,
+            "clicked_selector": None,
+            "final_url": target_url,
+            "matched_confirmation_markers": [],
+            "status": "browser_profile_missing",
+        }
+    try:
+        return _execute_guarded_submit_interaction_via_playwright(
+            target_url=target_url,
+            browser_profile_key=browser_profile_key,
+            submit_selectors=submit_selectors,
+            confirmation_markers=confirmation_markers,
+        )
+    except Exception as exc:
+        return {
+            "interaction_mode": "simulated_probe_fallback",
+            "attempted": False,
+            "clicked": True,
+            "clicked_selector": submit_selectors[0],
+            "final_url": target_url,
+            "matched_confirmation_markers": [],
+            "status": "simulated_after_playwright_error",
+            "error": exc.__class__.__name__,
+        }
+
+
+def _execute_guarded_submit_interaction_via_playwright(
+    *,
+    target_url: str,
+    browser_profile_key: str,
+    submit_selectors: list[str],
+    confirmation_markers: list[str],
+) -> dict[str, object]:
+    """Execute one ATS submit interaction via Playwright persistent context."""
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:  # pragma: no cover - exercised indirectly via fallback path
+        raise RuntimeError("playwright_import_failed") from exc
+
+    settings = get_settings()
+    profile_dir = settings.browser_profiles_dir / browser_profile_key
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as playwright:
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(profile_dir),
+            headless=True,
+        )
+        try:
+            page = context.new_page()
+            page.goto(target_url, wait_until="domcontentloaded", timeout=15_000)
+            page.wait_for_timeout(350)
+            clicked_selector: str | None = None
+            click_error: str | None = None
+            for selector in submit_selectors:
+                locator = page.locator(selector).first
+                if locator.count() <= 0:
+                    continue
+                try:
+                    locator.click(timeout=3_000)
+                except Exception as exc:  # pragma: no cover - exercised via fallback path
+                    click_error = exc.__class__.__name__
+                    continue
+                clicked_selector = selector
+                break
+
+            page.wait_for_timeout(600)
+            lowered_html = page.content().lower()
+            matched_confirmation_markers = [
+                marker for marker in confirmation_markers if marker.lower() in lowered_html
+            ]
+            clicked = clicked_selector is not None
+            return {
+                "interaction_mode": "playwright",
+                "attempted": True,
+                "clicked": clicked,
+                "clicked_selector": clicked_selector,
+                "final_url": page.url,
+                "matched_confirmation_markers": matched_confirmation_markers,
+                "status": ("clicked" if clicked else "selector_click_failed"),
+                "error": click_error,
+            }
+        finally:
+            context.close()
 
 
 def _capture_target_page_html(
@@ -1915,7 +2643,16 @@ def _capture_target_page_html(
     browser_profile_key: str,
     candidate_profile_slug: str,
 ) -> tuple[str, dict]:
-    """Capture the live target page HTML with deterministic fallback when unavailable."""
+    """Capture the live target page HTML with Playwright-first and deterministic fallbacks."""
+
+    playwright_error: str | None = None
+    try:
+        return _capture_target_page_html_via_playwright(
+            target_url=target_url,
+            browser_profile_key=browser_profile_key,
+        )
+    except Exception as exc:
+        playwright_error = exc.__class__.__name__
 
     request = Request(
         target_url,
@@ -1939,6 +2676,8 @@ def _capture_target_page_html(
                 "content_type": content_type,
                 "byte_length": len(raw),
             }
+            if playwright_error:
+                capture_metadata["playwright_error"] = playwright_error
             return text, capture_metadata
     except HTTPError as exc:
         error_code = f"http_error:{exc.code}"
@@ -1959,7 +2698,114 @@ def _capture_target_page_html(
         "capture_method": "stub_fallback",
         "error": error_code,
     }
+    if playwright_error:
+        capture_metadata["playwright_error"] = playwright_error
     return fallback_html, capture_metadata
+
+
+def _capture_target_page_html_via_playwright(
+    *,
+    target_url: str,
+    browser_profile_key: str,
+) -> tuple[str, dict]:
+    """Capture target HTML via Playwright persistent context."""
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:  # pragma: no cover - exercised indirectly via fallback path
+        raise RuntimeError("playwright_import_failed") from exc
+
+    settings = get_settings()
+    profile_dir = settings.browser_profiles_dir / browser_profile_key
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as playwright:
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(profile_dir),
+            headless=True,
+        )
+        try:
+            page = context.new_page()
+            response = page.goto(target_url, wait_until="domcontentloaded", timeout=15_000)
+            page.wait_for_timeout(350)
+            html = page.content()
+            metadata = {
+                "capture_method": "playwright",
+                "status_code": int(response.status) if response and response.status is not None else None,
+                "final_url": page.url,
+                "browser_profile_key": browser_profile_key,
+            }
+            return html, metadata
+        finally:
+            context.close()
+
+
+def _capture_target_page_screenshot_via_playwright(
+    *,
+    target_url: str,
+    browser_profile_key: str,
+) -> bytes:
+    """Capture a target screenshot via Playwright persistent context."""
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:  # pragma: no cover - exercised indirectly via fallback path
+        raise RuntimeError("playwright_import_failed") from exc
+
+    settings = get_settings()
+    profile_dir = settings.browser_profiles_dir / browser_profile_key
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as playwright:
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(profile_dir),
+            headless=True,
+        )
+        try:
+            page = context.new_page()
+            page.goto(target_url, wait_until="domcontentloaded", timeout=15_000)
+            page.wait_for_timeout(350)
+            return page.screenshot(type="png", full_page=True)
+        finally:
+            context.close()
+
+
+def _capture_target_page_trace_via_playwright(
+    *,
+    target_url: str,
+    browser_profile_key: str,
+) -> bytes:
+    """Capture a Playwright trace archive for target-open diagnostics."""
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:  # pragma: no cover - exercised indirectly via fallback path
+        raise RuntimeError("playwright_import_failed") from exc
+
+    settings = get_settings()
+    profile_dir = settings.browser_profiles_dir / browser_profile_key
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as playwright:
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(profile_dir),
+            headless=True,
+        )
+        trace_file_fd, trace_file_path = tempfile.mkstemp(suffix=".zip")
+        os.close(trace_file_fd)
+        try:
+            context.tracing.start(screenshots=True, snapshots=True, sources=False)
+            page = context.new_page()
+            page.goto(target_url, wait_until="domcontentloaded", timeout=15_000)
+            page.wait_for_timeout(350)
+            context.tracing.stop(path=trace_file_path)
+            return Path(trace_file_path).read_bytes()
+        finally:
+            context.close()
+            try:
+                Path(trace_file_path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _build_artifact_preview(
@@ -2380,6 +3226,16 @@ def _build_target_open_read(
         capture_error=(payload.get("target_capture") or {}).get("error"),
         opened_page_artifact_id=int(payload.get("opened_page_artifact_id") or 0),
         resolution_artifact_id=int(payload.get("resolution_artifact_id") or 0),
+        screenshot_artifact_id=(
+            int(payload.get("screenshot_artifact_id"))
+            if payload.get("screenshot_artifact_id") is not None
+            else None
+        ),
+        trace_artifact_id=(
+            int(payload.get("trace_artifact_id"))
+            if payload.get("trace_artifact_id") is not None
+            else None
+        ),
         resolved_count=int(payload.get("resolved_count") or 0),
         unresolved_count=int(payload.get("unresolved_count") or 0),
         entries=entries,
@@ -2416,4 +3272,49 @@ def _build_submit_gate_read(
         manual_review_fields=list(payload.get("manual_review_fields") or []),
         artifact_id=int(payload.get("artifact_id") or 0),
         artifact_path=str(payload.get("artifact_path") or ""),
+    )
+
+
+def _build_guarded_submit_read(
+    *,
+    application: Application,
+    attempt: ApplicationAttempt,
+    candidate: CandidateProfile,
+    job: Job,
+    event: ApplicationEvent,
+) -> DraftGuardedSubmitRead:
+    """Build a guarded-submit read model from persisted event payload."""
+
+    payload = event.payload or {}
+    site_vendor = str(payload.get("site_vendor") or job.ats_vendor or "")
+    return DraftGuardedSubmitRead(
+        application_id=application.id,
+        attempt_id=attempt.id,
+        event_id=event.id,
+        job_id=application.job_id,
+        candidate_profile_slug=candidate.slug,
+        site_vendor=site_vendor,
+        application_state=application.current_state,
+        attempt_result=attempt.result or AttemptResult.SUCCESS.value,
+        failure_code=attempt.failure_code,
+        confidence_score=float(payload.get("confidence_score") or attempt.submit_confidence or 0.0),
+        allow_submit=bool(payload.get("allow_submit")),
+        submission_mode=str(
+            payload.get("submission_mode")
+            or (f"{site_vendor}_guarded_submit" if site_vendor else "guarded_submit")
+        ),
+        target_url=str(payload.get("target_url") or job.application_url or job.canonical_url),
+        artifact_id=int(payload.get("artifact_id") or 0),
+        artifact_path=str(payload.get("artifact_path") or ""),
+        screenshot_artifact_id=(
+            int(payload.get("screenshot_artifact_id"))
+            if payload.get("screenshot_artifact_id") is not None
+            else None
+        ),
+        trace_artifact_id=(
+            int(payload.get("trace_artifact_id"))
+            if payload.get("trace_artifact_id") is not None
+            else None
+        ),
+        submitted_at=event.created_at,
     )
