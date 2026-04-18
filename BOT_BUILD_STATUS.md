@@ -323,10 +323,10 @@
 - None currently.
 
 ## Next Tasks
-1. Promote the replay bundle and dashboard into a broader multi-ATS execution control center once multiple handlers exist.
-2. Tighten guarded-submit interaction policies from simulated fallback toward stricter browser-executed submit evidence as profile/session reliability instrumentation improves.
-3. Extend Tier 3 extension gating from answer-level blocking into generated-document claim-level execution checks.
-4. Add LinkedIn stop-reason scoped drill-down links from dashboard breakdown rows into filtered overview/replay bundles for one-click operator triage.
+1. Add candidate-scoped queue operation controls (pause/cancel selected queued or retry-scheduled items) with API and CLI parity.
+2. Add queue-run concurrency guardrails (single active runner lease per candidate) to prevent duplicate processing under parallel run triggers.
+3. Extend auto-apply summary telemetry with aging metrics (oldest queued age, oldest retry age, recent failure-rate window) for intervention prioritization.
+4. Add top failure-code one-click remediation templates for requeue, reauth, and selective retry to reduce manual triage overhead.
 
 ## Decisions
 - New implementation lives in `src/jobbot/` instead of modifying existing bot repos.

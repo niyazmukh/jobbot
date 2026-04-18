@@ -36,14 +36,15 @@
 - `96c97f1`: stale-lease recovery and reclaim observability for auto-apply queue runs.
 - `dd68ad7`: candidate-scoped auto-apply queue summary telemetry (API + CLI).
 - `672b103`: failed-item requeue recovery controls (service/API/CLI + regressions).
-- `in-progress`: targeted failed-item requeue reliability hardening (missing-ID visibility + no silent limit truncation).
+- `04fe793`: targeted failed-item requeue reliability hardening (missing-ID visibility + no silent limit truncation).
+- `in-progress`: queue-operations hardening for operator controls and runner safety.
 
 ### Validation Baseline
 - Full suite green at latest checkpoint: `238 passed`.
 
 ### Graphify Snapshot Update (latest)
-- Re-ran `graphify update .` after prompt API/schema changes.
-- Current graph totals: 3770 nodes, 72764 edges, 213 communities.
+- Re-ran `graphify update .` after auto-apply queue reliability hardening updates.
+- Current graph totals: 4166 nodes, 76903 edges, 235 communities.
 - God Nodes remain stable around execution/profile/job domain entities.
 
 ### Next Intended Discipline
