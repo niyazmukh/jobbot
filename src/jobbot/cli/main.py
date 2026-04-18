@@ -51,6 +51,7 @@ from jobbot.execution.service import (
 from jobbot.execution.linkedin import build_linkedin_assist_plan, extract_linkedin_question_widgets
 from jobbot.execution.linkedin import evaluate_linkedin_guarded_submit_criteria
 from jobbot.execution.auto_apply import (
+    QueueRunnerAlreadyActiveError,
     control_auto_apply_queue_items,
     enqueue_auto_apply_jobs,
     get_auto_apply_queue_summary,
@@ -575,6 +576,13 @@ def run_auto_apply_queue_cmd(
             limit=limit,
             lease_seconds=lease_seconds,
         )
+    except QueueRunnerAlreadyActiveError as exc:
+        session.close()
+        raise typer.BadParameter(
+            "queue_runner_already_active "
+            f"(runner_lease_remaining_seconds={exc.remaining_seconds}, "
+            f"runner_lease_expires_at={exc.lease_expires_at})"
+        ) from exc
     except ValueError as exc:
         session.close()
         raise typer.BadParameter(str(exc)) from exc

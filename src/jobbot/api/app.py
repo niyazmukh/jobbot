@@ -49,6 +49,7 @@ from jobbot.execution import (
     DraftLinkedInAssistPlanRead,
     DraftLinkedInGuardedSubmitCriteriaRead,
     DraftLinkedInQuestionExtractionRead,
+    QueueRunnerAlreadyActiveError,
     build_linkedin_assist_plan,
     bootstrap_draft_application_attempt,
     build_draft_field_plan,
@@ -1163,6 +1164,19 @@ def create_app() -> FastAPI:
             if detail == "invalid_lease_seconds":
                 raise HTTPException(status_code=400, detail=detail) from exc
             if detail == "queue_runner_already_active":
+                if isinstance(exc, QueueRunnerAlreadyActiveError):
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": detail,
+                            "runner_lease_expires_at": (
+                                exc.lease_expires_at.isoformat()
+                                if exc.lease_expires_at is not None
+                                else None
+                            ),
+                            "runner_lease_remaining_seconds": exc.remaining_seconds,
+                        },
+                    ) from exc
                 raise HTTPException(status_code=409, detail=detail) from exc
             raise
 

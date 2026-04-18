@@ -40,14 +40,15 @@
 - `bc9bdcd`: synced build/dev status docs after queue reliability checkpoint.
 - `8faa498`: queue operation controls (`pause`/`resume`/`cancel`) + paused-runner safety.
 - `888fdd2`: candidate-scoped queue-run concurrency guardrails (`queue_runner_already_active`).
-- `in-progress`: queue pressure telemetry (aging + recent failure-rate window) for summary reads.
+- `32dab76`: queue pressure telemetry (aging + recent failure-rate window) for summary reads.
+- `in-progress`: actionable runner-lease conflict diagnostics (API 409 detail + summary lease visibility).
 
 ### Validation Baseline
-- Full suite green at latest checkpoint: `243 passed`.
+- Full suite green at latest checkpoint: `244 passed`.
 
 ### Graphify Snapshot Update (latest)
-- Re-ran `graphify update .` after queue pressure telemetry summary updates.
-- Current graph totals: 4302 nodes, 77829 edges, 244 communities.
+- Re-ran `graphify update .` after runner-lease conflict diagnostics updates.
+- Current graph totals: 4376 nodes, 78444 edges, 251 communities.
 - God Nodes remain stable around execution/profile/job domain entities.
 
 ### Next Intended Discipline

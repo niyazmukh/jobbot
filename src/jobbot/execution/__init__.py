@@ -37,6 +37,7 @@ from jobbot.execution.schemas import (
     DraftLinkedInGuardedSubmitCriteriaRead,
 )
 from jobbot.execution.auto_apply import (
+    QueueRunnerAlreadyActiveError,
     control_auto_apply_queue_items,
     enqueue_auto_apply_jobs,
     get_auto_apply_queue_summary,
@@ -116,6 +117,7 @@ __all__ = [
     "extract_linkedin_question_widgets",
     "build_linkedin_assist_plan",
     "evaluate_linkedin_guarded_submit_criteria",
+    "QueueRunnerAlreadyActiveError",
     "control_auto_apply_queue_items",
     "enqueue_auto_apply_jobs",
     "get_auto_apply_queue_summary",

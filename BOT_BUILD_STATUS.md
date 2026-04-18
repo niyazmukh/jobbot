@@ -5,7 +5,7 @@
 - Overall status: `in_progress`
 - Implementation mode: `local-first, deterministic-first`
 - Primary spec: `FINAL_JOB_BOT_PRD.md`
-- Latest validation: `243 passed` (`.venv\\Scripts\\python -m pytest -q`)
+- Latest validation: `244 passed` (`.venv\\Scripts\\python -m pytest -q`)
 
 ## Completed
 - Created persistent roadmap and ADR structure.
@@ -286,6 +286,12 @@
   - Added one-hour completion pressure metrics: `recent_completed_count_1h`, `recent_failure_rate_1h`.
   - Added CLI summary surfacing for new pressure metrics.
   - Added API regressions for aging telemetry and one-hour failure-rate window behavior.
+- Added actionable queue-run conflict diagnostics for runner-lease contention:
+  - Introduced explicit queue runner contention exception with lease expiry and remaining-seconds diagnostics.
+  - `run-auto-apply-queue` CLI now surfaces remaining-seconds and lease-expiry context on active-run conflicts.
+  - API `POST /api/auto-apply/{candidate_profile_slug}/run` now returns structured `409` detail payload for `queue_runner_already_active`.
+  - Queue summary now includes active runner lease diagnostics (`runner_lease_active`, `runner_lease_expires_at`, `runner_lease_remaining_seconds`).
+  - Added API regressions for conflict payload diagnostics and summary runner-lease visibility.
 - Added explicit stale-lease recovery for durable auto-apply queue workers:
   - Queue runs now reclaim stale RUNNING items (expired/missing lease) back to QUEUED before drain.
   - Reclamation is observable via `reclaimed_count` in auto-apply run responses.
@@ -343,8 +349,8 @@
 ## Next Tasks
 1. Add top failure-code one-click remediation templates for requeue, reauth, and selective retry to reduce manual triage overhead.
 2. Add queue-control dashboard surfacing/actions so pause/resume/cancel can be driven from operator HTML flows without CLI/API-only usage.
-3. Add queue-run conflict diagnostics (lease owner/age visibility) so `queue_runner_already_active` responses are actionable without DB inspection.
-4. Add queue summary SLO thresholds/alerts (warning-critical cutoffs) to classify pressure metrics for faster operator response.
+3. Add queue summary SLO thresholds/alerts (warning-critical cutoffs) to classify pressure metrics for faster operator response.
+4. Add lease ownership metadata (source host/process identifier) for multi-worker contention traceability beyond expiry timers.
 
 ## Decisions
 - New implementation lives in `src/jobbot/` instead of modifying existing bot repos.

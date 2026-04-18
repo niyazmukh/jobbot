@@ -35,6 +35,20 @@ _PAUSED_BY_OPERATOR = "paused_by_operator"
 _CANCELLED_BY_OPERATOR = "cancelled_by_operator"
 
 
+class QueueRunnerAlreadyActiveError(ValueError):
+    """Raised when another queue runner lease is active for a candidate."""
+
+    def __init__(
+        self,
+        *,
+        lease_expires_at: datetime | None,
+        remaining_seconds: int | None,
+    ) -> None:
+        super().__init__("queue_runner_already_active")
+        self.lease_expires_at = lease_expires_at
+        self.remaining_seconds = remaining_seconds
+
+
 def enqueue_auto_apply_jobs(
     session: Session,
     *,
@@ -166,6 +180,11 @@ def get_auto_apply_queue_summary(
             AutoApplyQueueItem.candidate_profile_id == candidate.id,
         )
     ).all()
+    runner_lease = session.scalar(
+        select(AutoApplyQueueRunnerLease).where(
+            AutoApplyQueueRunnerLease.candidate_profile_id == candidate.id,
+        )
+    )
 
     queued_count = 0
     paused_count = 0
@@ -219,6 +238,19 @@ def get_auto_apply_queue_summary(
             if next_attempt_at is None or row.next_attempt_at < next_attempt_at:
                 next_attempt_at = row.next_attempt_at
 
+    runner_lease_active = False
+    runner_lease_expires_at: datetime | None = None
+    runner_lease_remaining_seconds: int | None = None
+    if (
+        runner_lease is not None
+        and runner_lease.lease_token
+        and runner_lease.lease_expires_at is not None
+        and _is_after_now(runner_lease.lease_expires_at, now)
+    ):
+        runner_lease_active = True
+        runner_lease_expires_at = runner_lease.lease_expires_at
+        runner_lease_remaining_seconds = _seconds_until(runner_lease.lease_expires_at, now)
+
     recent_failure_rate_1h = None
     if recent_completed_count_1h > 0:
         recent_failure_rate_1h = recent_failed_count_1h / float(recent_completed_count_1h)
@@ -238,6 +270,9 @@ def get_auto_apply_queue_summary(
         oldest_retry_scheduled_age_seconds=_seconds_since(oldest_retry_scheduled_at, now),
         recent_completed_count_1h=recent_completed_count_1h,
         recent_failure_rate_1h=recent_failure_rate_1h,
+        runner_lease_active=runner_lease_active,
+        runner_lease_expires_at=runner_lease_expires_at,
+        runner_lease_remaining_seconds=runner_lease_remaining_seconds,
     )
 
 
@@ -599,7 +634,10 @@ def _acquire_runner_lease(
             and lease.lease_expires_at is not None
             and _is_after_now(lease.lease_expires_at, now)
         ):
-            raise ValueError("queue_runner_already_active")
+            raise QueueRunnerAlreadyActiveError(
+                lease_expires_at=lease.lease_expires_at,
+                remaining_seconds=_seconds_until(lease.lease_expires_at, now),
+            )
         lease.lease_token = lease_token
         lease.lease_expires_at = lease_expires_at
         lease.updated_at = now
@@ -630,7 +668,10 @@ def _acquire_runner_lease(
             and lease.lease_expires_at is not None
             and _is_after_now(lease.lease_expires_at, now)
         ):
-            raise ValueError("queue_runner_already_active")
+            raise QueueRunnerAlreadyActiveError(
+                lease_expires_at=lease.lease_expires_at,
+                remaining_seconds=_seconds_until(lease.lease_expires_at, now),
+            )
         if lease is None:
             raise
         lease.lease_token = lease_token
@@ -760,3 +801,14 @@ def _seconds_since(value: datetime | None, now: datetime) -> int | None:
     if elapsed < 0:
         return 0
     return int(elapsed)
+
+
+def _seconds_until(value: datetime | None, now: datetime) -> int | None:
+    """Return whole seconds until value, clamped at zero."""
+
+    if value is None:
+        return None
+    remaining = (_to_utc_naive(value) - _to_utc_naive(now)).total_seconds()
+    if remaining < 0:
+        return 0
+    return int(remaining)

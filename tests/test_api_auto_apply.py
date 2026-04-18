@@ -312,6 +312,47 @@ def test_auto_apply_queue_summary_api_reports_counts_and_stale_running(tmp_path)
     assert payload["oldest_retry_scheduled_age_seconds"] >= 0
     assert payload["recent_completed_count_1h"] == 0
     assert payload["recent_failure_rate_1h"] is None
+    assert payload["runner_lease_active"] is False
+    assert payload["runner_lease_expires_at"] is None
+    assert payload["runner_lease_remaining_seconds"] is None
+
+
+def test_auto_apply_queue_summary_api_reports_active_runner_lease_diagnostics(tmp_path):
+    session = make_session()
+    _seed_ready_job(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    now = models.utcnow()
+    session.add(
+        models.AutoApplyQueueRunnerLease(
+            candidate_profile_id=candidate.id,
+            lease_token="runner-active",
+            lease_expires_at=now + timedelta(minutes=4),
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        summary_response = client.get("/api/auto-apply/alex-doe/summary")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert summary_response.status_code == 200
+    payload = summary_response.json()
+    assert payload["runner_lease_active"] is True
+    assert payload["runner_lease_expires_at"] is not None
+    assert payload["runner_lease_remaining_seconds"] is not None
+    assert payload["runner_lease_remaining_seconds"] > 0
 
 
 def test_auto_apply_queue_summary_api_reports_recent_failure_rate_window(tmp_path):
@@ -750,7 +791,11 @@ def test_auto_apply_queue_api_run_returns_conflict_when_runner_lease_active(tmp_
         session.close()
 
     assert response.status_code == 409
-    assert response.json()["detail"] == "queue_runner_already_active"
+    detail = response.json()["detail"]
+    assert detail["code"] == "queue_runner_already_active"
+    assert detail["runner_lease_expires_at"] is not None
+    assert detail["runner_lease_remaining_seconds"] is not None
+    assert detail["runner_lease_remaining_seconds"] > 0
 
 
 def test_auto_apply_queue_api_run_reuses_stale_runner_lease(tmp_path, monkeypatch):

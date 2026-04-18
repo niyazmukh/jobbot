@@ -566,6 +566,9 @@ class AutoApplyQueueSummaryRead(BaseModel):
     oldest_retry_scheduled_age_seconds: int | None = None
     recent_completed_count_1h: int = 0
     recent_failure_rate_1h: float | None = None
+    runner_lease_active: bool = False
+    runner_lease_expires_at: datetime | None = None
+    runner_lease_remaining_seconds: int | None = None
 
 
 class AutoApplyQueueRequeueRead(BaseModel):
