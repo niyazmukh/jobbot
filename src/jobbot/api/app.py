@@ -42,6 +42,7 @@ from jobbot.execution import (
     evaluate_submit_gate,
     get_execution_artifact_detail,
     get_execution_artifact_file,
+    get_execution_dashboard_bulk_history_limit,
     get_execution_dashboard,
     get_execution_attempt_detail,
     get_execution_replay_asset_file,
@@ -264,6 +265,10 @@ def create_app() -> FastAPI:
                 history_sort=history_sort,
                 limit=5,
             )
+            history_retention_current_limit = get_execution_dashboard_bulk_history_limit(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+            )
         except ValueError as exc:
             if str(exc) == "candidate_profile_not_found":
                 raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
@@ -285,6 +290,7 @@ def create_app() -> FastAPI:
                 history_retention_before=history_retention_before,
                 history_retention_after=history_retention_after,
                 history_retention_removed=history_retention_removed,
+                history_retention_current_limit=history_retention_current_limit,
                 bulk_history=history,
                 history_sort=history_sort,
             )
@@ -2086,6 +2092,7 @@ def _render_execution_dashboard_page(
     history_retention_before: int | None = None,
     history_retention_after: int | None = None,
     history_retention_removed: int | None = None,
+    history_retention_current_limit: int = 10,
     bulk_history: list[DraftExecutionDashboardRemediationHistoryRead] | None = None,
     history_sort: str = "newest",
 ) -> str:
@@ -2219,8 +2226,9 @@ def _render_execution_dashboard_page(
     history_retention_controls_html = (
         "<section class='panel'>"
         "<h2>History Retention</h2>"
+        f"<div><small>Current configured limit: {history_retention_current_limit}</small></div>"
         f"<form method='post' action='{history_limit_route}'>"
-        "<label>Set limit: <input type='number' min='1' max='500' name='history_limit' value='10'></label> "
+        f"<label>Set limit: <input type='number' min='1' max='500' name='history_limit' value='{history_retention_current_limit}'></label> "
         "<button type='submit'>Save limit</button>"
         "</form>"
         f"<form method='post' action='{history_prune_route}'>"

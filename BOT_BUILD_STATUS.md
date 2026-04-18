@@ -152,7 +152,8 @@
 - Added stable remediation-history identifiers (`history_id`) plus replay-by-id semantics across HTML/API/CLI, with legacy-entry ID backfill to avoid index drift when sorting changes.
 - Added remediation-history retention controls with explicit set-limit + prune operations across API/CLI, and wired persisted history writes to honor configured per-candidate limits.
 - Surfaced remediation-history retention controls in the execution dashboard HTML with operator-facing set-limit/prune forms plus retention-result feedback redirects.
-- Brought the scoped JobBot test suite to green in `.venv` with `168 passed`.
+- Surfaced the active configured remediation-history limit in dashboard controls so retention forms default to live candidate settings instead of static fallbacks.
+- Brought the scoped JobBot test suite to green in `.venv` with `169 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.
@@ -172,7 +173,7 @@
 ## Next Tasks
 1. Promote the replay bundle and dashboard into a broader multi-ATS execution control center once multiple handlers exist.
 2. Tighten guarded-submit interaction policies from simulated fallback toward stricter browser-executed submit evidence as profile/session reliability instrumentation improves.
-3. Surface the current configured remediation-history limit in dashboard history controls so operators can see and edit live retention state without guessing defaults.
+3. Add dashboard/API visibility for current remediation-history inventory size versus configured limit so operators can proactively prune before heavy remediation cycles.
 
 ## Decisions
 - New implementation lives in `src/jobbot/` instead of modifying existing bot repos.

@@ -4128,6 +4128,40 @@ def test_execution_dashboard_html_surfaces_history_retention_controls():
     assert "/execution/dashboard/alex-doe/remediation-history/prune" in response.text
 
 
+def test_execution_dashboard_html_shows_current_configured_history_limit():
+    session = make_session()
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={"email": "alex@example.com"},
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={
+            "resume_path": "/profiles/alex-doe/resume.pdf",
+            "execution_dashboard_bulk_history_limit": 7,
+        },
+    )
+    session.add(candidate)
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.get("/execution/dashboard/alex-doe")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    assert "Current configured limit: 7" in response.text
+    assert "name='history_limit' value='7'" in response.text
+
+
 def test_execution_dashboard_html_history_retention_actions_apply_and_redirect():
     session = make_session()
     candidate = CandidateProfile(

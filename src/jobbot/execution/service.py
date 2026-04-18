@@ -2443,6 +2443,24 @@ def set_execution_dashboard_bulk_history_limit(
     )
 
 
+def get_execution_dashboard_bulk_history_limit(
+    session: Session,
+    *,
+    candidate_profile_slug: str,
+) -> int:
+    """Return effective remediation-history limit for one candidate dashboard."""
+
+    candidate = session.scalar(
+        select(CandidateProfile).where(CandidateProfile.slug == candidate_profile_slug)
+    )
+    if candidate is None:
+        raise ValueError("candidate_profile_not_found")
+    return _resolve_dashboard_history_limit(
+        source_profile_data=dict(candidate.source_profile_data or {}),
+        fallback=None,
+    )
+
+
 def prune_execution_dashboard_bulk_history(
     session: Session,
     *,
