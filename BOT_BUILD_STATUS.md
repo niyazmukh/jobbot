@@ -5,7 +5,7 @@
 - Overall status: `in_progress`
 - Implementation mode: `local-first, deterministic-first`
 - Primary spec: `FINAL_JOB_BOT_PRD.md`
-- Latest validation: `222 passed` (`.venv\\Scripts\\python -m pytest -q`)
+- Latest validation: `224 passed` (`.venv\\Scripts\\python -m pytest -q`)
 
 ## Completed
 - Created persistent roadmap and ADR structure.
@@ -222,6 +222,10 @@
   - Added optional enrichment model-pass hook with telemetry recording (`stage=enrichment`) while preserving deterministic extraction output behavior.
   - Enforced prompt-version contract for enrichment via prompt registry (`enrich_v1`) and replay compatibility checks.
   - Added enrichment tests for model-call persistence and incompatible replay prompt rejection.
+- Added prompt-version contract API surfaces for PRD §21.5 visibility and replay checks:
+  - API: `GET /api/model-calls/prompts` returns stable registry key/version/description entries.
+  - API: `GET /api/model-calls/replay-compatibility` evaluates old-vs-new prompt version compatibility.
+  - Added API regressions for prompt registry output and compatibility validation guardrails.
 - Extended model-call dashboard telemetry with blocked-call visibility:
   - `blocked_non_essential_call_count`
   - `blocked_non_essential_stage_counts`
@@ -241,6 +245,7 @@
 - Brought the scoped JobBot test suite to green in `.venv` with `218 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `220 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `222 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `224 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.

@@ -57,3 +57,23 @@ class ModelCostDashboardRead(BaseModel):
     non_essential_llm_calls_allowed: bool
     blocked_non_essential_call_count: int
     blocked_non_essential_stage_counts: dict[str, int]
+
+
+class PromptRegistryEntryRead(BaseModel):
+    """Read model for one registered prompt version entry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    version_id: str
+    description: str
+
+
+class PromptReplayCompatibilityRead(BaseModel):
+    """Read model for prompt replay compatibility checks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recorded_prompt_version: str
+    replay_prompt_version: str
+    compatible: bool

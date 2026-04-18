@@ -26,9 +26,16 @@
 - `26da030`: PRD dedup layers 2-4 with deterministic fuzzy guardrails.
 - `2cb92c0`: Scoring model-pass telemetry with prompt-version checks.
 - `64106ef`: Enrichment model-pass telemetry with prompt-version checks.
+- `0ce9be3`: Added rolling dev log with graphify + checkpoint discipline.
+- `in-progress`: Prompt registry/replay compatibility API surfaces (`/api/model-calls/prompts`, `/api/model-calls/replay-compatibility`).
 
 ### Validation Baseline
-- Full suite green at latest checkpoint: `222 passed`.
+- Full suite green at latest checkpoint: `224 passed`.
+
+### Graphify Snapshot Update (latest)
+- Re-ran `graphify update .` after prompt API/schema changes.
+- Current graph totals: 3770 nodes, 72764 edges, 213 communities.
+- God Nodes remain stable around execution/profile/job domain entities.
 
 ### Next Intended Discipline
 - Keep dev log updates synchronized with each structural milestone commit.

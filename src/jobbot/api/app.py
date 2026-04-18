@@ -80,7 +80,13 @@ from jobbot.discovery.inbox import (
     list_ready_to_apply_jobs,
 )
 from jobbot.models.enums import ReviewStatus
-from jobbot.model_calls import ModelCostDashboardRead, get_model_cost_dashboard
+from jobbot.model_calls import (
+    ModelCostDashboardRead,
+    get_model_cost_dashboard,
+    is_prompt_replay_compatible,
+    list_prompt_registry,
+)
+from jobbot.model_calls.schemas import PromptRegistryEntryRead, PromptReplayCompatibilityRead
 from jobbot.preparation import PreparedJobRead, get_prepared_job_read
 from jobbot.review.schemas import ReviewQueueRead
 from jobbot.review.service import list_review_queue, queue_score_review, set_review_status
@@ -144,6 +150,50 @@ def create_app() -> FastAPI:
             if detail == "invalid_model_cost_budget":
                 raise HTTPException(status_code=400, detail="invalid_model_cost_budget") from exc
             raise
+
+    @app.get(
+        "/api/model-calls/prompts",
+        response_model=list[PromptRegistryEntryRead],
+    )
+    def model_calls_prompt_registry_endpoint() -> list[PromptRegistryEntryRead]:
+        """Return the prompt version registry used by model-call telemetry."""
+
+        rows = list_prompt_registry()
+        return [
+            PromptRegistryEntryRead(
+                key=row.key,
+                version_id=row.version_id,
+                description=row.description,
+            )
+            for row in rows
+        ]
+
+    @app.get(
+        "/api/model-calls/replay-compatibility",
+        response_model=PromptReplayCompatibilityRead,
+    )
+    def model_calls_replay_compatibility_endpoint(
+        recorded_prompt_version: str,
+        replay_prompt_version: str,
+    ) -> PromptReplayCompatibilityRead:
+        """Return compatibility status for replaying one prompt version with another."""
+
+        try:
+            compatible = is_prompt_replay_compatible(
+                recorded_prompt_version=recorded_prompt_version,
+                replay_prompt_version=replay_prompt_version,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "invalid_prompt_version_id":
+                raise HTTPException(status_code=400, detail="invalid_prompt_version_id") from exc
+            raise
+
+        return PromptReplayCompatibilityRead(
+            recorded_prompt_version=recorded_prompt_version,
+            replay_prompt_version=replay_prompt_version,
+            compatible=compatible,
+        )
 
     @app.post(
         "/api/execution/linkedin/question-extraction",

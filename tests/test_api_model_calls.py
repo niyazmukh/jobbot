@@ -76,3 +76,37 @@ def test_model_cost_dashboard_api_returns_budget_and_stage_breakdown():
     assert payload["non_essential_llm_calls_allowed"] is False
     assert payload["blocked_non_essential_call_count"] == 0
     assert payload["blocked_non_essential_stage_counts"] == {}
+
+
+def test_model_prompt_registry_api_returns_registered_versions():
+    client = TestClient(app)
+    response = client.get("/api/model-calls/prompts")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert any(row["key"] == "scoring_fit_eval" and row["version_id"] == "score_v1" for row in payload)
+    assert any(row["key"] == "enrichment_fallback" and row["version_id"] == "enrich_v1" for row in payload)
+
+
+def test_model_replay_compatibility_api_returns_status_and_validation_errors():
+    client = TestClient(app)
+
+    compatible = client.get(
+        "/api/model-calls/replay-compatibility"
+        "?recorded_prompt_version=score_v1&replay_prompt_version=score_v1"
+    )
+    incompatible = client.get(
+        "/api/model-calls/replay-compatibility"
+        "?recorded_prompt_version=score_v1&replay_prompt_version=score_v2"
+    )
+    invalid = client.get(
+        "/api/model-calls/replay-compatibility"
+        "?recorded_prompt_version=bad-version&replay_prompt_version=score_v1"
+    )
+
+    assert compatible.status_code == 200
+    assert compatible.json()["compatible"] is True
+    assert incompatible.status_code == 200
+    assert incompatible.json()["compatible"] is False
+    assert invalid.status_code == 400
+    assert invalid.json()["detail"] == "invalid_prompt_version_id"
