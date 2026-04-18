@@ -2227,6 +2227,7 @@ def _render_execution_dashboard_page(
         "<section class='panel'>"
         "<h2>History Retention</h2>"
         f"<div><small>Current configured limit: {history_retention_current_limit}</small></div>"
+        f"<div><small>History rows: {detail.remediation_history_count} / limit {detail.remediation_history_limit}</small></div>"
         f"<form method='post' action='{history_limit_route}'>"
         f"<label>Set limit: <input type='number' min='1' max='500' name='history_limit' value='{history_retention_current_limit}'></label> "
         "<button type='submit'>Save limit</button>"

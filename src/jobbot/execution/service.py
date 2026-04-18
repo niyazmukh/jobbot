@@ -561,6 +561,17 @@ def get_execution_dashboard(
         if row.application_state == ApplicationState.REVIEW.value
     }
     replay_ready_rows = [row for row in rows if row.artifact_count > 0]
+    candidate = session.scalar(
+        select(CandidateProfile).where(CandidateProfile.slug == candidate_profile_slug)
+    )
+    if candidate is None:
+        raise ValueError("candidate_profile_not_found")
+    source_profile_data = dict(candidate.source_profile_data or {})
+    remediation_history_count = len(list(source_profile_data.get("execution_dashboard_bulk_history") or []))
+    remediation_history_limit = _resolve_dashboard_history_limit(
+        source_profile_data=source_profile_data,
+        fallback=None,
+    )
 
     recommended_actions = [
         "Resolve blocked guarded attempts before retrying browser-driven execution.",
@@ -608,6 +619,8 @@ def get_execution_dashboard(
         pending_attempts=len(pending_rows),
         review_state_attempts=len(review_application_ids),
         replay_ready_attempts=len(replay_ready_rows),
+        remediation_history_count=remediation_history_count,
+        remediation_history_limit=remediation_history_limit,
         blocked_failure_counts=blocked_failure_counts,
         blocked_failure_classification_counts=blocked_failure_classification_counts,
         recent_attempts=rows[:limit],

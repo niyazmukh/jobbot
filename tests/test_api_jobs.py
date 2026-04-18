@@ -3621,6 +3621,8 @@ def test_execution_dashboard_api_and_html_surface_summary_and_links(tmp_path):
     assert payload["pending_attempts"] == 1
     assert payload["review_state_attempts"] == 1
     assert payload["replay_ready_attempts"] == 1
+    assert payload["remediation_history_count"] == 0
+    assert payload["remediation_history_limit"] == 10
     assert payload["blocked_failure_counts"] == {"submit_gate_blocked": 1}
     assert payload["blocked_failure_classification_counts"] == {"unknown_classification": 1}
     assert payload["blocked_recent_attempts"][0]["attempt_id"] == blocked_attempt_id
@@ -4159,7 +4161,69 @@ def test_execution_dashboard_html_shows_current_configured_history_limit():
 
     assert response.status_code == 200
     assert "Current configured limit: 7" in response.text
+    assert "History rows: 0 / limit 7" in response.text
     assert "name='history_limit' value='7'" in response.text
+
+
+def test_execution_dashboard_api_and_html_show_history_inventory_vs_limit():
+    session = make_session()
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={"email": "alex@example.com"},
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={
+            "resume_path": "/profiles/alex-doe/resume.pdf",
+            "execution_dashboard_bulk_history_limit": 2,
+            "execution_dashboard_bulk_history": [
+                {
+                    "history_id": "hist-inv-1",
+                    "created_at": "2026-04-18T08:00:00+00:00",
+                    "requested_count": 1,
+                    "remediated_count": 1,
+                    "failed_count": 0,
+                },
+                {
+                    "history_id": "hist-inv-2",
+                    "created_at": "2026-04-18T09:00:00+00:00",
+                    "requested_count": 1,
+                    "remediated_count": 1,
+                    "failed_count": 0,
+                },
+                {
+                    "history_id": "hist-inv-3",
+                    "created_at": "2026-04-18T10:00:00+00:00",
+                    "requested_count": 1,
+                    "remediated_count": 1,
+                    "failed_count": 0,
+                },
+            ],
+        },
+    )
+    session.add(candidate)
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        api_response = client.get("/api/execution/dashboard/alex-doe")
+        html_response = client.get("/execution/dashboard/alex-doe")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert api_response.status_code == 200
+    payload = api_response.json()
+    assert payload["remediation_history_count"] == 3
+    assert payload["remediation_history_limit"] == 2
+    assert html_response.status_code == 200
+    assert "History rows: 3 / limit 2" in html_response.text
 
 
 def test_execution_dashboard_html_history_retention_actions_apply_and_redirect():

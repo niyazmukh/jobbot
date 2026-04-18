@@ -192,6 +192,8 @@ class DraftExecutionDashboardRead(BaseModel):
     pending_attempts: int
     review_state_attempts: int
     replay_ready_attempts: int
+    remediation_history_count: int
+    remediation_history_limit: int
     blocked_failure_counts: dict[str, int]
     blocked_failure_classification_counts: dict[str, int]
     recent_attempts: list[DraftExecutionOverviewRead]
