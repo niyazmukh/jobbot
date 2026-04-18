@@ -306,3 +306,116 @@ def test_auto_apply_queue_summary_api_reports_counts_and_stale_running(tmp_path)
     assert payload["retry_scheduled_count"] == 1
     assert payload["stale_running_count"] == 1
     assert payload["next_attempt_at"] is not None
+
+
+def test_auto_apply_queue_api_requeue_failed_items(tmp_path):
+    session = make_session()
+    job_id = _seed_ready_job(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    second_job = session.query(models.Job).filter(models.Job.id != job_id).order_by(models.Job.id.asc()).first()
+    now = models.utcnow()
+
+    failed_row = models.AutoApplyQueueItem(
+        candidate_profile_id=candidate.id,
+        job_id=job_id,
+        status="failed",
+        priority=120,
+        attempt_count=2,
+        max_attempts=3,
+        last_error_code="submit_gate_blocked",
+        last_error_message="submit_gate_blocked",
+        finished_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    succeeded_row = models.AutoApplyQueueItem(
+        candidate_profile_id=candidate.id,
+        job_id=second_job.id,
+        status="succeeded",
+        priority=100,
+        attempt_count=1,
+        max_attempts=3,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add_all([failed_row, succeeded_row])
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/api/auto-apply/alex-doe/requeue-failed",
+            json={"queue_ids": [failed_row.id, succeeded_row.id]},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["requeued_count"] == 1
+    assert payload["skipped_count"] == 1
+    item_by_id = {row["queue_id"]: row for row in payload["items"]}
+    assert item_by_id[failed_row.id]["status"] == "queued"
+    assert item_by_id[failed_row.id]["last_error_code"] is None
+    assert item_by_id[succeeded_row.id]["status"] == "succeeded"
+
+
+def test_auto_apply_queue_api_requeue_failed_default_scope(tmp_path):
+    session = make_session()
+    job_id = _seed_ready_job(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    second_job = session.query(models.Job).filter(models.Job.id != job_id).order_by(models.Job.id.asc()).first()
+    now = models.utcnow()
+
+    failed_row = models.AutoApplyQueueItem(
+        candidate_profile_id=candidate.id,
+        job_id=job_id,
+        status="failed",
+        priority=120,
+        attempt_count=2,
+        max_attempts=3,
+        last_error_code="guarded_submit_probe_failed",
+        last_error_message="guarded_submit_probe_failed",
+        finished_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    queued_row = models.AutoApplyQueueItem(
+        candidate_profile_id=candidate.id,
+        job_id=second_job.id,
+        status="queued",
+        priority=100,
+        attempt_count=0,
+        max_attempts=3,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add_all([failed_row, queued_row])
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.post("/api/auto-apply/alex-doe/requeue-failed")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["requeued_count"] == 1
+    assert payload["skipped_count"] == 1

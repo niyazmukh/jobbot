@@ -34,10 +34,11 @@
 - `f41c181`: durable auto-apply queue orchestration + automation-safe draft bootstrap reuse.
 - `9688df5`: strict unattended auto-apply success policy (reject simulated submit fallback outcomes).
 - `96c97f1`: stale-lease recovery and reclaim observability for auto-apply queue runs.
-- `in-progress`: candidate-scoped auto-apply queue summary telemetry (API + CLI).
+- `dd68ad7`: candidate-scoped auto-apply queue summary telemetry (API + CLI).
+- `in-progress`: failed-item requeue recovery controls (service/API/CLI + regressions).
 
 ### Validation Baseline
-- Full suite green at latest checkpoint: `235 passed`.
+- Full suite green at latest checkpoint: `237 passed`.
 
 ### Graphify Snapshot Update (latest)
 - Re-ran `graphify update .` after prompt API/schema changes.

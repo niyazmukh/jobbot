@@ -25,6 +25,7 @@ from jobbot.eligibility import (
 from jobbot.execution import (
     AutoApplyEnqueueRead,
     AutoApplyQueueItemRead,
+    AutoApplyQueueRequeueRead,
     AutoApplyQueueRunRead,
     AutoApplyQueueSummaryRead,
     DraftApplicationAttemptRead,
@@ -68,6 +69,7 @@ from jobbot.execution import (
     list_execution_dashboard_bulk_history_reads,
     list_execution_overview,
     list_auto_apply_queue_items,
+    requeue_failed_auto_apply_items,
     list_draft_application_attempts,
     open_site_target_page,
     prune_execution_dashboard_bulk_history,
@@ -1158,6 +1160,30 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=404, detail=detail) from exc
             if detail == "invalid_lease_seconds":
                 raise HTTPException(status_code=400, detail=detail) from exc
+            raise
+
+    @app.post(
+        "/api/auto-apply/{candidate_profile_slug}/requeue-failed",
+        response_model=AutoApplyQueueRequeueRead,
+    )
+    def requeue_failed_auto_apply_endpoint(
+        candidate_profile_slug: str,
+        db: DbSession,
+        queue_ids: Annotated[list[int] | None, Body(embed=True)] = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> AutoApplyQueueRequeueRead:
+        """Requeue failed auto-apply queue items for one candidate."""
+
+        try:
+            return requeue_failed_auto_apply_items(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                queue_ids=queue_ids,
+                limit=limit,
+            )
+        except ValueError as exc:
+            if str(exc) == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
             raise
 
     @app.get("/api/eligibility/jobs/{job_id}/{candidate_profile_slug}", response_model=ApplicationEligibilityRead)

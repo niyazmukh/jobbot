@@ -3,6 +3,7 @@
 from jobbot.execution.schemas import (
     AutoApplyEnqueueRead,
     AutoApplyQueueItemRead,
+    AutoApplyQueueRequeueRead,
     AutoApplyQueueRunRead,
     AutoApplyQueueSummaryRead,
     DraftApplicationAttemptRead,
@@ -38,6 +39,7 @@ from jobbot.execution.auto_apply import (
     enqueue_auto_apply_jobs,
     get_auto_apply_queue_summary,
     list_auto_apply_queue_items,
+    requeue_failed_auto_apply_items,
     run_auto_apply_queue,
 )
 from jobbot.execution.linkedin import (
@@ -77,6 +79,7 @@ from jobbot.execution.service import (
 __all__ = [
     "AutoApplyEnqueueRead",
     "AutoApplyQueueItemRead",
+    "AutoApplyQueueRequeueRead",
     "AutoApplyQueueRunRead",
     "AutoApplyQueueSummaryRead",
     "DraftApplicationAttemptRead",
@@ -130,6 +133,7 @@ __all__ = [
     "list_execution_dashboard_bulk_history_reads",
     "list_execution_overview",
     "list_auto_apply_queue_items",
+    "requeue_failed_auto_apply_items",
     "prune_execution_dashboard_bulk_history",
     "set_execution_dashboard_bulk_history_limit",
     "list_draft_application_attempts",

@@ -5,7 +5,7 @@
 - Overall status: `in_progress`
 - Implementation mode: `local-first, deterministic-first`
 - Primary spec: `FINAL_JOB_BOT_PRD.md`
-- Latest validation: `235 passed` (`.venv\\Scripts\\python -m pytest -q`)
+- Latest validation: `237 passed` (`.venv\\Scripts\\python -m pytest -q`)
 
 ## Completed
 - Created persistent roadmap and ADR structure.
@@ -258,6 +258,11 @@
     `submit_interaction_mode=simulated_probe_fallback` as a failure path.
   - New failure code: `guarded_submit_simulation_not_allowed_in_auto_apply`.
   - Added API regression to ensure simulated fallback cannot be counted as a successful auto-apply.
+- Added failed-item requeue recovery controls for auto-apply queues:
+  - New service/model path for candidate-scoped failed-item requeue with optional targeted queue IDs.
+  - New API: `POST /api/auto-apply/{candidate_profile_slug}/requeue-failed`.
+  - New CLI operation: `requeue-auto-apply-failed`.
+  - Added API regressions for targeted and default-scope requeue behavior.
 - Added explicit stale-lease recovery for durable auto-apply queue workers:
   - Queue runs now reclaim stale RUNNING items (expired/missing lease) back to QUEUED before drain.
   - Reclamation is observable via `reclaimed_count` in auto-apply run responses.

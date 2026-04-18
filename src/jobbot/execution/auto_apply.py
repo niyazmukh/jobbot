@@ -13,6 +13,7 @@ from jobbot.eligibility.service import materialize_application_eligibility
 from jobbot.execution.schemas import (
     AutoApplyEnqueueRead,
     AutoApplyQueueItemRead,
+    AutoApplyQueueRequeueRead,
     AutoApplyQueueRunRead,
     AutoApplyQueueSummaryRead,
 )
@@ -197,6 +198,67 @@ def get_auto_apply_queue_summary(
         retry_scheduled_count=retry_scheduled_count,
         stale_running_count=stale_running_count,
         next_attempt_at=next_attempt_at,
+    )
+
+
+def requeue_failed_auto_apply_items(
+    session: Session,
+    *,
+    candidate_profile_slug: str,
+    queue_ids: list[int] | None = None,
+    limit: int = 100,
+) -> AutoApplyQueueRequeueRead:
+    """Requeue failed auto-apply items for one candidate with optional targeting."""
+
+    candidate = session.scalar(
+        select(CandidateProfile).where(CandidateProfile.slug == candidate_profile_slug)
+    )
+    if candidate is None:
+        raise ValueError("candidate_profile_not_found")
+
+    requested_queue_ids = list(dict.fromkeys(queue_ids or []))
+    stmt = select(AutoApplyQueueItem).where(
+        AutoApplyQueueItem.candidate_profile_id == candidate.id,
+    )
+    if requested_queue_ids:
+        stmt = stmt.where(AutoApplyQueueItem.id.in_(requested_queue_ids))
+    rows = session.scalars(
+        stmt
+        .order_by(AutoApplyQueueItem.created_at.asc(), AutoApplyQueueItem.id.asc())
+        .limit(limit)
+    ).all()
+
+    now = utcnow()
+    requeued_count = 0
+    skipped_count = 0
+    touched: list[AutoApplyQueueItem] = []
+
+    for row in rows:
+        touched.append(row)
+        if row.status != AutoApplyQueueStatus.FAILED:
+            skipped_count += 1
+            continue
+        row.status = AutoApplyQueueStatus.QUEUED
+        row.next_attempt_at = now
+        row.lease_token = None
+        row.lease_expires_at = None
+        row.last_error_code = None
+        row.last_error_message = None
+        row.finished_at = None
+        row.updated_at = now
+        requeued_count += 1
+
+    if touched:
+        session.commit()
+        for row in touched:
+            session.refresh(row)
+
+    return AutoApplyQueueRequeueRead(
+        candidate_profile_slug=candidate_profile_slug,
+        requested_queue_ids=requested_queue_ids,
+        requeued_count=requeued_count,
+        skipped_count=skipped_count,
+        items=[_to_queue_item_read(item=row, candidate_profile_slug=candidate_profile_slug) for row in touched],
     )
 
 

@@ -54,6 +54,7 @@ from jobbot.execution.auto_apply import (
     enqueue_auto_apply_jobs,
     get_auto_apply_queue_summary,
     list_auto_apply_queue_items,
+    requeue_failed_auto_apply_items,
     run_auto_apply_queue,
 )
 from jobbot.discovery.inbox import list_inbox_jobs, list_ready_to_apply_jobs
@@ -578,6 +579,34 @@ def run_auto_apply_queue_cmd(
         f"succeeded={result.succeeded_count} "
         f"failed={result.failed_count} "
         f"retried={result.retried_count}"
+    )
+
+
+@app.command("requeue-auto-apply-failed")
+def requeue_auto_apply_failed_cmd(
+    candidate_profile: str = typer.Option(..., "--candidate-profile"),
+    queue_ids: list[int] = typer.Option([], "--queue-id"),
+    limit: int = typer.Option(100, "--limit", min=1, max=500),
+) -> None:
+    """Requeue failed auto-apply queue items for one candidate."""
+
+    session = SessionLocal()
+    try:
+        result = requeue_failed_auto_apply_items(
+            session,
+            candidate_profile_slug=candidate_profile,
+            queue_ids=queue_ids,
+            limit=limit,
+        )
+    except ValueError as exc:
+        session.close()
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        session.close()
+
+    console.print(
+        "[green]Failed auto-apply items requeued:[/green] "
+        f"requeued={result.requeued_count} skipped={result.skipped_count}"
     )
 
 

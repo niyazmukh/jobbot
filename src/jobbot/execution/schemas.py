@@ -563,6 +563,18 @@ class AutoApplyQueueSummaryRead(BaseModel):
     next_attempt_at: datetime | None = None
 
 
+class AutoApplyQueueRequeueRead(BaseModel):
+    """Read model for failed-queue requeue operations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_profile_slug: str
+    requested_queue_ids: list[int]
+    requeued_count: int
+    skipped_count: int
+    items: list[AutoApplyQueueItemRead]
+
+
 class DraftLinkedInQuestionRead(BaseModel):
     """Read model for one extracted LinkedIn question widget."""
 
