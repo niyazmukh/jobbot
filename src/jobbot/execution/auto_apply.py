@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from jobbot.db.models import AutoApplyQueueItem, CandidateProfile, utcnow
 from jobbot.eligibility.service import materialize_application_eligibility
 from jobbot.execution.schemas import (
+    AutoApplyQueueControlRead,
     AutoApplyEnqueueRead,
     AutoApplyQueueItemRead,
     AutoApplyQueueRequeueRead,
@@ -28,6 +29,9 @@ from jobbot.execution.service import (
     start_draft_execution_attempt,
 )
 from jobbot.models.enums import AutoApplyQueueStatus
+
+_PAUSED_BY_OPERATOR = "paused_by_operator"
+_CANCELLED_BY_OPERATOR = "cancelled_by_operator"
 
 
 def enqueue_auto_apply_jobs(
@@ -163,6 +167,7 @@ def get_auto_apply_queue_summary(
     ).all()
 
     queued_count = 0
+    paused_count = 0
     running_count = 0
     succeeded_count = 0
     failed_count = 0
@@ -172,8 +177,15 @@ def get_auto_apply_queue_summary(
 
     for row in rows:
         if row.status == AutoApplyQueueStatus.QUEUED:
-            queued_count += 1
-            if row.next_attempt_at is not None and _is_after_now(row.next_attempt_at, now):
+            if row.last_error_code == _PAUSED_BY_OPERATOR:
+                paused_count += 1
+            else:
+                queued_count += 1
+            if (
+                row.last_error_code != _PAUSED_BY_OPERATOR
+                and row.next_attempt_at is not None
+                and _is_after_now(row.next_attempt_at, now)
+            ):
                 retry_scheduled_count += 1
         elif row.status == AutoApplyQueueStatus.RUNNING:
             running_count += 1
@@ -192,6 +204,7 @@ def get_auto_apply_queue_summary(
         candidate_profile_slug=candidate_profile_slug,
         total_count=len(rows),
         queued_count=queued_count,
+        paused_count=paused_count,
         running_count=running_count,
         succeeded_count=succeeded_count,
         failed_count=failed_count,
@@ -266,6 +279,109 @@ def requeue_failed_auto_apply_items(
     )
 
 
+def control_auto_apply_queue_items(
+    session: Session,
+    *,
+    candidate_profile_slug: str,
+    operation: str,
+    queue_ids: list[int] | None = None,
+    limit: int = 100,
+) -> AutoApplyQueueControlRead:
+    """Pause, resume, or cancel queued auto-apply items for one candidate."""
+
+    normalized_operation = operation.strip().lower()
+    if normalized_operation not in {"pause", "resume", "cancel"}:
+        raise ValueError("invalid_queue_operation")
+
+    candidate = session.scalar(
+        select(CandidateProfile).where(CandidateProfile.slug == candidate_profile_slug)
+    )
+    if candidate is None:
+        raise ValueError("candidate_profile_not_found")
+
+    requested_queue_ids = list(dict.fromkeys(queue_ids or []))
+    stmt = select(AutoApplyQueueItem).where(
+        AutoApplyQueueItem.candidate_profile_id == candidate.id,
+    )
+    if requested_queue_ids:
+        stmt = stmt.where(AutoApplyQueueItem.id.in_(requested_queue_ids))
+    else:
+        stmt = stmt.where(AutoApplyQueueItem.status == AutoApplyQueueStatus.QUEUED)
+
+    ordered_stmt = stmt.order_by(
+        AutoApplyQueueItem.priority.desc(),
+        AutoApplyQueueItem.created_at.asc(),
+        AutoApplyQueueItem.id.asc(),
+    )
+    if requested_queue_ids:
+        rows = session.scalars(ordered_stmt).all()
+    else:
+        rows = session.scalars(ordered_stmt.limit(limit)).all()
+
+    found_ids = {row.id for row in rows}
+    missing_queue_ids = [queue_id for queue_id in requested_queue_ids if queue_id not in found_ids]
+
+    now = utcnow()
+    updated_count = 0
+    skipped_count = 0
+    touched: list[AutoApplyQueueItem] = []
+
+    for row in rows:
+        touched.append(row)
+        if normalized_operation == "pause":
+            if row.status != AutoApplyQueueStatus.QUEUED or row.last_error_code == _PAUSED_BY_OPERATOR:
+                skipped_count += 1
+                continue
+            row.next_attempt_at = None
+            row.lease_token = None
+            row.lease_expires_at = None
+            row.last_error_code = _PAUSED_BY_OPERATOR
+            row.last_error_message = _PAUSED_BY_OPERATOR
+            row.finished_at = None
+            row.updated_at = now
+            updated_count += 1
+            continue
+
+        if normalized_operation == "resume":
+            if row.status != AutoApplyQueueStatus.QUEUED or row.last_error_code != _PAUSED_BY_OPERATOR:
+                skipped_count += 1
+                continue
+            row.next_attempt_at = now
+            row.last_error_code = None
+            row.last_error_message = None
+            row.updated_at = now
+            updated_count += 1
+            continue
+
+        if row.status != AutoApplyQueueStatus.QUEUED:
+            skipped_count += 1
+            continue
+        row.status = AutoApplyQueueStatus.FAILED
+        row.next_attempt_at = None
+        row.lease_token = None
+        row.lease_expires_at = None
+        row.last_error_code = _CANCELLED_BY_OPERATOR
+        row.last_error_message = _CANCELLED_BY_OPERATOR
+        row.finished_at = now
+        row.updated_at = now
+        updated_count += 1
+
+    if touched:
+        session.commit()
+        for row in touched:
+            session.refresh(row)
+
+    return AutoApplyQueueControlRead(
+        candidate_profile_slug=candidate_profile_slug,
+        operation=normalized_operation,
+        requested_queue_ids=requested_queue_ids,
+        missing_queue_ids=missing_queue_ids,
+        updated_count=updated_count,
+        skipped_count=skipped_count,
+        items=[_to_queue_item_read(item=row, candidate_profile_slug=candidate_profile_slug) for row in touched],
+    )
+
+
 def run_auto_apply_queue(
     session: Session,
     *,
@@ -312,6 +428,8 @@ def run_auto_apply_queue(
 
     candidates: list[AutoApplyQueueItem] = []
     for row in rows:
+        if row.status == AutoApplyQueueStatus.QUEUED and row.last_error_code == _PAUSED_BY_OPERATOR:
+            continue
         if row.next_attempt_at is not None and _is_after_now(row.next_attempt_at, now):
             continue
         if (

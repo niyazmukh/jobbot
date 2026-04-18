@@ -51,6 +51,7 @@ from jobbot.execution.service import (
 from jobbot.execution.linkedin import build_linkedin_assist_plan, extract_linkedin_question_widgets
 from jobbot.execution.linkedin import evaluate_linkedin_guarded_submit_criteria
 from jobbot.execution.auto_apply import (
+    control_auto_apply_queue_items,
     enqueue_auto_apply_jobs,
     get_auto_apply_queue_summary,
     list_auto_apply_queue_items,
@@ -536,6 +537,7 @@ def show_auto_apply_summary_cmd(
         "Counts: "
         f"total={summary.total_count} "
         f"queued={summary.queued_count} "
+        f"paused={summary.paused_count} "
         f"running={summary.running_count} "
         f"succeeded={summary.succeeded_count} "
         f"failed={summary.failed_count}"
@@ -608,6 +610,39 @@ def requeue_auto_apply_failed_cmd(
         "[green]Failed auto-apply items requeued:[/green] "
         f"requeued={result.requeued_count} "
         f"skipped={result.skipped_count} "
+        f"missing={len(result.missing_queue_ids)}"
+    )
+    if result.missing_queue_ids:
+        console.print(f"Missing queue IDs: {result.missing_queue_ids}")
+
+
+@app.command("control-auto-apply-queue")
+def control_auto_apply_queue_cmd(
+    candidate_profile: str = typer.Option(..., "--candidate-profile"),
+    operation: str = typer.Option(..., "--operation", case_sensitive=False),
+    queue_ids: list[int] = typer.Option([], "--queue-id"),
+    limit: int = typer.Option(100, "--limit", min=1, max=500),
+) -> None:
+    """Pause/resume/cancel candidate-scoped queued auto-apply items."""
+
+    session = SessionLocal()
+    try:
+        result = control_auto_apply_queue_items(
+            session,
+            candidate_profile_slug=candidate_profile,
+            operation=operation,
+            queue_ids=queue_ids,
+            limit=limit,
+        )
+    except ValueError as exc:
+        session.close()
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        session.close()
+
+    console.print(
+        f"[green]Auto-apply queue operation completed ({result.operation}):[/green] "
+        f"updated={result.updated_count} skipped={result.skipped_count} "
         f"missing={len(result.missing_queue_ids)}"
     )
     if result.missing_queue_ids:

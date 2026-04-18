@@ -37,14 +37,15 @@
 - `dd68ad7`: candidate-scoped auto-apply queue summary telemetry (API + CLI).
 - `672b103`: failed-item requeue recovery controls (service/API/CLI + regressions).
 - `04fe793`: targeted failed-item requeue reliability hardening (missing-ID visibility + no silent limit truncation).
-- `in-progress`: queue-operations hardening for operator controls and runner safety.
+- `bc9bdcd`: synced build/dev status docs after queue reliability checkpoint.
+- `in-progress`: queue operation controls (`pause`/`resume`/`cancel`) + paused-runner safety.
 
 ### Validation Baseline
-- Full suite green at latest checkpoint: `238 passed`.
+- Full suite green at latest checkpoint: `240 passed`.
 
 ### Graphify Snapshot Update (latest)
-- Re-ran `graphify update .` after auto-apply queue reliability hardening updates.
-- Current graph totals: 4166 nodes, 76903 edges, 235 communities.
+- Re-ran `graphify update .` after queue-control orchestration updates.
+- Current graph totals: 4228 nodes, 77317 edges, 236 communities.
 - God Nodes remain stable around execution/profile/job domain entities.
 
 ### Next Intended Discipline

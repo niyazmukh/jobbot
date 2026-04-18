@@ -5,7 +5,7 @@
 - Overall status: `in_progress`
 - Implementation mode: `local-first, deterministic-first`
 - Primary spec: `FINAL_JOB_BOT_PRD.md`
-- Latest validation: `238 passed` (`.venv\\Scripts\\python -m pytest -q`)
+- Latest validation: `240 passed` (`.venv\\Scripts\\python -m pytest -q`)
 
 ## Completed
 - Created persistent roadmap and ADR structure.
@@ -268,6 +268,13 @@
   - Requeue responses now include `missing_queue_ids` for requested IDs not found in candidate scope.
   - CLI requeue output now surfaces missing-ID counts/details for operator visibility.
   - Added regression coverage for targeted requeue with `limit=1` and missing-ID reporting.
+- Added candidate-scoped queue operation controls for active queue management:
+  - New queue-control service operation path supports `pause`, `resume`, and `cancel` for queued entries.
+  - New API: `POST /api/auto-apply/{candidate_profile_slug}/queue-control?operation=pause|resume|cancel`.
+  - New CLI operation: `control-auto-apply-queue --operation pause|resume|cancel`.
+  - Added explicit `paused_count` to auto-apply summary telemetry and CLI summary output.
+  - Queue runner now skips operator-paused entries (`paused_by_operator`) to enforce manual pause intent.
+  - Added API regressions for queue-control action behavior and paused-item run skip semantics.
 - Added explicit stale-lease recovery for durable auto-apply queue workers:
   - Queue runs now reclaim stale RUNNING items (expired/missing lease) back to QUEUED before drain.
   - Reclamation is observable via `reclaimed_count` in auto-apply run responses.
@@ -323,10 +330,10 @@
 - None currently.
 
 ## Next Tasks
-1. Add candidate-scoped queue operation controls (pause/cancel selected queued or retry-scheduled items) with API and CLI parity.
-2. Add queue-run concurrency guardrails (single active runner lease per candidate) to prevent duplicate processing under parallel run triggers.
-3. Extend auto-apply summary telemetry with aging metrics (oldest queued age, oldest retry age, recent failure-rate window) for intervention prioritization.
-4. Add top failure-code one-click remediation templates for requeue, reauth, and selective retry to reduce manual triage overhead.
+1. Add queue-run concurrency guardrails (single active runner lease per candidate) to prevent duplicate processing under parallel run triggers.
+2. Extend auto-apply summary telemetry with aging metrics (oldest queued age, oldest retry age, recent failure-rate window) for intervention prioritization.
+3. Add top failure-code one-click remediation templates for requeue, reauth, and selective retry to reduce manual triage overhead.
+4. Add queue-control dashboard surfacing/actions so pause/resume/cancel can be driven from operator HTML flows without CLI/API-only usage.
 
 ## Decisions
 - New implementation lives in `src/jobbot/` instead of modifying existing bot repos.

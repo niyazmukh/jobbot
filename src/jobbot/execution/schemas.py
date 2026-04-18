@@ -555,6 +555,7 @@ class AutoApplyQueueSummaryRead(BaseModel):
     candidate_profile_slug: str
     total_count: int
     queued_count: int
+    paused_count: int
     running_count: int
     succeeded_count: int
     failed_count: int
@@ -572,6 +573,20 @@ class AutoApplyQueueRequeueRead(BaseModel):
     requested_queue_ids: list[int]
     missing_queue_ids: list[int]
     requeued_count: int
+    skipped_count: int
+    items: list[AutoApplyQueueItemRead]
+
+
+class AutoApplyQueueControlRead(BaseModel):
+    """Read model for auto-apply queue pause/resume/cancel operations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_profile_slug: str
+    operation: str
+    requested_queue_ids: list[int]
+    missing_queue_ids: list[int]
+    updated_count: int
     skipped_count: int
     items: list[AutoApplyQueueItemRead]
 

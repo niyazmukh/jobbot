@@ -484,3 +484,143 @@ def test_auto_apply_queue_api_requeue_failed_targeted_ignores_limit_and_reports_
     item_by_id = {row["queue_id"]: row for row in payload["items"]}
     assert item_by_id[first_failed.id]["status"] == "queued"
     assert item_by_id[second_failed.id]["status"] == "queued"
+
+
+def test_auto_apply_queue_api_control_pause_resume_cancel(tmp_path):
+    session = make_session()
+    job_id = _seed_ready_job(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    second_job = session.query(models.Job).filter(models.Job.id != job_id).order_by(models.Job.id.asc()).first()
+    now = models.utcnow()
+
+    active_row = models.AutoApplyQueueItem(
+        candidate_profile_id=candidate.id,
+        job_id=job_id,
+        status="queued",
+        priority=120,
+        attempt_count=0,
+        max_attempts=3,
+        created_at=now,
+        updated_at=now,
+    )
+    retry_row = models.AutoApplyQueueItem(
+        candidate_profile_id=candidate.id,
+        job_id=second_job.id,
+        status="queued",
+        priority=100,
+        attempt_count=1,
+        max_attempts=3,
+        next_attempt_at=now + timedelta(minutes=10),
+        created_at=now,
+        updated_at=now,
+    )
+    session.add_all([active_row, retry_row])
+    session.commit()
+
+    missing_queue_id = max(active_row.id, retry_row.id) + 999
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        pause_response = client.post(
+            "/api/auto-apply/alex-doe/queue-control?operation=pause&limit=1",
+            json={"queue_ids": [active_row.id, retry_row.id, missing_queue_id]},
+        )
+        resume_response = client.post(
+            "/api/auto-apply/alex-doe/queue-control?operation=resume",
+            json={"queue_ids": [active_row.id]},
+        )
+        cancel_response = client.post(
+            "/api/auto-apply/alex-doe/queue-control?operation=cancel",
+            json={"queue_ids": [active_row.id]},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert pause_response.status_code == 200
+    pause_payload = pause_response.json()
+    assert pause_payload["operation"] == "pause"
+    assert pause_payload["updated_count"] == 2
+    assert pause_payload["skipped_count"] == 0
+    assert pause_payload["missing_queue_ids"] == [missing_queue_id]
+
+    assert resume_response.status_code == 200
+    resume_payload = resume_response.json()
+    assert resume_payload["operation"] == "resume"
+    assert resume_payload["updated_count"] == 1
+    assert resume_payload["skipped_count"] == 0
+
+    assert cancel_response.status_code == 200
+    cancel_payload = cancel_response.json()
+    assert cancel_payload["operation"] == "cancel"
+    assert cancel_payload["updated_count"] == 1
+    assert cancel_payload["skipped_count"] == 0
+    item_by_id = {row["queue_id"]: row for row in cancel_payload["items"]}
+    assert item_by_id[active_row.id]["status"] == "failed"
+    assert item_by_id[active_row.id]["last_error_code"] == "cancelled_by_operator"
+
+
+def test_auto_apply_queue_api_run_skips_paused_items(tmp_path, monkeypatch):
+    session = make_session()
+    job_id = _seed_ready_job(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    now = models.utcnow()
+
+    paused_row = models.AutoApplyQueueItem(
+        candidate_profile_id=candidate.id,
+        job_id=job_id,
+        status="queued",
+        priority=120,
+        attempt_count=0,
+        max_attempts=3,
+        last_error_code="paused_by_operator",
+        last_error_message="paused_by_operator",
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(paused_row)
+    session.commit()
+
+    monkeypatch.setattr(
+        "jobbot.execution.auto_apply.evaluate_submit_gate",
+        lambda *args, **kwargs: SimpleNamespace(allow_submit=True),
+    )
+    monkeypatch.setattr(
+        "jobbot.execution.auto_apply.execute_guarded_submit",
+        lambda *args, **kwargs: SimpleNamespace(attempt_id=kwargs["attempt_id"]),
+    )
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        run_response = client.post(
+            "/api/auto-apply/alex-doe/run?browser_profile_key=apply-main&limit=5&lease_seconds=300"
+        )
+        summary_response = client.get("/api/auto-apply/alex-doe/summary")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert run_response.status_code == 200
+    run_payload = run_response.json()
+    assert run_payload["processed_count"] == 0
+    assert run_payload["succeeded_count"] == 0
+    assert run_payload["failed_count"] == 0
+
+    assert summary_response.status_code == 200
+    summary_payload = summary_response.json()
+    assert summary_payload["queued_count"] == 0
+    assert summary_payload["paused_count"] == 1

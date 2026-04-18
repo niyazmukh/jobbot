@@ -23,6 +23,7 @@ from jobbot.eligibility import (
     materialize_application_eligibility,
 )
 from jobbot.execution import (
+    AutoApplyQueueControlRead,
     AutoApplyEnqueueRead,
     AutoApplyQueueItemRead,
     AutoApplyQueueRequeueRead,
@@ -52,6 +53,7 @@ from jobbot.execution import (
     bootstrap_draft_application_attempt,
     build_draft_field_plan,
     build_site_field_overlay,
+    control_auto_apply_queue_items,
     execute_guarded_submit,
     evaluate_linkedin_guarded_submit_criteria,
     evaluate_linkedin_guarded_submit_criteria_for_attempt,
@@ -1184,6 +1186,35 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             if str(exc) == "candidate_profile_not_found":
                 raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
+            raise
+
+    @app.post(
+        "/api/auto-apply/{candidate_profile_slug}/queue-control",
+        response_model=AutoApplyQueueControlRead,
+    )
+    def control_auto_apply_queue_endpoint(
+        candidate_profile_slug: str,
+        db: DbSession,
+        operation: Annotated[str, Query(pattern="^(pause|resume|cancel)$")],
+        queue_ids: Annotated[list[int] | None, Body(embed=True)] = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> AutoApplyQueueControlRead:
+        """Pause/resume/cancel candidate-scoped queued auto-apply items."""
+
+        try:
+            return control_auto_apply_queue_items(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                operation=operation,
+                queue_ids=queue_ids,
+                limit=limit,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail=detail) from exc
+            if detail == "invalid_queue_operation":
+                raise HTTPException(status_code=400, detail=detail) from exc
             raise
 
     @app.get("/api/eligibility/jobs/{job_id}/{candidate_profile_slug}", response_model=ApplicationEligibilityRead)
