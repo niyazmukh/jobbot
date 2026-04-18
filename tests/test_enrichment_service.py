@@ -3,8 +3,13 @@ from sqlalchemy.orm import sessionmaker
 
 from jobbot.db.base import Base
 from jobbot.db import models  # noqa: F401
-from jobbot.db.models import Job, JobSource
-from jobbot.enrichment.service import enrich_job, extract_requirements_from_job, extract_requirements_from_text
+from jobbot.db.models import Job, JobSource, ModelCall
+from jobbot.enrichment.service import (
+    EnrichmentModelPassResult,
+    enrich_job,
+    extract_requirements_from_job,
+    extract_requirements_from_text,
+)
 
 
 def make_session():
@@ -116,3 +121,65 @@ def test_extract_requirements_from_job_uses_workday_bullet_fields():
     assert requirements.source_attributes["employment_type"] == "Full time"
     assert "ai platform" in requirements.domain_signals
     assert "remote - united states" in requirements.workplace_signals
+
+
+def test_enrich_job_records_model_call_when_model_pass_is_used():
+    session = make_session()
+    job = Job(
+        canonical_url="https://example.com/jobs/11",
+        title="Platform Engineer",
+        title_normalized="platform engineer",
+        description_text="Requires Python and SQL experience.",
+        status="discovered",
+    )
+    session.add(job)
+    session.commit()
+
+    def _enrichment_model_pass(_job, _sources, text, prompt_version):
+        assert text
+        assert prompt_version == "enrich_v1"
+        return EnrichmentModelPassResult(
+            provider="test_provider",
+            model_name="test_enrich_model",
+            output_size=256,
+            estimated_cost=0.021,
+        )
+
+    enriched = enrich_job(
+        session,
+        job.id,
+        enrichment_model_pass=_enrichment_model_pass,
+    )
+
+    calls = session.query(ModelCall).all()
+    assert enriched.status == "enriched"
+    assert len(calls) == 1
+    assert calls[0].stage == "enrichment"
+    assert calls[0].model_provider == "test_provider"
+    assert calls[0].model_name == "test_enrich_model"
+    assert calls[0].prompt_version == "enrich_v1"
+    assert calls[0].linked_entity_id == job.id
+    assert calls[0].estimated_cost == 0.021
+
+
+def test_enrich_job_rejects_incompatible_replay_prompt_version():
+    session = make_session()
+    job = Job(
+        canonical_url="https://example.com/jobs/12",
+        title="Platform Engineer",
+        title_normalized="platform engineer",
+        description_text="Requires Python and SQL experience.",
+        status="discovered",
+    )
+    session.add(job)
+    session.commit()
+
+    try:
+        enrich_job(
+            session,
+            job.id,
+            replay_prompt_version="enrich_v2",
+        )
+        assert False, "expected replay compatibility error"
+    except ValueError as exc:
+        assert str(exc) == "prompt_replay_incompatible"

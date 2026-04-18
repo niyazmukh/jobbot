@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import re
+import time
+from typing import Callable
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from jobbot.db.models import Job, JobSource, utcnow
 from jobbot.enrichment.schemas import EnrichedRequirements
+from jobbot.model_calls import (
+    assert_prompt_replay_compatible,
+    get_prompt_version,
+    record_model_call,
+)
 from jobbot.models.enums import ApplicationState
 
 
@@ -49,7 +57,26 @@ SENIORITY_PATTERNS = [
 ]
 
 
-def enrich_job(session: Session, job_id: int) -> Job:
+@dataclass(frozen=True)
+class EnrichmentModelPassResult:
+    """Optional enrichment model-pass metadata for telemetry recording."""
+
+    provider: str
+    model_name: str
+    output_size: int | None = None
+    estimated_cost: float | None = None
+
+
+EnrichmentModelPass = Callable[[Job, list[JobSource], str, str], EnrichmentModelPassResult]
+
+
+def enrich_job(
+    session: Session,
+    job_id: int,
+    *,
+    enrichment_model_pass: EnrichmentModelPass | None = None,
+    replay_prompt_version: str | None = None,
+) -> Job:
     """Deterministically enrich a discovered job with structured requirements."""
 
     job = session.scalar(select(Job).where(Job.id == job_id))
@@ -60,6 +87,22 @@ def enrich_job(session: Session, job_id: int) -> Job:
         session.scalars(select(JobSource).where(JobSource.job_id == job.id)).all()
     )
     source_text = job.description_text or job.description_raw or ""
+
+    prompt_version = get_prompt_version("enrichment_fallback")
+    if replay_prompt_version is not None:
+        assert_prompt_replay_compatible(prompt_version, replay_prompt_version)
+        prompt_version = replay_prompt_version
+
+    if enrichment_model_pass is not None and source_text.strip():
+        _record_enrichment_model_pass(
+            session,
+            job=job,
+            source_rows=source_rows,
+            text=source_text,
+            prompt_version=prompt_version,
+            enrichment_model_pass=enrichment_model_pass,
+        )
+
     requirements = extract_requirements_from_job(job, source_rows, source_text)
     job.requirements_structured = requirements.model_dump()
     job.status = ApplicationState.ENRICHED.value
@@ -67,6 +110,43 @@ def enrich_job(session: Session, job_id: int) -> Job:
     session.commit()
     session.refresh(job)
     return job
+
+
+def _record_enrichment_model_pass(
+    session: Session,
+    *,
+    job: Job,
+    source_rows: list[JobSource],
+    text: str,
+    prompt_version: str,
+    enrichment_model_pass: EnrichmentModelPass,
+) -> None:
+    """Record model-call telemetry for an enrichment model pass invocation."""
+
+    start = time.perf_counter()
+    result = enrichment_model_pass(job, source_rows, text, prompt_version)
+    latency_ms = int((time.perf_counter() - start) * 1000)
+    input_size = _estimate_enrichment_input_size(job=job, source_rows=source_rows, text=text)
+    record_model_call(
+        session,
+        stage="enrichment",
+        model_provider=result.provider,
+        model_name=result.model_name,
+        prompt_version=prompt_version,
+        linked_entity_id=job.id,
+        input_size=input_size,
+        output_size=result.output_size,
+        latency_ms=latency_ms,
+        estimated_cost=result.estimated_cost,
+    )
+
+
+def _estimate_enrichment_input_size(*, job: Job, source_rows: list[JobSource], text: str) -> int:
+    """Estimate enrichment model-pass input size deterministically using text length."""
+
+    metadata_text = " ".join(str(source.metadata_json or "") for source in source_rows)
+    joined = " ".join([str(job.title), str(job.description_text or job.description_raw or ""), text, metadata_text])
+    return len(joined)
 
 
 def extract_requirements_from_text(text: str) -> EnrichedRequirements:
