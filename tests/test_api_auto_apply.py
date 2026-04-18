@@ -624,3 +624,91 @@ def test_auto_apply_queue_api_run_skips_paused_items(tmp_path, monkeypatch):
     summary_payload = summary_response.json()
     assert summary_payload["queued_count"] == 0
     assert summary_payload["paused_count"] == 1
+
+
+def test_auto_apply_queue_api_run_returns_conflict_when_runner_lease_active(tmp_path):
+    session = make_session()
+    _seed_ready_job(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    now = models.utcnow()
+    active_lease = models.AutoApplyQueueRunnerLease(
+        candidate_profile_id=candidate.id,
+        lease_token="runner-active",
+        lease_expires_at=now + timedelta(minutes=5),
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(active_lease)
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/api/auto-apply/alex-doe/run?browser_profile_key=apply-main&limit=5&lease_seconds=300"
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "queue_runner_already_active"
+
+
+def test_auto_apply_queue_api_run_reuses_stale_runner_lease(tmp_path, monkeypatch):
+    session = make_session()
+    job_id = _seed_ready_job(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    now = models.utcnow()
+    stale_lease = models.AutoApplyQueueRunnerLease(
+        candidate_profile_id=candidate.id,
+        lease_token="runner-stale",
+        lease_expires_at=now - timedelta(minutes=1),
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(stale_lease)
+    session.commit()
+
+    monkeypatch.setattr(
+        "jobbot.execution.auto_apply.evaluate_submit_gate",
+        lambda *args, **kwargs: SimpleNamespace(allow_submit=True),
+    )
+    monkeypatch.setattr(
+        "jobbot.execution.auto_apply.execute_guarded_submit",
+        lambda *args, **kwargs: SimpleNamespace(attempt_id=kwargs["attempt_id"]),
+    )
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        enqueue_response = client.post(
+            "/api/auto-apply/alex-doe/enqueue?priority=120&max_attempts=2",
+            json={"job_ids": [job_id]},
+        )
+        run_response = client.post(
+            "/api/auto-apply/alex-doe/run?browser_profile_key=apply-main&limit=5&lease_seconds=300"
+        )
+        lease_row = session.query(models.AutoApplyQueueRunnerLease).filter_by(candidate_profile_id=candidate.id).one()
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert enqueue_response.status_code == 200
+    assert run_response.status_code == 200
+    assert run_response.json()["processed_count"] == 1
+    assert run_response.json()["succeeded_count"] == 1
+    assert lease_row.lease_token is None
+    assert lease_row.lease_expires_at is None

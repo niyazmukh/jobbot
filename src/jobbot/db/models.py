@@ -352,3 +352,17 @@ class AutoApplyQueueItem(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class AutoApplyQueueRunnerLease(Base):
+    __tablename__ = "auto_apply_queue_runner_leases"
+    __table_args__ = (
+        UniqueConstraint("candidate_profile_id", name="uq_auto_apply_queue_runner_leases_candidate"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    candidate_profile_id: Mapped[int] = mapped_column(ForeignKey("candidate_profiles.id"), index=True)
+    lease_token: Mapped[str | None] = mapped_column(String(100), index=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)

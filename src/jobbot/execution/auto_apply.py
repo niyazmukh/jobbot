@@ -5,10 +5,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from jobbot.db.models import AutoApplyQueueItem, CandidateProfile, utcnow
+from jobbot.db.models import AutoApplyQueueItem, AutoApplyQueueRunnerLease, CandidateProfile, utcnow
 from jobbot.eligibility.service import materialize_application_eligibility
 from jobbot.execution.schemas import (
     AutoApplyQueueControlRead,
@@ -401,139 +402,237 @@ def run_auto_apply_queue(
     if candidate is None:
         raise ValueError("candidate_profile_not_found")
 
-    now = utcnow()
-    reclaimed_count = _reclaim_stale_running_items(
+    runner_lease_token = _acquire_runner_lease(
         session,
         candidate_id=candidate.id,
-        now=now,
+        lease_seconds=lease_seconds,
     )
-    rows = session.scalars(
-        select(AutoApplyQueueItem)
-        .where(
-            AutoApplyQueueItem.candidate_profile_id == candidate.id,
-            AutoApplyQueueItem.status.in_(
-                [
-                    AutoApplyQueueStatus.QUEUED,
-                    AutoApplyQueueStatus.RUNNING,
-                ]
-            ),
-        )
-        .order_by(
-            AutoApplyQueueItem.priority.desc(),
-            AutoApplyQueueItem.created_at.asc(),
-            AutoApplyQueueItem.id.asc(),
-        )
-        .limit(max(limit * 3, limit))
-    ).all()
 
-    candidates: list[AutoApplyQueueItem] = []
-    for row in rows:
-        if row.status == AutoApplyQueueStatus.QUEUED and row.last_error_code == _PAUSED_BY_OPERATOR:
-            continue
-        if row.next_attempt_at is not None and _is_after_now(row.next_attempt_at, now):
-            continue
+    now = utcnow()
+    try:
+        reclaimed_count = _reclaim_stale_running_items(
+            session,
+            candidate_id=candidate.id,
+            now=now,
+        )
+        rows = session.scalars(
+            select(AutoApplyQueueItem)
+            .where(
+                AutoApplyQueueItem.candidate_profile_id == candidate.id,
+                AutoApplyQueueItem.status.in_(
+                    [
+                        AutoApplyQueueStatus.QUEUED,
+                        AutoApplyQueueStatus.RUNNING,
+                    ]
+                ),
+            )
+            .order_by(
+                AutoApplyQueueItem.priority.desc(),
+                AutoApplyQueueItem.created_at.asc(),
+                AutoApplyQueueItem.id.asc(),
+            )
+            .limit(max(limit * 3, limit))
+        ).all()
+
+        candidates: list[AutoApplyQueueItem] = []
+        for row in rows:
+            if row.status == AutoApplyQueueStatus.QUEUED and row.last_error_code == _PAUSED_BY_OPERATOR:
+                continue
+            if row.next_attempt_at is not None and _is_after_now(row.next_attempt_at, now):
+                continue
+            if (
+                row.status == AutoApplyQueueStatus.RUNNING
+                and row.lease_expires_at is not None
+                and _is_after_now(row.lease_expires_at, now)
+            ):
+                continue
+            candidates.append(row)
+            if len(candidates) >= limit:
+                break
+
+        processed_items: list[AutoApplyQueueItem] = []
+        succeeded_count = 0
+        failed_count = 0
+        retried_count = 0
+
+        for item in candidates:
+            lease_token = f"lease-{uuid4().hex}"
+            started_at = utcnow()
+            item.status = AutoApplyQueueStatus.RUNNING
+            item.lease_token = lease_token
+            item.lease_expires_at = started_at + timedelta(seconds=lease_seconds)
+            if item.started_at is None:
+                item.started_at = started_at
+            item.updated_at = started_at
+            session.commit()
+
+            try:
+                readiness = materialize_application_eligibility(
+                    session,
+                    job_id=item.job_id,
+                    candidate_profile_slug=candidate_profile_slug,
+                )
+                if not readiness.ready or readiness.readiness_state != "ready_to_apply":
+                    raise ValueError("application_not_ready_to_apply")
+
+                attempt = bootstrap_draft_application_attempt(
+                    session,
+                    job_id=item.job_id,
+                    candidate_profile_slug=candidate_profile_slug,
+                    browser_profile_key=browser_profile_key,
+                    reuse_existing_active_attempt=True,
+                )
+                start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+                build_draft_field_plan(session, attempt_id=attempt.attempt_id)
+                build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+                open_site_target_page(session, attempt_id=attempt.attempt_id)
+                gate = evaluate_submit_gate(session, attempt_id=attempt.attempt_id)
+                if not gate.allow_submit:
+                    raise ValueError("submit_gate_blocked")
+                submitted = execute_guarded_submit(session, attempt_id=attempt.attempt_id)
+                attempt_detail = get_execution_attempt_detail(session, attempt_id=submitted.attempt_id)
+                if attempt_detail.submit_interaction_mode == "simulated_probe_fallback":
+                    raise ValueError("guarded_submit_simulation_not_allowed_in_auto_apply")
+
+                completed_at = utcnow()
+                item.status = AutoApplyQueueStatus.SUCCEEDED
+                item.source_attempt_id = submitted.attempt_id
+                item.last_error_code = None
+                item.last_error_message = None
+                item.finished_at = completed_at
+                item.lease_token = None
+                item.lease_expires_at = None
+                item.next_attempt_at = None
+                item.updated_at = completed_at
+                session.commit()
+                session.refresh(item)
+                processed_items.append(item)
+                succeeded_count += 1
+            except ValueError as exc:
+                error_code = (str(exc) or "auto_apply_failed").strip() or "auto_apply_failed"
+                item.attempt_count += 1
+                item.last_error_code = error_code
+                item.last_error_message = error_code
+                item.lease_token = None
+                item.lease_expires_at = None
+                item.updated_at = utcnow()
+                if _is_retryable_error(error_code) and item.attempt_count < item.max_attempts:
+                    backoff_seconds = min(2 ** item.attempt_count, 300)
+                    item.status = AutoApplyQueueStatus.QUEUED
+                    item.next_attempt_at = item.updated_at + timedelta(seconds=backoff_seconds)
+                    retried_count += 1
+                else:
+                    item.status = AutoApplyQueueStatus.FAILED
+                    item.finished_at = item.updated_at
+                    failed_count += 1
+                session.commit()
+                session.refresh(item)
+                processed_items.append(item)
+
+        return AutoApplyQueueRunRead(
+            candidate_profile_slug=candidate_profile_slug,
+            requested_limit=limit,
+            reclaimed_count=reclaimed_count,
+            processed_count=len(processed_items),
+            succeeded_count=succeeded_count,
+            failed_count=failed_count,
+            retried_count=retried_count,
+            items=[
+                _to_queue_item_read(item=item, candidate_profile_slug=candidate_profile_slug)
+                for item in processed_items
+            ],
+        )
+    finally:
+        _release_runner_lease(
+            session,
+            candidate_id=candidate.id,
+            lease_token=runner_lease_token,
+        )
+
+
+def _acquire_runner_lease(
+    session: Session,
+    *,
+    candidate_id: int,
+    lease_seconds: int,
+) -> str:
+    """Acquire candidate-scoped queue runner lease or raise if already active."""
+
+    now = utcnow()
+    lease_token = f"runner-{uuid4().hex}"
+    lease_expires_at = now + timedelta(seconds=lease_seconds)
+
+    lease = session.scalar(
+        select(AutoApplyQueueRunnerLease).where(
+            AutoApplyQueueRunnerLease.candidate_profile_id == candidate_id,
+        )
+    )
+    if lease is not None:
         if (
-            row.status == AutoApplyQueueStatus.RUNNING
-            and row.lease_expires_at is not None
-            and _is_after_now(row.lease_expires_at, now)
+            lease.lease_token
+            and lease.lease_expires_at is not None
+            and _is_after_now(lease.lease_expires_at, now)
         ):
-            continue
-        candidates.append(row)
-        if len(candidates) >= limit:
-            break
-
-    processed_items: list[AutoApplyQueueItem] = []
-    succeeded_count = 0
-    failed_count = 0
-    retried_count = 0
-
-    for item in candidates:
-        lease_token = f"lease-{uuid4().hex}"
-        started_at = utcnow()
-        item.status = AutoApplyQueueStatus.RUNNING
-        item.lease_token = lease_token
-        item.lease_expires_at = started_at + timedelta(seconds=lease_seconds)
-        if item.started_at is None:
-            item.started_at = started_at
-        item.updated_at = started_at
+            raise ValueError("queue_runner_already_active")
+        lease.lease_token = lease_token
+        lease.lease_expires_at = lease_expires_at
+        lease.updated_at = now
         session.commit()
+        return lease_token
 
-        try:
-            readiness = materialize_application_eligibility(
-                session,
-                job_id=item.job_id,
-                candidate_profile_slug=candidate_profile_slug,
-            )
-            if not readiness.ready or readiness.readiness_state != "ready_to_apply":
-                raise ValueError("application_not_ready_to_apply")
-
-            attempt = bootstrap_draft_application_attempt(
-                session,
-                job_id=item.job_id,
-                candidate_profile_slug=candidate_profile_slug,
-                browser_profile_key=browser_profile_key,
-                reuse_existing_active_attempt=True,
-            )
-            start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
-            build_draft_field_plan(session, attempt_id=attempt.attempt_id)
-            build_site_field_overlay(session, attempt_id=attempt.attempt_id)
-            open_site_target_page(session, attempt_id=attempt.attempt_id)
-            gate = evaluate_submit_gate(session, attempt_id=attempt.attempt_id)
-            if not gate.allow_submit:
-                raise ValueError("submit_gate_blocked")
-            submitted = execute_guarded_submit(session, attempt_id=attempt.attempt_id)
-            attempt_detail = get_execution_attempt_detail(session, attempt_id=submitted.attempt_id)
-            if attempt_detail.submit_interaction_mode == "simulated_probe_fallback":
-                raise ValueError("guarded_submit_simulation_not_allowed_in_auto_apply")
-
-            completed_at = utcnow()
-            item.status = AutoApplyQueueStatus.SUCCEEDED
-            item.source_attempt_id = submitted.attempt_id
-            item.last_error_code = None
-            item.last_error_message = None
-            item.finished_at = completed_at
-            item.lease_token = None
-            item.lease_expires_at = None
-            item.next_attempt_at = None
-            item.updated_at = completed_at
-            session.commit()
-            session.refresh(item)
-            processed_items.append(item)
-            succeeded_count += 1
-        except ValueError as exc:
-            error_code = (str(exc) or "auto_apply_failed").strip() or "auto_apply_failed"
-            item.attempt_count += 1
-            item.last_error_code = error_code
-            item.last_error_message = error_code
-            item.lease_token = None
-            item.lease_expires_at = None
-            item.updated_at = utcnow()
-            if _is_retryable_error(error_code) and item.attempt_count < item.max_attempts:
-                backoff_seconds = min(2 ** item.attempt_count, 300)
-                item.status = AutoApplyQueueStatus.QUEUED
-                item.next_attempt_at = item.updated_at + timedelta(seconds=backoff_seconds)
-                retried_count += 1
-            else:
-                item.status = AutoApplyQueueStatus.FAILED
-                item.finished_at = item.updated_at
-                failed_count += 1
-            session.commit()
-            session.refresh(item)
-            processed_items.append(item)
-
-    return AutoApplyQueueRunRead(
-        candidate_profile_slug=candidate_profile_slug,
-        requested_limit=limit,
-        reclaimed_count=reclaimed_count,
-        processed_count=len(processed_items),
-        succeeded_count=succeeded_count,
-        failed_count=failed_count,
-        retried_count=retried_count,
-        items=[
-            _to_queue_item_read(item=item, candidate_profile_slug=candidate_profile_slug)
-            for item in processed_items
-        ],
+    lease = AutoApplyQueueRunnerLease(
+        candidate_profile_id=candidate_id,
+        lease_token=lease_token,
+        lease_expires_at=lease_expires_at,
+        created_at=now,
+        updated_at=now,
     )
+    session.add(lease)
+    try:
+        session.commit()
+        return lease_token
+    except IntegrityError:
+        session.rollback()
+        lease = session.scalar(
+            select(AutoApplyQueueRunnerLease).where(
+                AutoApplyQueueRunnerLease.candidate_profile_id == candidate_id,
+            )
+        )
+        if (
+            lease is not None
+            and lease.lease_token
+            and lease.lease_expires_at is not None
+            and _is_after_now(lease.lease_expires_at, now)
+        ):
+            raise ValueError("queue_runner_already_active")
+        if lease is None:
+            raise
+        lease.lease_token = lease_token
+        lease.lease_expires_at = lease_expires_at
+        lease.updated_at = now
+        session.commit()
+        return lease_token
+
+
+def _release_runner_lease(
+    session: Session,
+    *,
+    candidate_id: int,
+    lease_token: str,
+) -> None:
+    """Release candidate-scoped queue runner lease if owned by caller."""
+
+    lease = session.scalar(
+        select(AutoApplyQueueRunnerLease).where(
+            AutoApplyQueueRunnerLease.candidate_profile_id == candidate_id,
+        )
+    )
+    if lease is None or lease.lease_token != lease_token:
+        return
+    lease.lease_token = None
+    lease.lease_expires_at = None
+    lease.updated_at = utcnow()
+    session.commit()
 
 
 def _is_retryable_error(error_code: str) -> bool:

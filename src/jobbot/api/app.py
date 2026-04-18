@@ -1162,6 +1162,8 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=404, detail=detail) from exc
             if detail == "invalid_lease_seconds":
                 raise HTTPException(status_code=400, detail=detail) from exc
+            if detail == "queue_runner_already_active":
+                raise HTTPException(status_code=409, detail=detail) from exc
             raise
 
     @app.post(
