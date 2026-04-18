@@ -1,0 +1,36 @@
+# JobBot Dev Log
+
+## 2026-04-18
+
+### Operational Discipline
+- Enforced periodic checkpoint commits after validated milestones.
+- Kept repository hygiene strict: temporary/artifact outputs remain ignored (`graphify-out/`, `manual_validation/`, and ad-hoc generated files).
+- Continued full-suite validation before every milestone commit.
+
+### Graphify (used as intended)
+- Ran `graphify update .` after structural code updates.
+- Reviewed and captured `God Nodes` and `Surprising Connections` from `graphify-out/GRAPH_REPORT.md`.
+- Latest observed God Nodes:
+  - BrowserProfileType
+  - CandidateProfile
+  - Job
+  - BrowserProfile
+  - ApplicationState
+- Latest observed Surprising Connections:
+  - `src/jobbot/db/base.py` inferred dependency on `src/jobbot/db/bootstrap.py`
+  - `alembic/env.py` inferred dependency on `src/jobbot/db/base.py`
+  - `src/jobbot/scoring/__init__.py` inferred dependencies on browser schemas
+
+### Milestones Completed (same day checkpoints)
+- `59cb218`: Workday execution support + prompt registry baseline.
+- `26da030`: PRD dedup layers 2-4 with deterministic fuzzy guardrails.
+- `2cb92c0`: Scoring model-pass telemetry with prompt-version checks.
+- `64106ef`: Enrichment model-pass telemetry with prompt-version checks.
+
+### Validation Baseline
+- Full suite green at latest checkpoint: `222 passed`.
+
+### Next Intended Discipline
+- Keep dev log updates synchronized with each structural milestone commit.
+- Continue Graphify refresh after structural updates and summarize key graph signals here.
+- Preserve commit cadence: implement -> focused tests -> full suite -> graphify update -> commit.
