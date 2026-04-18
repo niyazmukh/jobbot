@@ -19,6 +19,7 @@ from jobbot.execution.schemas import (
     DraftLinkedInGuardedSubmitCriteriaRead,
 )
 from jobbot.models.enums import BrowserProfileType, SessionHealth
+from types import SimpleNamespace
 
 
 def make_session_factory():
@@ -567,3 +568,87 @@ def test_cli_reauth_browser_profile_marks_profile_healthy(monkeypatch):
     profile = check.query(BrowserProfile).filter_by(profile_key="apply-main").one()
     assert profile.session_health == SessionHealth.HEALTHY.value
     check.close()
+
+
+def test_cli_enrich_job_passes_replay_prompt_version(monkeypatch):
+    session_factory = make_session_factory()
+    captured: dict[str, object] = {}
+
+    def fake_enrich_job(_session, job_id: int, *, replay_prompt_version: str | None = None):
+        captured["job_id"] = job_id
+        captured["replay_prompt_version"] = replay_prompt_version
+        return SimpleNamespace(
+            id=job_id,
+            status="enriched",
+            requirements_structured={"required_skills": ["python"]},
+        )
+
+    monkeypatch.setattr(cli_main, "SessionLocal", session_factory)
+    monkeypatch.setattr(cli_main, "enrich_job", fake_enrich_job)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "enrich-job",
+            "--job-id",
+            "7",
+            "--replay-prompt-version",
+            "enrich_v1",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["job_id"] == 7
+    assert captured["replay_prompt_version"] == "enrich_v1"
+    assert "Enriched job:" in result.stdout
+
+
+def test_cli_score_job_passes_replay_prompt_version(monkeypatch):
+    session_factory = make_session_factory()
+    captured: dict[str, object] = {}
+
+    def fake_score_job_for_candidate(
+        _session,
+        job_id: int,
+        candidate_profile: str,
+        *,
+        replay_prompt_version: str | None = None,
+        scoring_model_pass=None,
+    ):
+        captured["job_id"] = job_id
+        captured["candidate_profile"] = candidate_profile
+        captured["replay_prompt_version"] = replay_prompt_version
+        return SimpleNamespace(
+            job_id=job_id,
+            candidate_profile_id=42,
+            overall_score=0.91,
+            score_json={
+                "confidence_score": 0.88,
+                "blocked": False,
+                "blocking_reasons": [],
+            },
+        )
+
+    monkeypatch.setattr(cli_main, "SessionLocal", session_factory)
+    monkeypatch.setattr(cli_main, "score_job_for_candidate", fake_score_job_for_candidate)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "score-job",
+            "--job-id",
+            "11",
+            "--candidate-profile",
+            "alex-doe",
+            "--replay-prompt-version",
+            "score_v1",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["job_id"] == 11
+    assert captured["candidate_profile"] == "alex-doe"
+    assert captured["replay_prompt_version"] == "score_v1"
+    assert "Scored job:" in result.stdout

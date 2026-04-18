@@ -1305,12 +1305,20 @@ def execute_guarded_submit_cmd(
 @app.command("enrich-job")
 def enrich_job_cmd(
     job_id: int = typer.Option(..., "--job-id", min=1),
+    replay_prompt_version: str | None = typer.Option(None, "--replay-prompt-version"),
 ) -> None:
     """Run deterministic enrichment for a persisted job."""
 
     session = SessionLocal()
     try:
-        job = enrich_job(session, job_id)
+        job = enrich_job(
+            session,
+            job_id,
+            replay_prompt_version=replay_prompt_version,
+        )
+    except ValueError as exc:
+        session.close()
+        raise typer.BadParameter(str(exc)) from exc
     finally:
         session.close()
 
@@ -1323,12 +1331,21 @@ def enrich_job_cmd(
 def score_job_cmd(
     job_id: int = typer.Option(..., "--job-id", min=1),
     candidate_profile: str = typer.Option(..., "--candidate-profile"),
+    replay_prompt_version: str | None = typer.Option(None, "--replay-prompt-version"),
 ) -> None:
     """Run deterministic scoring for a candidate/job pair."""
 
     session = SessionLocal()
     try:
-        score = score_job_for_candidate(session, job_id, candidate_profile)
+        score = score_job_for_candidate(
+            session,
+            job_id,
+            candidate_profile,
+            replay_prompt_version=replay_prompt_version,
+        )
+    except ValueError as exc:
+        session.close()
+        raise typer.BadParameter(str(exc)) from exc
     finally:
         session.close()
 

@@ -5,7 +5,7 @@
 - Overall status: `in_progress`
 - Implementation mode: `local-first, deterministic-first`
 - Primary spec: `FINAL_JOB_BOT_PRD.md`
-- Latest validation: `226 passed` (`.venv\\Scripts\\python -m pytest -q`)
+- Latest validation: `228 passed` (`.venv\\Scripts\\python -m pytest -q`)
 
 ## Completed
 - Created persistent roadmap and ADR structure.
@@ -230,6 +230,10 @@
   - API: `POST /api/jobs/{job_id}/enrich` with optional `replay_prompt_version`.
   - API: `POST /api/jobs/{job_id}/scores/{candidate_profile_slug}` with optional `replay_prompt_version`.
   - Added API regressions covering success path + incompatible replay (`409`) + invalid prompt version (`400`).
+- Added CLI parity for replay-capable scoring/enrichment operations:
+  - CLI: `enrich-job --replay-prompt-version ...`
+  - CLI: `score-job --replay-prompt-version ...`
+  - Added CLI regressions to assert replay prompt-version passthrough and command success paths.
 - Extended model-call dashboard telemetry with blocked-call visibility:
   - `blocked_non_essential_call_count`
   - `blocked_non_essential_stage_counts`
@@ -251,6 +255,7 @@
 - Brought the scoped JobBot test suite to green in `.venv` with `222 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `224 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `226 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `228 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.
