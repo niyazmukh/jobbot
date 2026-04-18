@@ -59,3 +59,10 @@ class SessionHealth(str, Enum):
 class BrowserProfileType(str, Enum):
     DISCOVERY = "discovery"
     APPLICATION = "application"
+
+
+class AutoApplyQueueStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"

@@ -5,7 +5,7 @@
 - Overall status: `in_progress`
 - Implementation mode: `local-first, deterministic-first`
 - Primary spec: `FINAL_JOB_BOT_PRD.md`
-- Latest validation: `230 passed` (`.venv\\Scripts\\python -m pytest -q`)
+- Latest validation: `232 passed` (`.venv\\Scripts\\python -m pytest -q`)
 
 ## Completed
 - Created persistent roadmap and ADR structure.
@@ -238,6 +238,21 @@
   - CLI: `list-prompt-registry`
   - CLI: `check-prompt-replay --recorded-prompt-version ... --replay-prompt-version ...`
   - Added CLI regressions for compatibility true/false paths and invalid-version failure path.
+- Added first-class durable auto-apply orchestration with queue/recovery semantics:
+  - New durable table: `auto_apply_queue` with lease, retry/backoff, and terminal statuses.
+  - New service: `execution.auto_apply` supports enqueue, queue listing, and bounded queue draining.
+  - New APIs:
+    - `POST /api/auto-apply/{candidate_profile_slug}/enqueue`
+    - `GET /api/auto-apply/{candidate_profile_slug}/queue`
+    - `POST /api/auto-apply/{candidate_profile_slug}/run`
+  - New CLI operations:
+    - `enqueue-auto-apply`
+    - `list-auto-apply-queue`
+    - `run-auto-apply-queue`
+- Mitigated duplicate-attempt automation risk with idempotent draft bootstrap reuse in automation path:
+  - `bootstrap_draft_application_attempt(..., reuse_existing_active_attempt=True)` reuses active draft attempts.
+  - Auto-apply queue runner uses reuse mode to avoid duplicate draft attempt fanout.
+  - Existing manual/operator bootstrap semantics remain unchanged.
 - Extended model-call dashboard telemetry with blocked-call visibility:
   - `blocked_non_essential_call_count`
   - `blocked_non_essential_stage_counts`
@@ -261,6 +276,7 @@
 - Brought the scoped JobBot test suite to green in `.venv` with `226 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `228 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `230 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `232 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.

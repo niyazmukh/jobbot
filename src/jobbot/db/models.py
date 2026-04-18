@@ -9,6 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from jobbot.db.base import Base
 from jobbot.models.enums import (
+    AutoApplyQueueStatus,
     ApplicationMode,
     ApplicationState,
     ArtifactType,
@@ -321,4 +322,33 @@ class ApplicationEligibility(Base):
     score_summary: Mapped[dict] = mapped_column(JSON, default=dict)
     prepared_summary: Mapped[dict] = mapped_column(JSON, default=dict)
     materialized_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class AutoApplyQueueItem(Base):
+    __tablename__ = "auto_apply_queue"
+    __table_args__ = (
+        UniqueConstraint("candidate_profile_id", "job_id", name="uq_auto_apply_queue_candidate_job"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    candidate_profile_id: Mapped[int] = mapped_column(ForeignKey("candidate_profiles.id"), index=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id"), index=True)
+    status: Mapped[AutoApplyQueueStatus] = mapped_column(
+        Enum(AutoApplyQueueStatus),
+        default=AutoApplyQueueStatus.QUEUED,
+        index=True,
+    )
+    priority: Mapped[int] = mapped_column(Integer, default=100, index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    lease_token: Mapped[str | None] = mapped_column(String(100), index=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    source_attempt_id: Mapped[int | None] = mapped_column(ForeignKey("application_attempts.id"), index=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(100), index=True)
+    last_error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)

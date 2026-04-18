@@ -496,6 +496,56 @@ class DraftExecutionDashboardRemediationHistoryRetentionRead(BaseModel):
     removed_count: int
 
 
+class AutoApplyQueueItemRead(BaseModel):
+    """Read model for one durable auto-apply queue item."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    queue_id: int
+    candidate_profile_slug: str
+    job_id: int
+    status: str
+    priority: int
+    attempt_count: int
+    max_attempts: int
+    source_attempt_id: int | None = None
+    last_error_code: str | None = None
+    last_error_message: str | None = None
+    next_attempt_at: datetime | None = None
+    lease_expires_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AutoApplyEnqueueRead(BaseModel):
+    """Read model for queue enqueue outcomes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_profile_slug: str
+    requested_job_ids: list[int]
+    queued_count: int
+    requeued_count: int
+    skipped_count: int
+    items: list[AutoApplyQueueItemRead]
+
+
+class AutoApplyQueueRunRead(BaseModel):
+    """Read model for one queue-run batch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_profile_slug: str
+    requested_limit: int
+    processed_count: int
+    succeeded_count: int
+    failed_count: int
+    retried_count: int
+    items: list[AutoApplyQueueItemRead]
+
+
 class DraftLinkedInQuestionRead(BaseModel):
     """Read model for one extracted LinkedIn question widget."""
 

@@ -30,10 +30,11 @@
 - `bfe7449`: Prompt registry/replay compatibility API surfaces (`/api/model-calls/prompts`, `/api/model-calls/replay-compatibility`).
 - `ee03698`: Replay-capable job materialization endpoints for enrichment/scoring with prompt guardrails.
 - `33759f3`: CLI replay parity for `enrich-job` and `score-job` with prompt-version pass-through.
-- `in-progress`: CLI prompt-governance commands for registry listing and replay compatibility checks.
+- `ad9a239`: CLI prompt-governance commands for registry listing and replay compatibility checks.
+- `in-progress`: durable auto-apply queue orchestration + automation-safe draft bootstrap reuse.
 
 ### Validation Baseline
-- Full suite green at latest checkpoint: `230 passed`.
+- Full suite green at latest checkpoint: `232 passed`.
 
 ### Graphify Snapshot Update (latest)
 - Re-ran `graphify update .` after prompt API/schema changes.

@@ -129,6 +129,29 @@ def test_bootstrap_draft_application_attempt_creates_application_attempt_and_eve
     assert event.event_type == "draft_attempt_bootstrapped"
 
 
+def test_bootstrap_draft_application_attempt_reuses_existing_active_attempt(tmp_path: Path):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+
+    first = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        reuse_existing_active_attempt=True,
+    )
+    second = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        reuse_existing_active_attempt=True,
+    )
+
+    attempts = session.query(models.ApplicationAttempt).all()
+    assert len(attempts) == 1
+    assert first.attempt_id == second.attempt_id
+    assert second.event_id != first.event_id
+
+
 def test_bootstrap_draft_application_attempt_rejects_missing_or_not_ready_eligibility(tmp_path: Path):
     session = make_session()
     candidate = CandidateProfile(name="Alex Doe", slug="alex-doe")

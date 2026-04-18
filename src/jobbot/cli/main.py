@@ -50,6 +50,11 @@ from jobbot.execution.service import (
 )
 from jobbot.execution.linkedin import build_linkedin_assist_plan, extract_linkedin_question_widgets
 from jobbot.execution.linkedin import evaluate_linkedin_guarded_submit_criteria
+from jobbot.execution.auto_apply import (
+    enqueue_auto_apply_jobs,
+    list_auto_apply_queue_items,
+    run_auto_apply_queue,
+)
 from jobbot.discovery.inbox import list_inbox_jobs, list_ready_to_apply_jobs
 from jobbot.enrichment.service import enrich_job
 from jobbot.models.enums import BrowserProfileType, ReviewStatus, SessionHealth
@@ -431,6 +436,112 @@ def list_ready_to_apply_cmd(
         )
 
     console.print(table)
+
+
+@app.command("enqueue-auto-apply")
+def enqueue_auto_apply_cmd(
+    candidate_profile: str = typer.Option(..., "--candidate-profile"),
+    job_ids: list[int] = typer.Option(..., "--job-id"),
+    priority: int = typer.Option(100, "--priority", min=1, max=1000),
+    max_attempts: int = typer.Option(3, "--max-attempts", min=1, max=10),
+) -> None:
+    """Enqueue jobs into the durable auto-apply queue."""
+
+    session = SessionLocal()
+    try:
+        result = enqueue_auto_apply_jobs(
+            session,
+            candidate_profile_slug=candidate_profile,
+            job_ids=job_ids,
+            priority=priority,
+            max_attempts=max_attempts,
+        )
+    except ValueError as exc:
+        session.close()
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        session.close()
+
+    console.print(
+        "[green]Auto-apply queued:[/green] "
+        f"queued={result.queued_count} requeued={result.requeued_count} skipped={result.skipped_count}"
+    )
+
+
+@app.command("list-auto-apply-queue")
+def list_auto_apply_queue_cmd(
+    candidate_profile: str = typer.Option(..., "--candidate-profile"),
+    limit: int = typer.Option(100, "--limit", min=1, max=500),
+) -> None:
+    """List durable auto-apply queue items for one candidate."""
+
+    session = SessionLocal()
+    try:
+        rows = list_auto_apply_queue_items(
+            session,
+            candidate_profile_slug=candidate_profile,
+            limit=limit,
+        )
+    except ValueError as exc:
+        session.close()
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        session.close()
+
+    table = Table(title="Auto-Apply Queue", show_header=True, header_style="bold cyan")
+    table.add_column("Queue", justify="right")
+    table.add_column("Job", justify="right")
+    table.add_column("Status")
+    table.add_column("Priority", justify="right")
+    table.add_column("Attempts", justify="right")
+    table.add_column("Next Attempt")
+    table.add_column("Error")
+
+    for row in rows:
+        table.add_row(
+            str(row.queue_id),
+            str(row.job_id),
+            row.status,
+            str(row.priority),
+            f"{row.attempt_count}/{row.max_attempts}",
+            "" if row.next_attempt_at is None else str(row.next_attempt_at),
+            row.last_error_code or "",
+        )
+
+    console.print(table)
+
+
+@app.command("run-auto-apply-queue")
+def run_auto_apply_queue_cmd(
+    candidate_profile: str = typer.Option(..., "--candidate-profile"),
+    browser_profile_key: str | None = typer.Option(None, "--browser-profile-key"),
+    limit: int = typer.Option(10, "--limit", min=1, max=200),
+    lease_seconds: int = typer.Option(300, "--lease-seconds", min=30, max=3600),
+) -> None:
+    """Run a bounded auto-apply queue drain pass."""
+
+    session = SessionLocal()
+    try:
+        result = run_auto_apply_queue(
+            session,
+            candidate_profile_slug=candidate_profile,
+            browser_profile_key=browser_profile_key,
+            limit=limit,
+            lease_seconds=lease_seconds,
+        )
+    except ValueError as exc:
+        session.close()
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        session.close()
+
+    console.print(
+        "[green]Auto-apply run completed:[/green] "
+        f"processed={result.processed_count} "
+        f"succeeded={result.succeeded_count} "
+        f"failed={result.failed_count} "
+        f"retried={result.retried_count}"
+    )
 
 
 @app.command("materialize-eligibility")

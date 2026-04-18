@@ -1,6 +1,9 @@
 """Execution workflow exports."""
 
 from jobbot.execution.schemas import (
+    AutoApplyEnqueueRead,
+    AutoApplyQueueItemRead,
+    AutoApplyQueueRunRead,
     DraftApplicationAttemptRead,
     DraftExecutionArtifactRead,
     DraftExecutionArtifactDetailRead,
@@ -29,6 +32,11 @@ from jobbot.execution.schemas import (
     DraftLinkedInAssistFieldRead,
     DraftLinkedInAssistPlanRead,
     DraftLinkedInGuardedSubmitCriteriaRead,
+)
+from jobbot.execution.auto_apply import (
+    enqueue_auto_apply_jobs,
+    list_auto_apply_queue_items,
+    run_auto_apply_queue,
 )
 from jobbot.execution.linkedin import (
     build_linkedin_assist_plan,
@@ -65,6 +73,9 @@ from jobbot.execution.service import (
 )
 
 __all__ = [
+    "AutoApplyEnqueueRead",
+    "AutoApplyQueueItemRead",
+    "AutoApplyQueueRunRead",
     "DraftApplicationAttemptRead",
     "DraftExecutionArtifactRead",
     "DraftExecutionArtifactDetailRead",
@@ -96,6 +107,7 @@ __all__ = [
     "extract_linkedin_question_widgets",
     "build_linkedin_assist_plan",
     "evaluate_linkedin_guarded_submit_criteria",
+    "enqueue_auto_apply_jobs",
     "bootstrap_draft_application_attempt",
     "build_draft_field_plan",
     "build_site_field_overlay",
@@ -113,6 +125,7 @@ __all__ = [
     "list_execution_dashboard_bulk_history",
     "list_execution_dashboard_bulk_history_reads",
     "list_execution_overview",
+    "list_auto_apply_queue_items",
     "prune_execution_dashboard_bulk_history",
     "set_execution_dashboard_bulk_history_limit",
     "list_draft_application_attempts",
@@ -120,6 +133,7 @@ __all__ = [
     "record_execution_dashboard_bulk_history",
     "replay_execution_dashboard_bulk_history_by_id",
     "run_dashboard_bulk_submit_remediation",
+    "run_auto_apply_queue",
     "run_submit_remediation_action",
     "start_draft_execution_attempt",
 ]

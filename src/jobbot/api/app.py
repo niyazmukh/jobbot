@@ -6,7 +6,7 @@ from html import escape
 from typing import Annotated
 from urllib.parse import parse_qsl, quote, urlencode
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
@@ -23,6 +23,9 @@ from jobbot.eligibility import (
     materialize_application_eligibility,
 )
 from jobbot.execution import (
+    AutoApplyEnqueueRead,
+    AutoApplyQueueItemRead,
+    AutoApplyQueueRunRead,
     DraftApplicationAttemptRead,
     DraftExecutionArtifactDetailRead,
     DraftExecutionDashboardRead,
@@ -52,6 +55,7 @@ from jobbot.execution import (
     evaluate_linkedin_guarded_submit_criteria_for_attempt,
     extract_linkedin_question_widgets,
     evaluate_submit_gate,
+    enqueue_auto_apply_jobs,
     get_execution_artifact_detail,
     get_execution_artifact_file,
     get_execution_dashboard_bulk_history_limit,
@@ -61,6 +65,7 @@ from jobbot.execution import (
     get_execution_replay_bundle,
     list_execution_dashboard_bulk_history_reads,
     list_execution_overview,
+    list_auto_apply_queue_items,
     list_draft_application_attempts,
     open_site_target_page,
     prune_execution_dashboard_bulk_history,
@@ -68,6 +73,7 @@ from jobbot.execution import (
     set_execution_dashboard_bulk_history_limit,
     replay_execution_dashboard_bulk_history_by_id,
     run_dashboard_bulk_submit_remediation,
+    run_auto_apply_queue,
     run_submit_remediation_action,
     start_draft_execution_attempt,
 )
@@ -1050,6 +1056,86 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             if str(exc) == "candidate_profile_not_found":
                 raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
+            raise
+
+    @app.post(
+        "/api/auto-apply/{candidate_profile_slug}/enqueue",
+        response_model=AutoApplyEnqueueRead,
+    )
+    def enqueue_auto_apply_endpoint(
+        candidate_profile_slug: str,
+        db: DbSession,
+        job_ids: Annotated[list[int], Body(embed=True)],
+        priority: Annotated[int, Query(ge=1, le=1000)] = 100,
+        max_attempts: Annotated[int, Query(ge=1, le=10)] = 3,
+    ) -> AutoApplyEnqueueRead:
+        """Enqueue candidate jobs into the durable auto-apply queue."""
+
+        try:
+            return enqueue_auto_apply_jobs(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                job_ids=job_ids,
+                priority=priority,
+                max_attempts=max_attempts,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail=detail) from exc
+            if detail == "invalid_max_attempts":
+                raise HTTPException(status_code=400, detail=detail) from exc
+            raise
+
+    @app.get(
+        "/api/auto-apply/{candidate_profile_slug}/queue",
+        response_model=list[AutoApplyQueueItemRead],
+    )
+    def list_auto_apply_queue_endpoint(
+        candidate_profile_slug: str,
+        db: DbSession,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> list[AutoApplyQueueItemRead]:
+        """List durable auto-apply queue rows for one candidate."""
+
+        try:
+            return list_auto_apply_queue_items(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                limit=limit,
+            )
+        except ValueError as exc:
+            if str(exc) == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
+            raise
+
+    @app.post(
+        "/api/auto-apply/{candidate_profile_slug}/run",
+        response_model=AutoApplyQueueRunRead,
+    )
+    def run_auto_apply_queue_endpoint(
+        candidate_profile_slug: str,
+        db: DbSession,
+        browser_profile_key: str | None = None,
+        limit: Annotated[int, Query(ge=1, le=200)] = 10,
+        lease_seconds: Annotated[int, Query(ge=30, le=3600)] = 300,
+    ) -> AutoApplyQueueRunRead:
+        """Run a bounded auto-apply queue drain pass for one candidate."""
+
+        try:
+            return run_auto_apply_queue(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                browser_profile_key=browser_profile_key,
+                limit=limit,
+                lease_seconds=lease_seconds,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail=detail) from exc
+            if detail == "invalid_lease_seconds":
+                raise HTTPException(status_code=400, detail=detail) from exc
             raise
 
     @app.get("/api/eligibility/jobs/{job_id}/{candidate_profile_slug}", response_model=ApplicationEligibilityRead)

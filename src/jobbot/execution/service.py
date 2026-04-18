@@ -89,6 +89,7 @@ def bootstrap_draft_application_attempt(
     job_id: int,
     candidate_profile_slug: str,
     browser_profile_key: str | None = None,
+    reuse_existing_active_attempt: bool = False,
 ) -> DraftApplicationAttemptRead:
     """Create a draft application attempt from a persisted ready-to-apply snapshot."""
 
@@ -149,6 +150,63 @@ def bootstrap_draft_application_attempt(
             application.current_state = ApplicationState.PREPARED.value
         application.updated_at = now
         session.flush()
+
+    if reuse_existing_active_attempt:
+        existing_active_attempt = session.scalar(
+            select(ApplicationAttempt)
+            .where(
+                ApplicationAttempt.application_id == application.id,
+                ApplicationAttempt.mode == ApplicationMode.DRAFT,
+                ApplicationAttempt.ended_at.is_(None),
+            )
+            .order_by(ApplicationAttempt.started_at.desc(), ApplicationAttempt.id.desc())
+        )
+        if existing_active_attempt is not None:
+            reuse_event = ApplicationEvent(
+                application_id=application.id,
+                attempt_id=existing_active_attempt.id,
+                event_type="draft_attempt_reused",
+                message="Existing active draft attempt reused for idempotent bootstrap.",
+                payload={
+                    "job_id": job_id,
+                    "candidate_profile_slug": candidate_profile_slug,
+                    "readiness_state": eligibility.readiness_state,
+                    "ready": eligibility.ready,
+                    "reasons": list(eligibility.reasons or []),
+                    "browser_profile_key": existing_active_attempt.browser_profile_key,
+                    "existing_attempt_id": existing_active_attempt.id,
+                },
+                created_at=now,
+            )
+            session.add(reuse_event)
+            session.flush()
+            if application.last_attempt_id != existing_active_attempt.id:
+                application.last_attempt_id = existing_active_attempt.id
+                application.updated_at = now
+            session.commit()
+            session.refresh(application)
+            session.refresh(existing_active_attempt)
+            session.refresh(reuse_event)
+            return DraftApplicationAttemptRead(
+                application_id=application.id,
+                attempt_id=existing_active_attempt.id,
+                event_id=reuse_event.id,
+                job_id=job_id,
+                candidate_profile_slug=candidate_profile_slug,
+                application_state=application.current_state,
+                attempt_mode=existing_active_attempt.mode.value,
+                browser_profile_key=existing_active_attempt.browser_profile_key,
+                session_health=existing_active_attempt.session_health,
+                attempt_result=existing_active_attempt.result,
+                failure_code=existing_active_attempt.failure_code,
+                submit_confidence=existing_active_attempt.submit_confidence,
+                notes=existing_active_attempt.notes,
+                readiness_state=eligibility.readiness_state,
+                ready=eligibility.ready,
+                reasons=list(eligibility.reasons or []),
+                created_application=created_application,
+                started_at=existing_active_attempt.started_at,
+            )
 
     attempt = ApplicationAttempt(
         application_id=application.id,
