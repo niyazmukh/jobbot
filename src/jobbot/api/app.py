@@ -227,6 +227,7 @@ def create_app() -> FastAPI:
         sort_by: str = "started_at",
         descending: bool = True,
         limit: Annotated[int, Query(ge=1, le=50)] = 10,
+        history_sort: str = "newest",
         bulk_requested: Annotated[int | None, Query(ge=0)] = None,
         bulk_remediated: Annotated[int | None, Query(ge=0)] = None,
         bulk_failed: Annotated[int | None, Query(ge=0)] = None,
@@ -250,6 +251,7 @@ def create_app() -> FastAPI:
             history = list_execution_dashboard_bulk_history(
                 db,
                 candidate_profile_slug=candidate_profile_slug,
+                history_sort=history_sort,
                 limit=5,
             )
         except ValueError as exc:
@@ -257,6 +259,8 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
             if str(exc) == "invalid_execution_overview_sort":
                 raise HTTPException(status_code=400, detail="invalid_execution_overview_sort") from exc
+            if str(exc) == "invalid_execution_dashboard_history_sort":
+                raise HTTPException(status_code=400, detail="invalid_execution_dashboard_history_sort") from exc
             raise
         return HTMLResponse(
             _render_execution_dashboard_page(
@@ -267,6 +271,7 @@ def create_app() -> FastAPI:
                 bulk_first_failure_attempt=bulk_first_failure_attempt,
                 bulk_first_failure_code=bulk_first_failure_code,
                 bulk_history=history,
+                history_sort=history_sort,
             )
         )
 
@@ -1842,6 +1847,7 @@ def _render_execution_dashboard_page(
     bulk_first_failure_attempt: int | None = None,
     bulk_first_failure_code: str | None = None,
     bulk_history: list[dict] | None = None,
+    history_sort: str = "newest",
 ) -> str:
     """Render a candidate-scoped execution dashboard page."""
 
@@ -1952,6 +1958,13 @@ def _render_execution_dashboard_page(
     history_rows = list(bulk_history or [])
     bulk_history_html = ""
     if history_rows:
+        history_sort_controls = (
+            "<div><small>Sort history: "
+            f"<a href='/execution/dashboard/{escape(detail.candidate_profile_slug)}?history_sort=newest'>Newest</a> | "
+            f"<a href='/execution/dashboard/{escape(detail.candidate_profile_slug)}?history_sort=failed_desc'>Most failed</a> | "
+            f"<a href='/execution/dashboard/{escape(detail.candidate_profile_slug)}?history_sort=oldest'>Oldest</a>"
+            "</small></div>"
+        )
         history_items = []
         for row in history_rows:
             summary = (
@@ -1967,6 +1980,17 @@ def _render_execution_dashboard_page(
             if row.get("manual_review_only"):
                 scopes.append("manual_review_only=true")
             scope_line = f"<br><small>{escape(' | '.join(scopes))}</small>" if scopes else ""
+            recorded_line = (
+                f"<br><small>Recorded: {escape(str(row.get('created_at') or 'unknown'))}</small>"
+            )
+            first_failure_line = ""
+            if row.get("first_failure_attempt_id") is not None and row.get("first_failure_code"):
+                first_failure_line = (
+                    "<br><small>"
+                    f"First failure: attempt #{int(row['first_failure_attempt_id'])} "
+                    f"({escape(str(row['first_failure_code']))})"
+                    "</small>"
+                )
             rerun_params: list[tuple[str, str]] = []
             if row.get("failure_code"):
                 rerun_params.append(("failure_code", str(row["failure_code"])))
@@ -1982,7 +2006,7 @@ def _render_execution_dashboard_page(
             rerun_route = f"{base_bulk_route}?{urlencode(rerun_params)}"
             history_items.append(
                 "<li>"
-                f"{escape(summary)}{scope_line}"
+                f"{escape(summary)}{scope_line}{recorded_line}{first_failure_line}"
                 f"<br><form method='post' action='{escape(rerun_route)}'>"
                 "<button type='submit'>Re-run scope</button>"
                 "</form>"
@@ -1991,6 +2015,7 @@ def _render_execution_dashboard_page(
         bulk_history_html = (
             "<section class='panel'>"
             "<h2>Bulk Remediation History</h2>"
+            f"{history_sort_controls}"
             f"<ul>{''.join(history_items)}</ul>"
             "</section>"
         )

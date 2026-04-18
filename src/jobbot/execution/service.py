@@ -2401,6 +2401,7 @@ def list_execution_dashboard_bulk_history(
     session: Session,
     *,
     candidate_profile_slug: str,
+    history_sort: str = "newest",
     limit: int = 5,
 ) -> list[dict]:
     """Return persisted candidate-scoped dashboard bulk-remediation history entries."""
@@ -2411,6 +2412,14 @@ def list_execution_dashboard_bulk_history(
     if candidate is None:
         raise ValueError("candidate_profile_not_found")
     history = list((candidate.source_profile_data or {}).get("execution_dashboard_bulk_history") or [])
+    if history_sort == "newest":
+        history.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    elif history_sort == "oldest":
+        history.sort(key=lambda item: str(item.get("created_at") or ""))
+    elif history_sort == "failed_desc":
+        history.sort(key=lambda item: int(item.get("failed_count") or 0), reverse=True)
+    else:
+        raise ValueError("invalid_execution_dashboard_history_sort")
     return history[:limit]
 
 

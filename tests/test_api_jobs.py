@@ -3776,3 +3776,99 @@ def test_execution_dashboard_html_persists_bulk_remediation_history():
         "/execution/dashboard/alex-doe/bulk-remediate-submit?manual_review_only=true&amp;limit=3&amp;sort_by=started_at&amp;descending=true"
         in response.text
     )
+
+
+def test_execution_dashboard_html_history_supports_sort_and_metadata():
+    session = make_session()
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={"email": "alex@example.com"},
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={
+            "resume_path": "/profiles/alex-doe/resume.pdf",
+            "execution_dashboard_bulk_history": [
+                {
+                    "created_at": "2026-04-18T09:00:00+00:00",
+                    "requested_count": 5,
+                    "remediated_count": 2,
+                    "failed_count": 3,
+                    "manual_review_only": True,
+                    "limit": 5,
+                    "sort_by": "started_at",
+                    "descending": True,
+                    "first_failure_attempt_id": 101,
+                    "first_failure_code": "draft_field_plan_not_created",
+                },
+                {
+                    "created_at": "2026-04-18T10:00:00+00:00",
+                    "requested_count": 4,
+                    "remediated_count": 3,
+                    "failed_count": 1,
+                    "failure_code": "submit_gate_blocked",
+                    "limit": 4,
+                    "sort_by": "started_at",
+                    "descending": True,
+                    "first_failure_attempt_id": 77,
+                    "first_failure_code": "browser_profile_not_ready_for_application",
+                },
+            ],
+        },
+    )
+    session.add(candidate)
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.get("/execution/dashboard/alex-doe?history_sort=failed_desc")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    assert "Bulk Remediation History" in response.text
+    assert "Recorded: 2026-04-18T09:00:00+00:00" in response.text
+    assert "First failure: attempt #101 (draft_field_plan_not_created)" in response.text
+    assert "Sort history" in response.text
+    assert "history_sort=failed_desc" in response.text
+    assert "history_sort=newest" in response.text
+    assert response.text.index("targeted=5 | remediated=2 | failed=3") < response.text.index(
+        "targeted=4 | remediated=3 | failed=1"
+    )
+
+
+def test_execution_dashboard_history_rejects_invalid_sort():
+    session = make_session()
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={"email": "alex@example.com"},
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.get("/execution/dashboard/alex-doe?history_sort=not_valid")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "invalid_execution_dashboard_history_sort"
