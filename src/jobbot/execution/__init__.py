@@ -8,6 +8,7 @@ from jobbot.execution.schemas import (
     DraftExecutionAttemptDetailRead,
     DraftExecutionEventRead,
     DraftGuardedSubmitRead,
+    DraftSubmitRemediationBatchRead,
     DraftSubmitRemediationActionRead,
     DraftExecutionOverviewRead,
     DraftExecutionReplayAssetRead,
@@ -36,6 +37,7 @@ from jobbot.execution.service import (
     list_execution_overview,
     list_draft_application_attempts,
     open_site_target_page,
+    run_dashboard_bulk_submit_remediation,
     run_submit_remediation_action,
     start_draft_execution_attempt,
 )
@@ -48,6 +50,7 @@ __all__ = [
     "DraftExecutionAttemptDetailRead",
     "DraftExecutionEventRead",
     "DraftGuardedSubmitRead",
+    "DraftSubmitRemediationBatchRead",
     "DraftSubmitRemediationActionRead",
     "DraftExecutionOverviewRead",
     "DraftExecutionReplayAssetRead",
@@ -74,6 +77,7 @@ __all__ = [
     "list_execution_overview",
     "list_draft_application_attempts",
     "open_site_target_page",
+    "run_dashboard_bulk_submit_remediation",
     "run_submit_remediation_action",
     "start_draft_execution_attempt",
 ]

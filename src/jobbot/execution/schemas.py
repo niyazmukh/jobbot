@@ -431,3 +431,15 @@ class DraftSubmitRemediationActionRead(BaseModel):
     final_failure_classification: str | None = None
     detail_route: str
     replay_route: str
+
+
+class DraftSubmitRemediationBatchRead(BaseModel):
+    """Read model for dashboard-scoped bulk submit-remediation actions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_profile_slug: str
+    requested_count: int
+    remediated_count: int
+    targeted_attempt_ids: list[int]
+    results: list[DraftSubmitRemediationActionRead]

@@ -25,6 +25,7 @@ from jobbot.execution import (
     DraftExecutionOverviewRead,
     DraftExecutionReplayBundleRead,
     DraftGuardedSubmitRead,
+    DraftSubmitRemediationBatchRead,
     DraftSubmitRemediationActionRead,
     DraftExecutionStartupRead,
     DraftFieldPlanRead,
@@ -45,6 +46,7 @@ from jobbot.execution import (
     list_execution_overview,
     list_draft_application_attempts,
     open_site_target_page,
+    run_dashboard_bulk_submit_remediation,
     run_submit_remediation_action,
     start_draft_execution_attempt,
 )
@@ -217,6 +219,7 @@ def create_app() -> FastAPI:
         db: DbSession,
         manual_review_only: bool = False,
         failure_code: str | None = None,
+        failure_classification: str | None = None,
         max_submit_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
         sort_by: str = "started_at",
         descending: bool = True,
@@ -230,6 +233,7 @@ def create_app() -> FastAPI:
                 candidate_profile_slug=candidate_profile_slug,
                 manual_review_only=manual_review_only,
                 failure_code=failure_code,
+                failure_classification=failure_classification,
                 max_submit_confidence=max_submit_confidence,
                 sort_by=sort_by,
                 descending=descending,
@@ -242,6 +246,43 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=400, detail="invalid_execution_overview_sort") from exc
             raise
         return HTMLResponse(_render_execution_dashboard_page(detail))
+
+    @app.post(
+        "/execution/dashboard/{candidate_profile_slug}/bulk-remediate-submit",
+        response_class=RedirectResponse,
+    )
+    def execution_dashboard_bulk_remediation_page(
+        candidate_profile_slug: str,
+        db: DbSession,
+        manual_review_only: bool = False,
+        failure_code: str | None = None,
+        failure_classification: str | None = None,
+        max_submit_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
+        sort_by: str = "started_at",
+        descending: bool = True,
+        limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    ) -> RedirectResponse:
+        """Run dashboard-scoped bulk submit remediation and return to dashboard."""
+
+        try:
+            run_dashboard_bulk_submit_remediation(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                manual_review_only=manual_review_only,
+                failure_code=failure_code,
+                failure_classification=failure_classification,
+                max_submit_confidence=max_submit_confidence,
+                sort_by=sort_by,
+                descending=descending,
+                limit=limit,
+            )
+        except ValueError as exc:
+            if str(exc) == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
+            if str(exc) == "invalid_execution_overview_sort":
+                raise HTTPException(status_code=400, detail="invalid_execution_overview_sort") from exc
+            raise
+        return RedirectResponse(url=f"/execution/dashboard/{candidate_profile_slug}", status_code=303)
 
     @app.get("/execution/attempts/{attempt_id}", response_class=HTMLResponse)
     def execution_attempt_detail_page(
@@ -669,6 +710,42 @@ def create_app() -> FastAPI:
 
         try:
             return get_execution_dashboard(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                manual_review_only=manual_review_only,
+                failure_code=failure_code,
+                failure_classification=failure_classification,
+                max_submit_confidence=max_submit_confidence,
+                sort_by=sort_by,
+                descending=descending,
+                limit=limit,
+            )
+        except ValueError as exc:
+            if str(exc) == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
+            if str(exc) == "invalid_execution_overview_sort":
+                raise HTTPException(status_code=400, detail="invalid_execution_overview_sort") from exc
+            raise
+
+    @app.post(
+        "/api/execution/dashboard/{candidate_profile_slug}/bulk-remediate-submit",
+        response_model=DraftSubmitRemediationBatchRead,
+    )
+    def execution_dashboard_bulk_remediation_endpoint(
+        candidate_profile_slug: str,
+        db: DbSession,
+        manual_review_only: bool = False,
+        failure_code: str | None = None,
+        failure_classification: str | None = None,
+        max_submit_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
+        sort_by: str = "started_at",
+        descending: bool = True,
+        limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    ) -> DraftSubmitRemediationBatchRead:
+        """Run bulk deterministic submit remediations for dashboard-scoped blocked attempts."""
+
+        try:
+            return run_dashboard_bulk_submit_remediation(
                 db,
                 candidate_profile_slug=candidate_profile_slug,
                 manual_review_only=manual_review_only,
@@ -1821,6 +1898,12 @@ def _render_execution_dashboard_page(detail: DraftExecutionDashboardRead) -> str
         <h1>Execution Dashboard</h1>
         <div>Candidate: {escape(detail.candidate_profile_slug)}</div>
         <div><a href="/execution/overview/{escape(detail.candidate_profile_slug)}">Open execution overview</a></div>
+      </section>
+      <section class="panel">
+        <h2>Bulk Remediation</h2>
+        <form method="post" action="/execution/dashboard/{escape(detail.candidate_profile_slug)}/bulk-remediate-submit">
+          <button type="submit">Run bulk submit remediation for blocked attempts</button>
+        </form>
       </section>
       <section class="grid">{metric_cards}</section>
       <section class="panel">

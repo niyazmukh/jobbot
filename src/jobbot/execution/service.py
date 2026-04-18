@@ -37,6 +37,7 @@ from jobbot.execution.schemas import (
     DraftExecutionAttemptDetailRead,
     DraftExecutionEventRead,
     DraftGuardedSubmitRead,
+    DraftSubmitRemediationBatchRead,
     DraftSubmitRemediationActionRead,
     DraftExecutionOverviewRead,
     DraftExecutionReplayAssetRead,
@@ -2290,6 +2291,46 @@ def run_submit_remediation_action(
         final_failure_classification=final_detail.failure_classification,
         detail_route=f"/execution/attempts/{remediated_attempt_id}",
         replay_route=f"/execution/replay/{remediated_attempt_id}",
+    )
+
+
+def run_dashboard_bulk_submit_remediation(
+    session: Session,
+    *,
+    candidate_profile_slug: str,
+    manual_review_only: bool = False,
+    failure_code: str | None = None,
+    failure_classification: str | None = None,
+    max_submit_confidence: float | None = None,
+    sort_by: str = "started_at",
+    descending: bool = True,
+    limit: int = 25,
+) -> DraftSubmitRemediationBatchRead:
+    """Run submit-remediation replays for dashboard-scoped blocked attempts."""
+
+    rows = list_execution_overview(
+        session,
+        candidate_profile_slug=candidate_profile_slug,
+        blocked_only=True,
+        manual_review_only=manual_review_only,
+        failure_code=failure_code,
+        failure_classification=failure_classification,
+        max_submit_confidence=max_submit_confidence,
+        sort_by=sort_by,
+        descending=descending,
+        limit=limit,
+    )
+    targeted_attempt_ids = [row.attempt_id for row in rows]
+    results = [
+        run_submit_remediation_action(session, attempt_id=attempt_id)
+        for attempt_id in targeted_attempt_ids
+    ]
+    return DraftSubmitRemediationBatchRead(
+        candidate_profile_slug=candidate_profile_slug,
+        requested_count=len(targeted_attempt_ids),
+        remediated_count=len(results),
+        targeted_attempt_ids=targeted_attempt_ids,
+        results=results,
     )
 
 

@@ -138,7 +138,9 @@
 - Fixed guarded submit stop-reason classification so unresolved manual-review fields remain explicit `manual_review_required:*` blockers.
 - Fixed execution bootstrap/dashboard state handling so blocked applications preserve `review` state across later draft attempts and dashboard review counts aggregate by application instead of double-counting attempts.
 - Tightened deterministic enrichment/scoring rules for preferred-skill extraction and location mismatch detection.
-- Brought the scoped JobBot test suite to green in `.venv` with `150 passed`.
+- Added dashboard-scoped bulk submit remediation orchestration (`/api/execution/dashboard/{candidate_profile_slug}/bulk-remediate-submit`) with deterministic blocked-attempt targeting and failure/classification/confidence filters.
+- Added matching HTML dashboard bulk-remediation trigger route and action panel for operator-facing batch replay from dashboard surfaces.
+- Brought the scoped JobBot test suite to green in `.venv` with `152 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.
@@ -158,7 +160,7 @@
 ## Next Tasks
 1. Promote the replay bundle and dashboard into a broader multi-ATS execution control center once multiple handlers exist.
 2. Tighten guarded-submit interaction policies from simulated fallback toward stricter browser-executed submit evidence as profile/session reliability instrumentation improves.
-3. Add dashboard-level bulk remediation replay actions with classification/failure-code scoping for batched operator recovery loops.
+3. Add resilient bulk-remediation partial-failure reporting (per-attempt error capture + continuation) so one failed replay does not abort the whole batch.
 
 ## Decisions
 - New implementation lives in `src/jobbot/` instead of modifying existing bot repos.
