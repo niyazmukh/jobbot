@@ -5,7 +5,7 @@
 - Overall status: `in_progress`
 - Implementation mode: `local-first, deterministic-first`
 - Primary spec: `FINAL_JOB_BOT_PRD.md`
-- Latest validation: `218 passed` (`.venv\\Scripts\\python -m pytest -q`)
+- Latest validation: `220 passed` (`.venv\\Scripts\\python -m pytest -q`)
 
 ## Completed
 - Created persistent roadmap and ADR structure.
@@ -214,6 +214,10 @@
   - Layer 3: normalized company/title/location tuple matching (existing deterministic fingerprint path).
   - Layer 4: deterministic fuzzy candidate matching (token similarity over title/company with conservative confirmation via metadata overlap or exact location).
   - Added ingestion regressions for ATS external-id attachment, fuzzy positive attachment, and fuzzy false-positive protection.
+- Wired real model-call telemetry into a scoring model-pass path:
+  - Added optional scoring model-pass hook with telemetry recording (`stage=scoring`) while preserving deterministic score output behavior.
+  - Enforced prompt-version contract for scoring via prompt registry (`score_v1`) and replay compatibility checks.
+  - Added scoring tests for model-call persistence and incompatible replay prompt rejection.
 - Extended model-call dashboard telemetry with blocked-call visibility:
   - `blocked_non_essential_call_count`
   - `blocked_non_essential_stage_counts`
@@ -231,6 +235,7 @@
 - Brought the scoped JobBot test suite to green in `.venv` with `210 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `215 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `218 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `220 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.

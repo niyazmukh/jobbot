@@ -2,15 +2,44 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import time
+from typing import Callable
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from jobbot.db.models import CandidateFact, CandidateProfile, Job, JobScore, utcnow
+from jobbot.model_calls import (
+    assert_prompt_replay_compatible,
+    get_prompt_version,
+    record_model_call,
+)
 from jobbot.models.enums import ApplicationState
 from jobbot.scoring.schemas import JobScoreRead, JobScoreResult
 
 
-def score_job_for_candidate(session: Session, job_id: int, candidate_profile_slug: str) -> JobScore:
+@dataclass(frozen=True)
+class ScoringModelPassResult:
+    """Optional model-pass metadata used for telemetry-only instrumentation."""
+
+    provider: str
+    model_name: str
+    output_size: int | None = None
+    estimated_cost: float | None = None
+
+
+ScoringModelPass = Callable[[Job, CandidateProfile, list[CandidateFact], str], ScoringModelPassResult]
+
+
+def score_job_for_candidate(
+    session: Session,
+    job_id: int,
+    candidate_profile_slug: str,
+    *,
+    scoring_model_pass: ScoringModelPass | None = None,
+    replay_prompt_version: str | None = None,
+) -> JobScore:
     """Compute and persist a deterministic fit score for a candidate/job pair."""
 
     job = session.scalar(select(Job).where(Job.id == job_id))
@@ -28,6 +57,22 @@ def score_job_for_candidate(session: Session, job_id: int, candidate_profile_slu
             select(CandidateFact).where(CandidateFact.candidate_profile_id == candidate.id)
         ).all()
     )
+
+    prompt_version = get_prompt_version("scoring_fit_eval")
+    if replay_prompt_version is not None:
+        assert_prompt_replay_compatible(prompt_version, replay_prompt_version)
+        prompt_version = replay_prompt_version
+
+    if scoring_model_pass is not None:
+        _record_scoring_model_pass(
+            session,
+            job=job,
+            candidate=candidate,
+            facts=facts,
+            prompt_version=prompt_version,
+            scoring_model_pass=scoring_model_pass,
+        )
+
     result = _score(job, candidate, facts)
 
     score_row = session.scalar(
@@ -53,6 +98,49 @@ def score_job_for_candidate(session: Session, job_id: int, candidate_profile_slu
     session.commit()
     session.refresh(score_row)
     return score_row
+
+
+def _record_scoring_model_pass(
+    session: Session,
+    *,
+    job: Job,
+    candidate: CandidateProfile,
+    facts: list[CandidateFact],
+    prompt_version: str,
+    scoring_model_pass: ScoringModelPass,
+) -> None:
+    """Record model-call telemetry for a scoring model pass invocation."""
+
+    start = time.perf_counter()
+    result = scoring_model_pass(job, candidate, facts, prompt_version)
+    latency_ms = int((time.perf_counter() - start) * 1000)
+    input_size = _estimate_scoring_input_size(job=job, candidate=candidate, facts=facts)
+    record_model_call(
+        session,
+        stage="scoring",
+        model_provider=result.provider,
+        model_name=result.model_name,
+        prompt_version=prompt_version,
+        linked_entity_id=job.id,
+        input_size=input_size,
+        output_size=result.output_size,
+        latency_ms=latency_ms,
+        estimated_cost=result.estimated_cost,
+    )
+
+
+def _estimate_scoring_input_size(*, job: Job, candidate: CandidateProfile, facts: list[CandidateFact]) -> int:
+    """Estimate scoring prompt input size deterministically using text length."""
+
+    joined = " ".join(
+        [
+            str(job.title),
+            str(job.description_text or job.description_raw or ""),
+            str(candidate.name),
+            *[str(fact.content) for fact in facts],
+        ]
+    )
+    return len(joined)
 
 
 def get_job_score_for_candidate(
