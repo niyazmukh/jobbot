@@ -53,6 +53,7 @@ from jobbot.execution.linkedin import evaluate_linkedin_guarded_submit_criteria
 from jobbot.discovery.inbox import list_inbox_jobs, list_ready_to_apply_jobs
 from jobbot.enrichment.service import enrich_job
 from jobbot.models.enums import BrowserProfileType, ReviewStatus, SessionHealth
+from jobbot.model_calls import is_prompt_replay_compatible, list_prompt_registry
 from jobbot.preparation.service import prepare_job_for_candidate
 from jobbot.profiles.schemas import CandidateProfileImport
 from jobbot.profiles.service import import_candidate_profile
@@ -73,6 +74,42 @@ def doctor() -> None:
     console.print(f"Artifacts: {settings.artifacts_dir}")
     console.print(f"Browser profiles: {settings.browser_profiles_dir}")
     console.print(f"Auto-submit threshold: {settings.auto_submit_threshold}")
+
+
+@app.command("list-prompt-registry")
+def list_prompt_registry_cmd() -> None:
+    """List registered prompt keys and stable version ids."""
+
+    rows = list_prompt_registry()
+    table = Table(title="Prompt Registry", show_header=True, header_style="bold cyan")
+    table.add_column("Key", style="bold")
+    table.add_column("Version")
+    table.add_column("Description")
+
+    for row in rows:
+        table.add_row(row.key, row.version_id, row.description)
+
+    console.print(table)
+
+
+@app.command("check-prompt-replay")
+def check_prompt_replay_cmd(
+    recorded_prompt_version: str = typer.Option(..., "--recorded-prompt-version"),
+    replay_prompt_version: str = typer.Option(..., "--replay-prompt-version"),
+) -> None:
+    """Check whether replay prompt version is compatible with a recorded prompt version."""
+
+    try:
+        compatible = is_prompt_replay_compatible(
+            recorded_prompt_version=recorded_prompt_version,
+            replay_prompt_version=replay_prompt_version,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    console.print(f"Recorded prompt version: {recorded_prompt_version}")
+    console.print(f"Replay prompt version: {replay_prompt_version}")
+    console.print(f"Compatible: {compatible}")
 
 
 @app.command("init-db")

@@ -5,7 +5,7 @@
 - Overall status: `in_progress`
 - Implementation mode: `local-first, deterministic-first`
 - Primary spec: `FINAL_JOB_BOT_PRD.md`
-- Latest validation: `228 passed` (`.venv\\Scripts\\python -m pytest -q`)
+- Latest validation: `230 passed` (`.venv\\Scripts\\python -m pytest -q`)
 
 ## Completed
 - Created persistent roadmap and ADR structure.
@@ -234,6 +234,10 @@
   - CLI: `enrich-job --replay-prompt-version ...`
   - CLI: `score-job --replay-prompt-version ...`
   - Added CLI regressions to assert replay prompt-version passthrough and command success paths.
+- Added CLI prompt-governance operations for PRD §21.5 visibility:
+  - CLI: `list-prompt-registry`
+  - CLI: `check-prompt-replay --recorded-prompt-version ... --replay-prompt-version ...`
+  - Added CLI regressions for compatibility true/false paths and invalid-version failure path.
 - Extended model-call dashboard telemetry with blocked-call visibility:
   - `blocked_non_essential_call_count`
   - `blocked_non_essential_stage_counts`
@@ -256,6 +260,7 @@
 - Brought the scoped JobBot test suite to green in `.venv` with `224 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `226 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `228 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `230 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.

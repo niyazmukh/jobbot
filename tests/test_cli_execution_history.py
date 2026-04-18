@@ -195,3 +195,59 @@ def test_cli_remediation_history_limit_and_prune(monkeypatch):
     assert "removed=1" in set_limit.stdout
     assert prune.exit_code == 0
     assert "before=2 after=2 removed=0 keep=2" in prune.stdout
+
+
+def test_cli_list_prompt_registry_shows_registered_rows(monkeypatch):
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "list-prompt-registry",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Prompt Registry" in result.stdout
+    assert "scoring_fit_eval" in result.stdout
+    assert "score_v1" in result.stdout
+
+
+def test_cli_check_prompt_replay_reports_compatibility_and_validation_error(monkeypatch):
+    runner = CliRunner()
+
+    compatible = runner.invoke(
+        cli_main.app,
+        [
+            "check-prompt-replay",
+            "--recorded-prompt-version",
+            "score_v1",
+            "--replay-prompt-version",
+            "score_v1",
+        ],
+    )
+    incompatible = runner.invoke(
+        cli_main.app,
+        [
+            "check-prompt-replay",
+            "--recorded-prompt-version",
+            "score_v1",
+            "--replay-prompt-version",
+            "score_v2",
+        ],
+    )
+    invalid = runner.invoke(
+        cli_main.app,
+        [
+            "check-prompt-replay",
+            "--recorded-prompt-version",
+            "bad-version",
+            "--replay-prompt-version",
+            "score_v1",
+        ],
+    )
+
+    assert compatible.exit_code == 0
+    assert "Compatible: True" in compatible.stdout
+    assert incompatible.exit_code == 0
+    assert "Compatible: False" in incompatible.stdout
+    assert invalid.exit_code != 0
