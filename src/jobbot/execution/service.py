@@ -9,7 +9,6 @@ import re
 import tempfile
 from hashlib import sha1
 from pathlib import Path
-from urllib.parse import urlencode
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from uuid import uuid4

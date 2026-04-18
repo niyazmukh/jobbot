@@ -23,7 +23,6 @@ from jobbot.config import get_settings
 from jobbot.db.bootstrap import create_all_tables
 from jobbot.db.session import SessionLocal
 from jobbot.eligibility.service import (
-    get_application_eligibility,
     list_application_eligibility,
     materialize_application_eligibility,
 )

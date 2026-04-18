@@ -5,7 +5,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from jobbot.discovery.contracts import CanonicalJob, DiscoveryBatch, DiscoverySource
-from jobbot.discovery.normalization import canonicalize_job_url, normalize_company_name, normalize_location
+from jobbot.discovery.normalization import (
+    canonicalize_job_url,
+    infer_remote_type,
+    normalize_company_name,
+    normalize_location,
+)
 
 
 def parse_microsoft_search_payload(
@@ -48,7 +53,11 @@ def parse_microsoft_search_payload(
                 title=title,
                 location_raw=location_raw,
                 location_normalized=normalize_location(location_raw),
-                remote_type=_infer_remote_type(item, location_raw),
+                remote_type=infer_remote_type(
+                    item.get("workLocationOption"),
+                    item.get("locationFlexibility"),
+                    location_raw,
+                ),
                 employment_type=None,
                 application_url=canonicalize_job_url(public_url),
                 ats_vendor="microsoft-careers",
@@ -103,21 +112,3 @@ def _pick_location(item: dict) -> str | None:
             return str(first)
 
     return None
-
-
-def _infer_remote_type(item: dict, location_raw: str | None) -> str | None:
-    """Infer remote classification from Microsoft search metadata."""
-
-    tokens = [
-        str(item.get("workLocationOption") or ""),
-        str(item.get("locationFlexibility") or ""),
-        str(location_raw or ""),
-    ]
-    combined = " ".join(tokens).lower()
-    if not combined.strip():
-        return None
-    if "remote" in combined or "up to 100% work from home" in combined:
-        return "remote"
-    if "hybrid" in combined or "up to 50%" in combined or "partial work from home" in combined:
-        return "hybrid"
-    return "onsite"

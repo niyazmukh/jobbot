@@ -12,7 +12,6 @@ from jobbot.models.enums import (
     ApplicationMode,
     ApplicationState,
     ArtifactType,
-    AttemptResult,
     BrowserProfileType,
     ReviewStatus,
     SessionHealth,

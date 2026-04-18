@@ -5,7 +5,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from jobbot.discovery.contracts import CanonicalJob, DiscoveryBatch, DiscoverySource
-from jobbot.discovery.normalization import canonicalize_job_url, normalize_company_name, normalize_location
+from jobbot.discovery.normalization import (
+    canonicalize_job_url,
+    infer_remote_type,
+    normalize_company_name,
+    normalize_location,
+)
 
 
 def parse_meta_search_payload(
@@ -52,7 +57,7 @@ def parse_meta_search_payload(
                 title=title,
                 location_raw=location_raw,
                 location_normalized=normalize_location(location_raw),
-                remote_type=_infer_remote_type(location_raw),
+                remote_type=infer_remote_type(location_raw),
                 employment_type=None,
                 application_url=canonicalize_job_url(public_url),
                 ats_vendor="meta-careers",
@@ -67,16 +72,3 @@ def parse_meta_search_payload(
         fetched_at=fetched_at,
         jobs=jobs,
     )
-
-
-def _infer_remote_type(location_raw: str | None) -> str | None:
-    """Infer remote classification conservatively from Meta location text."""
-
-    if not location_raw:
-        return None
-    loc = location_raw.lower()
-    if "remote" in loc:
-        return "remote"
-    if "hybrid" in loc:
-        return "hybrid"
-    return "onsite"

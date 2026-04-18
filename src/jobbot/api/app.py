@@ -29,6 +29,7 @@ from jobbot.execution import (
     DraftExecutionDashboardRemediationHistoryRead,
     DraftExecutionDashboardRemediationHistoryRetentionRead,
     DraftExecutionAttemptDetailRead,
+    DraftExecutionEventRead,
     DraftExecutionOverviewRead,
     DraftExecutionReplayBundleRead,
     DraftGuardedSubmitRead,

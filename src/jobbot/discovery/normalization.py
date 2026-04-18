@@ -101,6 +101,22 @@ def normalize_location(location: str | None) -> str | None:
     return _expand_region_abbreviation(normalized)
 
 
+def infer_remote_type(*parts: str | None) -> str | None:
+    """Infer remote classification conservatively from one or more text fragments."""
+
+    combined = " ".join(str(part or "") for part in parts).strip().lower()
+    if not combined:
+        return None
+    if "remote" in combined or ("work from home" in combined and "100%" in combined):
+        return "remote"
+    if (
+        "hybrid" in combined
+        or ("work from home" in combined and ("50%" in combined or "partial" in combined))
+    ):
+        return "hybrid"
+    return "onsite"
+
+
 def _expand_region_abbreviation(location: str) -> str:
     """Expand a trailing region abbreviation when it is unambiguous."""
 

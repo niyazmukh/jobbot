@@ -166,6 +166,8 @@
 - Surfaced LinkedIn assist-plan scaffolding through API/CLI:
   - API: `POST /api/execution/linkedin/assist-plan`
   - CLI: `build-linkedin-assist-plan`
+- Reduced discovery adapter duplication by centralizing remote-type inference into shared normalization helper (`infer_remote_type`) and removing repeated adapter-local implementations.
+- Removed/cleaned dead code and hygiene drift surfaced by static analysis (unused imports, unused test assignment, missing schema type import in API renderer).
 - Brought the scoped JobBot test suite to green in `.venv` with `183 passed`.
 
 ## In Progress

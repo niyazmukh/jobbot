@@ -1643,6 +1643,7 @@ def test_list_execution_overview_returns_blocked_attempts_with_job_context(tmp_p
     )
 
     assert len(rows) == 1
+    assert len(blocked_rows) == 1
     assert rows[0].job_id == job_id
     assert rows[0].job_title == "Senior Backend Engineer"
     assert rows[0].site_vendor == "greenhouse"

@@ -5,7 +5,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from jobbot.discovery.contracts import CanonicalJob, DiscoveryBatch, DiscoverySource
-from jobbot.discovery.normalization import canonicalize_job_url, normalize_company_name, normalize_location
+from jobbot.discovery.normalization import (
+    canonicalize_job_url,
+    infer_remote_type,
+    normalize_company_name,
+    normalize_location,
+)
 
 
 def parse_workday_search_payload(
@@ -48,7 +53,7 @@ def parse_workday_search_payload(
                 title=title,
                 location_raw=location_raw,
                 location_normalized=normalize_location(location_raw),
-                remote_type=_infer_remote_type(location_raw, item.get("remoteType")),
+                remote_type=infer_remote_type(location_raw, item.get("remoteType")),
                 employment_type=employment_type,
                 application_url=canonicalize_job_url(public_url),
                 ats_vendor="workday",
@@ -96,16 +101,3 @@ def _extract_external_job_id(item: dict, external_path: str) -> str | None:
 
     parts = [segment for segment in external_path.split("/") if segment]
     return parts[-1] if parts else None
-
-
-def _infer_remote_type(location_raw: str | None, remote_type: str | None) -> str | None:
-    """Infer remote classification conservatively from Workday fields."""
-
-    combined = " ".join(part for part in [location_raw, remote_type] if part).lower()
-    if not combined:
-        return None
-    if "remote" in combined:
-        return "remote"
-    if "hybrid" in combined:
-        return "hybrid"
-    return "onsite"
