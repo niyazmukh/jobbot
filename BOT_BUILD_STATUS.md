@@ -5,7 +5,7 @@
 - Overall status: `in_progress`
 - Implementation mode: `local-first, deterministic-first`
 - Primary spec: `FINAL_JOB_BOT_PRD.md`
-- Latest validation: `234 passed` (`.venv\\Scripts\\python -m pytest -q`)
+- Latest validation: `235 passed` (`.venv\\Scripts\\python -m pytest -q`)
 
 ## Completed
 - Created persistent roadmap and ADR structure.
@@ -262,6 +262,13 @@
   - Queue runs now reclaim stale RUNNING items (expired/missing lease) back to QUEUED before drain.
   - Reclamation is observable via `reclaimed_count` in auto-apply run responses.
   - Added regression coverage for stale lease reclamation and run metrics.
+- Added first-class auto-apply queue summary telemetry for monitoring:
+  - New service/API/CLI summary surface exposes candidate-scoped counts and queue-health indicators.
+  - API: `GET /api/auto-apply/{candidate_profile_slug}/summary`
+  - CLI: `show-auto-apply-summary`
+  - Summary fields include total/queued/running/succeeded/failed, retry-scheduled count,
+    stale-running count, and next-attempt timestamp.
+  - Added API regression coverage for stale-running and retry-scheduled summary detection.
 - Extended model-call dashboard telemetry with blocked-call visibility:
   - `blocked_non_essential_call_count`
   - `blocked_non_essential_stage_counts`
@@ -288,6 +295,7 @@
 - Brought the scoped JobBot test suite to green in `.venv` with `232 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `233 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `234 passed`.
+- Brought the scoped JobBot test suite to green in `.venv` with `235 passed`.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.

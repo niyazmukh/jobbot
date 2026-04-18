@@ -26,6 +26,7 @@ from jobbot.execution import (
     AutoApplyEnqueueRead,
     AutoApplyQueueItemRead,
     AutoApplyQueueRunRead,
+    AutoApplyQueueSummaryRead,
     DraftApplicationAttemptRead,
     DraftExecutionArtifactDetailRead,
     DraftExecutionDashboardRead,
@@ -56,6 +57,7 @@ from jobbot.execution import (
     extract_linkedin_question_widgets,
     evaluate_submit_gate,
     enqueue_auto_apply_jobs,
+    get_auto_apply_queue_summary,
     get_execution_artifact_detail,
     get_execution_artifact_file,
     get_execution_dashboard_bulk_history_limit,
@@ -1103,6 +1105,26 @@ def create_app() -> FastAPI:
                 db,
                 candidate_profile_slug=candidate_profile_slug,
                 limit=limit,
+            )
+        except ValueError as exc:
+            if str(exc) == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
+            raise
+
+    @app.get(
+        "/api/auto-apply/{candidate_profile_slug}/summary",
+        response_model=AutoApplyQueueSummaryRead,
+    )
+    def auto_apply_queue_summary_endpoint(
+        candidate_profile_slug: str,
+        db: DbSession,
+    ) -> AutoApplyQueueSummaryRead:
+        """Return candidate-scoped auto-apply queue summary telemetry."""
+
+        try:
+            return get_auto_apply_queue_summary(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
             )
         except ValueError as exc:
             if str(exc) == "candidate_profile_not_found":

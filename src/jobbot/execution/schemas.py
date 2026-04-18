@@ -547,6 +547,22 @@ class AutoApplyQueueRunRead(BaseModel):
     items: list[AutoApplyQueueItemRead]
 
 
+class AutoApplyQueueSummaryRead(BaseModel):
+    """Read model for candidate-scoped auto-apply queue health summary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_profile_slug: str
+    total_count: int
+    queued_count: int
+    running_count: int
+    succeeded_count: int
+    failed_count: int
+    retry_scheduled_count: int
+    stale_running_count: int
+    next_attempt_at: datetime | None = None
+
+
 class DraftLinkedInQuestionRead(BaseModel):
     """Read model for one extracted LinkedIn question widget."""
 

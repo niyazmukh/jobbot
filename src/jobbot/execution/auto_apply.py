@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -10,7 +10,12 @@ from sqlalchemy.orm import Session
 
 from jobbot.db.models import AutoApplyQueueItem, CandidateProfile, utcnow
 from jobbot.eligibility.service import materialize_application_eligibility
-from jobbot.execution.schemas import AutoApplyEnqueueRead, AutoApplyQueueItemRead, AutoApplyQueueRunRead
+from jobbot.execution.schemas import (
+    AutoApplyEnqueueRead,
+    AutoApplyQueueItemRead,
+    AutoApplyQueueRunRead,
+    AutoApplyQueueSummaryRead,
+)
 from jobbot.execution.service import (
     bootstrap_draft_application_attempt,
     build_draft_field_plan,
@@ -136,6 +141,65 @@ def list_auto_apply_queue_items(
     return [_to_queue_item_read(item=row, candidate_profile_slug=candidate_profile_slug) for row in rows]
 
 
+def get_auto_apply_queue_summary(
+    session: Session,
+    *,
+    candidate_profile_slug: str,
+) -> AutoApplyQueueSummaryRead:
+    """Return candidate-scoped auto-apply queue summary for monitoring."""
+
+    candidate = session.scalar(
+        select(CandidateProfile).where(CandidateProfile.slug == candidate_profile_slug)
+    )
+    if candidate is None:
+        raise ValueError("candidate_profile_not_found")
+
+    now = utcnow()
+    rows = session.scalars(
+        select(AutoApplyQueueItem).where(
+            AutoApplyQueueItem.candidate_profile_id == candidate.id,
+        )
+    ).all()
+
+    queued_count = 0
+    running_count = 0
+    succeeded_count = 0
+    failed_count = 0
+    retry_scheduled_count = 0
+    stale_running_count = 0
+    next_attempt_at: datetime | None = None
+
+    for row in rows:
+        if row.status == AutoApplyQueueStatus.QUEUED:
+            queued_count += 1
+            if row.next_attempt_at is not None and _is_after_now(row.next_attempt_at, now):
+                retry_scheduled_count += 1
+        elif row.status == AutoApplyQueueStatus.RUNNING:
+            running_count += 1
+            if row.lease_expires_at is None or not _is_after_now(row.lease_expires_at, now):
+                stale_running_count += 1
+        elif row.status == AutoApplyQueueStatus.SUCCEEDED:
+            succeeded_count += 1
+        elif row.status == AutoApplyQueueStatus.FAILED:
+            failed_count += 1
+
+        if row.next_attempt_at is not None:
+            if next_attempt_at is None or row.next_attempt_at < next_attempt_at:
+                next_attempt_at = row.next_attempt_at
+
+    return AutoApplyQueueSummaryRead(
+        candidate_profile_slug=candidate_profile_slug,
+        total_count=len(rows),
+        queued_count=queued_count,
+        running_count=running_count,
+        succeeded_count=succeeded_count,
+        failed_count=failed_count,
+        retry_scheduled_count=retry_scheduled_count,
+        stale_running_count=stale_running_count,
+        next_attempt_at=next_attempt_at,
+    )
+
+
 def run_auto_apply_queue(
     session: Session,
     *,
@@ -182,9 +246,13 @@ def run_auto_apply_queue(
 
     candidates: list[AutoApplyQueueItem] = []
     for row in rows:
-        if row.next_attempt_at is not None and row.next_attempt_at > now:
+        if row.next_attempt_at is not None and _is_after_now(row.next_attempt_at, now):
             continue
-        if row.status == AutoApplyQueueStatus.RUNNING and row.lease_expires_at is not None and row.lease_expires_at > now:
+        if (
+            row.status == AutoApplyQueueStatus.RUNNING
+            and row.lease_expires_at is not None
+            and _is_after_now(row.lease_expires_at, now)
+        ):
             continue
         candidates.append(row)
         if len(candidates) >= limit:
@@ -315,7 +383,7 @@ def _reclaim_stale_running_items(
     ).all()
     reclaimed = 0
     for row in rows:
-        lease_is_stale = row.lease_expires_at is None or row.lease_expires_at <= now
+        lease_is_stale = row.lease_expires_at is None or not _is_after_now(row.lease_expires_at, now)
         if not lease_is_stale:
             continue
         row.status = AutoApplyQueueStatus.QUEUED
@@ -356,3 +424,19 @@ def _to_queue_item_read(
         created_at=item.created_at,
         updated_at=item.updated_at,
     )
+
+
+def _is_after_now(value: datetime, now: datetime) -> bool:
+    """Return true when value is chronologically after now with tolerant timezone handling."""
+
+    left = _to_utc_naive(value)
+    right = _to_utc_naive(now)
+    return left > right
+
+
+def _to_utc_naive(value: datetime) -> datetime:
+    """Normalize datetime to UTC naive for SQLite-compatible comparisons."""
+
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)

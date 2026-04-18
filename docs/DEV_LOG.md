@@ -33,10 +33,11 @@
 - `ad9a239`: CLI prompt-governance commands for registry listing and replay compatibility checks.
 - `f41c181`: durable auto-apply queue orchestration + automation-safe draft bootstrap reuse.
 - `9688df5`: strict unattended auto-apply success policy (reject simulated submit fallback outcomes).
-- `in-progress`: stale-lease recovery and reclaim observability for auto-apply queue runs.
+- `96c97f1`: stale-lease recovery and reclaim observability for auto-apply queue runs.
+- `in-progress`: candidate-scoped auto-apply queue summary telemetry (API + CLI).
 
 ### Validation Baseline
-- Full suite green at latest checkpoint: `234 passed`.
+- Full suite green at latest checkpoint: `235 passed`.
 
 ### Graphify Snapshot Update (latest)
 - Re-ran `graphify update .` after prompt API/schema changes.

@@ -1,4 +1,5 @@
 import json
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -244,3 +245,64 @@ def test_auto_apply_queue_api_reclaims_stale_running_lease(tmp_path, monkeypatch
     assert run_response.json()["processed_count"] == 1
     assert run_response.json()["succeeded_count"] == 1
     assert run_response.json()["items"][0]["status"] == "succeeded"
+
+
+def test_auto_apply_queue_summary_api_reports_counts_and_stale_running(tmp_path):
+    session = make_session()
+    job_id = _seed_ready_job(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    second_job = session.query(models.Job).filter(models.Job.id != job_id).order_by(models.Job.id.asc()).first()
+    now = models.utcnow()
+
+    session.add_all(
+        [
+            models.AutoApplyQueueItem(
+                candidate_profile_id=candidate.id,
+                job_id=job_id,
+                status="queued",
+                priority=120,
+                attempt_count=1,
+                max_attempts=3,
+                next_attempt_at=now + timedelta(minutes=3),
+                created_at=now,
+                updated_at=now,
+            ),
+            models.AutoApplyQueueItem(
+                candidate_profile_id=candidate.id,
+                job_id=second_job.id,
+                status="running",
+                priority=100,
+                attempt_count=1,
+                max_attempts=3,
+                lease_token="stale-lease",
+                lease_expires_at=now - timedelta(minutes=1),
+                created_at=now,
+                updated_at=now,
+            ),
+        ]
+    )
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        summary_response = client.get("/api/auto-apply/alex-doe/summary")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert summary_response.status_code == 200
+    payload = summary_response.json()
+    assert payload["candidate_profile_slug"] == "alex-doe"
+    assert payload["total_count"] == 2
+    assert payload["queued_count"] == 1
+    assert payload["running_count"] == 1
+    assert payload["retry_scheduled_count"] == 1
+    assert payload["stale_running_count"] == 1
+    assert payload["next_attempt_at"] is not None

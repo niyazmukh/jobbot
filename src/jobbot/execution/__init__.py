@@ -4,6 +4,7 @@ from jobbot.execution.schemas import (
     AutoApplyEnqueueRead,
     AutoApplyQueueItemRead,
     AutoApplyQueueRunRead,
+    AutoApplyQueueSummaryRead,
     DraftApplicationAttemptRead,
     DraftExecutionArtifactRead,
     DraftExecutionArtifactDetailRead,
@@ -35,6 +36,7 @@ from jobbot.execution.schemas import (
 )
 from jobbot.execution.auto_apply import (
     enqueue_auto_apply_jobs,
+    get_auto_apply_queue_summary,
     list_auto_apply_queue_items,
     run_auto_apply_queue,
 )
@@ -76,6 +78,7 @@ __all__ = [
     "AutoApplyEnqueueRead",
     "AutoApplyQueueItemRead",
     "AutoApplyQueueRunRead",
+    "AutoApplyQueueSummaryRead",
     "DraftApplicationAttemptRead",
     "DraftExecutionArtifactRead",
     "DraftExecutionArtifactDetailRead",
@@ -108,6 +111,7 @@ __all__ = [
     "build_linkedin_assist_plan",
     "evaluate_linkedin_guarded_submit_criteria",
     "enqueue_auto_apply_jobs",
+    "get_auto_apply_queue_summary",
     "bootstrap_draft_application_attempt",
     "build_draft_field_plan",
     "build_site_field_overlay",

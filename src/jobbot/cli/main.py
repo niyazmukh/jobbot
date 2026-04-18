@@ -52,6 +52,7 @@ from jobbot.execution.linkedin import build_linkedin_assist_plan, extract_linked
 from jobbot.execution.linkedin import evaluate_linkedin_guarded_submit_criteria
 from jobbot.execution.auto_apply import (
     enqueue_auto_apply_jobs,
+    get_auto_apply_queue_summary,
     list_auto_apply_queue_items,
     run_auto_apply_queue,
 )
@@ -509,6 +510,41 @@ def list_auto_apply_queue_cmd(
         )
 
     console.print(table)
+
+
+@app.command("show-auto-apply-summary")
+def show_auto_apply_summary_cmd(
+    candidate_profile: str = typer.Option(..., "--candidate-profile"),
+) -> None:
+    """Show candidate-scoped auto-apply queue summary telemetry."""
+
+    session = SessionLocal()
+    try:
+        summary = get_auto_apply_queue_summary(
+            session,
+            candidate_profile_slug=candidate_profile,
+        )
+    except ValueError as exc:
+        session.close()
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        session.close()
+
+    console.print(f"[bold]Auto-apply summary:[/bold] {summary.candidate_profile_slug}")
+    console.print(
+        "Counts: "
+        f"total={summary.total_count} "
+        f"queued={summary.queued_count} "
+        f"running={summary.running_count} "
+        f"succeeded={summary.succeeded_count} "
+        f"failed={summary.failed_count}"
+    )
+    console.print(
+        "Queue health: "
+        f"retry_scheduled={summary.retry_scheduled_count} "
+        f"stale_running={summary.stale_running_count} "
+        f"next_attempt_at={summary.next_attempt_at or 'none'}"
+    )
 
 
 @app.command("run-auto-apply-queue")
