@@ -610,6 +610,10 @@ def get_execution_dashboard(
     if sort_by != "started_at" or not descending:
         order = "descending" if descending else "ascending"
         recommended_actions.append(f"Execution view is sorted by {sort_by} ({order}).")
+    if remediation_history_count > remediation_history_limit:
+        recommended_actions.append(
+            "Remediation history exceeds configured limit; prune history or raise retention before the next bulk remediation loop."
+        )
 
     return DraftExecutionDashboardRead(
         candidate_profile_slug=candidate_profile_slug,

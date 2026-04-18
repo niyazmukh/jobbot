@@ -9,7 +9,9 @@ from jobbot.browser.schemas import (
 )
 from jobbot.browser.service import (
     build_browser_profile_policy,
+    build_linkedin_session_observation,
     evaluate_session_health,
+    evaluate_linkedin_session_health,
     get_browser_profile_policy,
     list_browser_profiles,
     register_browser_profile,
@@ -24,7 +26,9 @@ __all__ = [
     "BrowserSessionObservation",
     "BrowserSessionValidationResult",
     "build_browser_profile_policy",
+    "build_linkedin_session_observation",
     "evaluate_session_health",
+    "evaluate_linkedin_session_health",
     "get_browser_profile_policy",
     "list_browser_profiles",
     "register_browser_profile",

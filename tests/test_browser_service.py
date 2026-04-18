@@ -3,8 +3,10 @@ from sqlalchemy.orm import sessionmaker
 
 from jobbot.browser.schemas import BrowserProfileCreate, BrowserSessionObservation
 from jobbot.browser.service import (
+    build_linkedin_session_observation,
     get_browser_profile_policy,
     evaluate_session_health,
+    evaluate_linkedin_session_health,
     mark_browser_profile_used,
     register_browser_profile,
     validate_browser_profile_session,
@@ -181,3 +183,29 @@ def test_get_browser_profile_policy_requires_manual_recovery_for_checkpointed():
     assert policy.allow_application is False
     assert policy.requires_reauth is True
     assert policy.recommended_action == "manual_checkpoint_recovery"
+
+
+def test_build_linkedin_session_observation_detects_login_and_redirect_risk():
+    observation = build_linkedin_session_observation(
+        page_url="https://www.linkedin.com/login",
+        page_title="LinkedIn Login",
+        page_content="Sign in to LinkedIn",
+        redirect_count=4,
+        authenticated=True,
+    )
+
+    assert observation.login_page_detected is True
+    assert observation.repeated_redirects is True
+
+
+def test_evaluate_linkedin_session_health_detects_challenge():
+    result = evaluate_linkedin_session_health(
+        page_url="https://www.linkedin.com/checkpoint/challenge",
+        page_title="Security Verification",
+        page_content="Please verify your identity and complete the CAPTCHA.",
+        redirect_count=1,
+        authenticated=True,
+    )
+
+    assert result.session_health == SessionHealth.CHECKPOINTED
+    assert result.block_automation is True

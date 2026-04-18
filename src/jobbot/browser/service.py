@@ -101,6 +101,79 @@ def list_browser_profiles(session: Session) -> list[BrowserProfile]:
     )
 
 
+def build_linkedin_session_observation(
+    *,
+    page_url: str | None,
+    page_title: str | None,
+    page_content: str | None,
+    redirect_count: int = 0,
+    visible_job_count: int | None = None,
+    authenticated: bool | None = None,
+    notes: str | None = None,
+) -> BrowserSessionObservation:
+    """Build deterministic session-health signals from a LinkedIn page probe."""
+
+    normalized_url = (page_url or "").lower()
+    haystack = " ".join(part for part in (page_title, page_content) if part).lower()
+    login_page_detected = (
+        "/login" in normalized_url
+        or "/checkpoint/lg/login" in normalized_url
+        or ("linkedin" in haystack and "sign in" in haystack)
+    )
+    checkpoint_detected = (
+        "/checkpoint/" in normalized_url
+        or "checkpoint" in haystack
+        or "verify your identity" in haystack
+    )
+    challenge_page_detected = any(
+        token in haystack
+        for token in ("captcha", "security verification", "are you a robot", "unusual activity")
+    )
+    rate_limit_detected = (
+        "too many requests" in haystack
+        or "rate limit" in haystack
+        or "temporarily restricted" in haystack
+    )
+    repeated_redirects = redirect_count >= 3
+    degraded_visibility = authenticated is True and visible_job_count == 0
+
+    return BrowserSessionObservation(
+        login_page_detected=login_page_detected,
+        authenticated=authenticated,
+        checkpoint_detected=checkpoint_detected,
+        challenge_page_detected=challenge_page_detected,
+        rate_limit_detected=rate_limit_detected,
+        repeated_redirects=repeated_redirects,
+        degraded_visibility=degraded_visibility,
+        visible_job_count=visible_job_count,
+        notes=notes,
+    )
+
+
+def evaluate_linkedin_session_health(
+    *,
+    page_url: str | None,
+    page_title: str | None,
+    page_content: str | None,
+    redirect_count: int = 0,
+    visible_job_count: int | None = None,
+    authenticated: bool | None = None,
+    notes: str | None = None,
+) -> BrowserSessionValidationResult:
+    """Classify LinkedIn session health from deterministic probe inputs."""
+
+    observation = build_linkedin_session_observation(
+        page_url=page_url,
+        page_title=page_title,
+        page_content=page_content,
+        redirect_count=redirect_count,
+        visible_job_count=visible_job_count,
+        authenticated=authenticated,
+        notes=notes,
+    )
+    return evaluate_session_health(observation)
+
+
 def evaluate_session_health(observation: BrowserSessionObservation) -> BrowserSessionValidationResult:
     """Classify session health from deterministic browser signals."""
 

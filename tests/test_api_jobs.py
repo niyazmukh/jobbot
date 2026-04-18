@@ -4222,8 +4222,13 @@ def test_execution_dashboard_api_and_html_show_history_inventory_vs_limit():
     payload = api_response.json()
     assert payload["remediation_history_count"] == 3
     assert payload["remediation_history_limit"] == 2
+    assert any(
+        "Remediation history exceeds configured limit" in action
+        for action in payload["recommended_actions"]
+    )
     assert html_response.status_code == 200
     assert "History rows: 3 / limit 2" in html_response.text
+    assert "Remediation history exceeds configured limit" in html_response.text
 
 
 def test_execution_dashboard_html_history_retention_actions_apply_and_redirect():

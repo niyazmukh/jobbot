@@ -10,7 +10,7 @@ Add LinkedIn assistance conservatively, prioritizing session health and assist/g
 - selective guarded-submit support
 
 ## Checklist
-- [ ] Add LinkedIn session health checks
+- [~] Add LinkedIn session health checks (deterministic probe helpers in browser service; API/CLI wiring pending)
 - [ ] Add LinkedIn question extraction
 - [ ] Add assist-mode field filling
 - [ ] Add guarded-submit criteria

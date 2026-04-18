@@ -2357,6 +2357,40 @@ def test_get_execution_dashboard_returns_summary_counts(tmp_path: Path):
     assert dashboard.blocked_recent_attempts[0].attempt_id == blocked_attempt.attempt_id
     assert any(row.attempt_id == pending_attempt.attempt_id for row in dashboard.recent_attempts)
     assert any("Resolve blocked guarded attempts" in action for action in dashboard.recommended_actions)
+    assert not any("Remediation history exceeds configured limit" in action for action in dashboard.recommended_actions)
+
+
+def test_execution_dashboard_recommended_actions_include_retention_pressure_guidance():
+    session = make_session()
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={"email": "alex@example.com"},
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={
+            "execution_dashboard_bulk_history_limit": 2,
+            "execution_dashboard_bulk_history": [
+                {"history_id": "hist-1", "created_at": "2026-04-18T08:00:00+00:00"},
+                {"history_id": "hist-2", "created_at": "2026-04-18T09:00:00+00:00"},
+                {"history_id": "hist-3", "created_at": "2026-04-18T10:00:00+00:00"},
+            ],
+        },
+    )
+    session.add(candidate)
+    session.commit()
+
+    dashboard = get_execution_dashboard(
+        session,
+        candidate_profile_slug="alex-doe",
+        limit=10,
+    )
+
+    assert dashboard.remediation_history_count == 3
+    assert dashboard.remediation_history_limit == 2
+    assert any(
+        "Remediation history exceeds configured limit" in action
+        for action in dashboard.recommended_actions
+    )
 
 
 def test_capture_target_page_html_uses_http_get_when_available(monkeypatch):
