@@ -34,6 +34,16 @@ from jobbot.models.enums import AutoApplyQueueStatus
 _PAUSED_BY_OPERATOR = "paused_by_operator"
 _CANCELLED_BY_OPERATOR = "cancelled_by_operator"
 
+_QUEUED_AGE_WARNING_SECONDS = 30 * 60
+_QUEUED_AGE_CRITICAL_SECONDS = 2 * 60 * 60
+_RETRY_AGE_WARNING_SECONDS = 15 * 60
+_RETRY_AGE_CRITICAL_SECONDS = 60 * 60
+_RECENT_FAILURE_RATE_WARNING = 0.30
+_RECENT_FAILURE_RATE_CRITICAL = 0.60
+_RECENT_FAILURE_MIN_SAMPLE = 2
+_RUNNING_STALE_WARNING = 1
+_RUNNING_STALE_CRITICAL = 3
+
 
 class QueueRunnerAlreadyActiveError(ValueError):
     """Raised when another queue runner lease is active for a candidate."""
@@ -289,6 +299,50 @@ def get_auto_apply_queue_summary(
                 f"requeue-auto-apply-failed --candidate-profile {candidate_profile_slug}"
             )
 
+    slo_status = "ok"
+    slo_alerts: list[str] = []
+    slo_recommended_actions: list[str] = []
+    if oldest_queued_at is not None:
+        queued_age = _seconds_since(oldest_queued_at, now) or 0
+        if queued_age >= _QUEUED_AGE_CRITICAL_SECONDS:
+            slo_status = _elevate_slo_status(slo_status, "critical")
+            slo_alerts.append(f"queued_backlog_age_critical:{queued_age}s")
+            slo_recommended_actions.append("Investigate processing blockage and run queue-control triage")
+        elif queued_age >= _QUEUED_AGE_WARNING_SECONDS:
+            slo_status = _elevate_slo_status(slo_status, "warning")
+            slo_alerts.append(f"queued_backlog_age_warning:{queued_age}s")
+
+    if oldest_retry_scheduled_at is not None:
+        retry_age = _seconds_since(oldest_retry_scheduled_at, now) or 0
+        if retry_age >= _RETRY_AGE_CRITICAL_SECONDS:
+            slo_status = _elevate_slo_status(slo_status, "critical")
+            slo_alerts.append(f"retry_backlog_age_critical:{retry_age}s")
+            slo_recommended_actions.append("Requeue top failed items and inspect top failure code")
+        elif retry_age >= _RETRY_AGE_WARNING_SECONDS:
+            slo_status = _elevate_slo_status(slo_status, "warning")
+            slo_alerts.append(f"retry_backlog_age_warning:{retry_age}s")
+
+    if stale_running_count >= _RUNNING_STALE_CRITICAL:
+        slo_status = _elevate_slo_status(slo_status, "critical")
+        slo_alerts.append(f"stale_running_critical:{stale_running_count}")
+        slo_recommended_actions.append("Review runner lease diagnostics and reclaim stuck items")
+    elif stale_running_count >= _RUNNING_STALE_WARNING:
+        slo_status = _elevate_slo_status(slo_status, "warning")
+        slo_alerts.append(f"stale_running_warning:{stale_running_count}")
+
+    if recent_failure_rate_1h is not None and recent_completed_count_1h >= _RECENT_FAILURE_MIN_SAMPLE:
+        if recent_failure_rate_1h >= _RECENT_FAILURE_RATE_CRITICAL:
+            slo_status = _elevate_slo_status(slo_status, "critical")
+            slo_alerts.append(f"recent_failure_rate_critical:{recent_failure_rate_1h:.2f}")
+            slo_recommended_actions.append("Prioritize remediation template actions before next auto-apply run")
+        elif recent_failure_rate_1h >= _RECENT_FAILURE_RATE_WARNING:
+            slo_status = _elevate_slo_status(slo_status, "warning")
+            slo_alerts.append(f"recent_failure_rate_warning:{recent_failure_rate_1h:.2f}")
+
+    if runner_lease_active and (runner_lease_remaining_seconds or 0) > 10 * 60:
+        slo_status = _elevate_slo_status(slo_status, "warning")
+        slo_alerts.append(f"runner_lease_active_warning:{runner_lease_remaining_seconds}s")
+
     return AutoApplyQueueSummaryRead(
         candidate_profile_slug=candidate_profile_slug,
         total_count=len(rows),
@@ -313,6 +367,9 @@ def get_auto_apply_queue_summary(
         recommended_remediation_action=recommended_remediation_action,
         recommended_requeue_route=recommended_requeue_route,
         recommended_cli_command=recommended_cli_command,
+        slo_status=slo_status,
+        slo_alerts=slo_alerts,
+        slo_recommended_actions=list(dict.fromkeys(slo_recommended_actions)),
     )
 
 
@@ -872,3 +929,12 @@ def _recommended_queue_remediation_action(failure_code: str) -> str:
     }:
         return "selective_retry_requeue"
     return "requeue_failed_items"
+
+
+def _elevate_slo_status(current: str, candidate: str) -> str:
+    """Return the higher-severity status between current and candidate."""
+
+    ranks = {"ok": 0, "warning": 1, "critical": 2}
+    if ranks[candidate] > ranks[current]:
+        return candidate
+    return current

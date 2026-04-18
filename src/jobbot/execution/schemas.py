@@ -575,6 +575,9 @@ class AutoApplyQueueSummaryRead(BaseModel):
     recommended_remediation_action: str | None = None
     recommended_requeue_route: str | None = None
     recommended_cli_command: str | None = None
+    slo_status: str = "ok"
+    slo_alerts: list[str] = []
+    slo_recommended_actions: list[str] = []
 
 
 class AutoApplyQueueRequeueRead(BaseModel):

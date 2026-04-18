@@ -5,7 +5,7 @@
 - Overall status: `in_progress`
 - Implementation mode: `local-first, deterministic-first`
 - Primary spec: `FINAL_JOB_BOT_PRD.md`
-- Latest validation: `244 passed` (`.venv\\Scripts\\python -m pytest -q`)
+- Latest validation: `245 passed` (`.venv\\Scripts\\python -m pytest -q`)
 
 ## Completed
 - Created persistent roadmap and ADR structure.
@@ -298,6 +298,11 @@
   - Added prefilled remediation hints: `recommended_requeue_route` and `recommended_cli_command`.
   - Added CLI summary output for remediation templates to reduce operator triage overhead.
   - Added API regressions for remediation template and queue-id hint behavior.
+- Added queue summary SLO threshold classification for fast intervention:
+  - Added summary-level SLO outputs: `slo_status`, `slo_alerts`, `slo_recommended_actions`.
+  - Added warning/critical cutoffs for queue age, retry age, stale-running rows, and recent failure-rate pressure.
+  - Added CLI summary surfacing for SLO status/alerts/actions.
+  - Added API regressions for warning and critical SLO paths.
 - Added explicit stale-lease recovery for durable auto-apply queue workers:
   - Queue runs now reclaim stale RUNNING items (expired/missing lease) back to QUEUED before drain.
   - Reclamation is observable via `reclaimed_count` in auto-apply run responses.
@@ -354,9 +359,9 @@
 
 ## Next Tasks
 1. Add queue-control dashboard surfacing/actions so pause/resume/cancel can be driven from operator HTML flows without CLI/API-only usage.
-2. Add queue summary SLO thresholds/alerts (warning-critical cutoffs) to classify pressure metrics for faster operator response.
-3. Add lease ownership metadata (source host/process identifier) for multi-worker contention traceability beyond expiry timers.
-4. Add remediation-template dashboard actions that apply suggested requeue payloads without manual command assembly.
+2. Add lease ownership metadata (source host/process identifier) for multi-worker contention traceability beyond expiry timers.
+3. Add remediation-template dashboard actions that apply suggested requeue payloads without manual command assembly.
+4. Add SLO-severity filtering/sorting on queue and dashboard views to prioritize critical backlog first.
 
 ## Decisions
 - New implementation lives in `src/jobbot/` instead of modifying existing bot repos.

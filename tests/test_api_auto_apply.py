@@ -315,6 +315,9 @@ def test_auto_apply_queue_summary_api_reports_counts_and_stale_running(tmp_path)
     assert payload["runner_lease_active"] is False
     assert payload["runner_lease_expires_at"] is None
     assert payload["runner_lease_remaining_seconds"] is None
+    assert payload["slo_status"] == "warning"
+    assert payload["slo_alerts"]
+    assert any("stale_running_warning" in alert for alert in payload["slo_alerts"])
 
 
 def test_auto_apply_queue_summary_api_reports_active_runner_lease_diagnostics(tmp_path):
@@ -357,6 +360,8 @@ def test_auto_apply_queue_summary_api_reports_active_runner_lease_diagnostics(tm
     assert payload["recommended_remediation_action"] is None
     assert payload["recommended_requeue_route"] is None
     assert payload["recommended_cli_command"] is None
+    assert payload["slo_status"] == "ok"
+    assert payload["slo_alerts"] == []
 
 
 def test_auto_apply_queue_summary_api_reports_recent_failure_rate_window(tmp_path):
@@ -449,6 +454,120 @@ def test_auto_apply_queue_summary_api_reports_recent_failure_rate_window(tmp_pat
     assert payload["recommended_remediation_action"] == "selective_retry_requeue"
     assert payload["recommended_requeue_route"] == "/api/auto-apply/alex-doe/requeue-failed"
     assert "requeue-auto-apply-failed --candidate-profile alex-doe" in payload["recommended_cli_command"]
+    assert payload["slo_status"] == "warning"
+    assert payload["slo_alerts"]
+    assert any("recent_failure_rate_warning" in alert for alert in payload["slo_alerts"])
+
+
+def test_auto_apply_queue_summary_api_reports_critical_slo_status(tmp_path):
+    session = make_session()
+    job_id = _seed_ready_job(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    jobs = session.query(models.Job).order_by(models.Job.id.asc()).all()
+    now = models.utcnow()
+
+    extra_jobs: list[models.Job] = []
+    for index in range(3):
+        extra_job = models.Job(
+            canonical_url=f"https://jobs.example.com/critical-slo-{index}",
+            title=f"Critical SLO {index}",
+            title_normalized=f"critical slo {index}",
+            status="discovered",
+            discovered_at=now,
+            last_seen_at=now,
+        )
+        session.add(extra_job)
+        extra_jobs.append(extra_job)
+    session.commit()
+
+    target_jobs = [row for row in jobs if row.id != job_id][:1] + extra_jobs
+    session.add_all(
+        [
+            models.AutoApplyQueueItem(
+                candidate_profile_id=candidate.id,
+                job_id=job_id,
+                status="queued",
+                priority=120,
+                attempt_count=0,
+                max_attempts=3,
+                created_at=now - timedelta(hours=3),
+                updated_at=now - timedelta(hours=3),
+            ),
+            models.AutoApplyQueueItem(
+                candidate_profile_id=candidate.id,
+                job_id=target_jobs[0].id,
+                status="queued",
+                priority=110,
+                attempt_count=2,
+                max_attempts=3,
+                next_attempt_at=now + timedelta(minutes=5),
+                created_at=now - timedelta(hours=2),
+                updated_at=now - timedelta(hours=2),
+            ),
+            models.AutoApplyQueueItem(
+                candidate_profile_id=candidate.id,
+                job_id=target_jobs[1].id,
+                status="failed",
+                priority=100,
+                attempt_count=3,
+                max_attempts=3,
+                last_error_code="submit_gate_blocked",
+                last_error_message="submit_gate_blocked",
+                finished_at=now - timedelta(minutes=20),
+                created_at=now - timedelta(minutes=30),
+                updated_at=now - timedelta(minutes=20),
+            ),
+            models.AutoApplyQueueItem(
+                candidate_profile_id=candidate.id,
+                job_id=target_jobs[2].id,
+                status="failed",
+                priority=90,
+                attempt_count=3,
+                max_attempts=3,
+                last_error_code="submit_gate_blocked",
+                last_error_message="submit_gate_blocked",
+                finished_at=now - timedelta(minutes=15),
+                created_at=now - timedelta(minutes=25),
+                updated_at=now - timedelta(minutes=15),
+            ),
+            models.AutoApplyQueueItem(
+                candidate_profile_id=candidate.id,
+                job_id=target_jobs[3].id,
+                status="failed",
+                priority=80,
+                attempt_count=3,
+                max_attempts=3,
+                last_error_code="submit_gate_blocked",
+                last_error_message="submit_gate_blocked",
+                finished_at=now - timedelta(minutes=10),
+                created_at=now - timedelta(minutes=20),
+                updated_at=now - timedelta(minutes=10),
+            ),
+        ]
+    )
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        summary_response = client.get("/api/auto-apply/alex-doe/summary")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert summary_response.status_code == 200
+    payload = summary_response.json()
+    assert payload["slo_status"] == "critical"
+    assert payload["slo_alerts"]
+    assert any("queued_backlog_age_critical" in alert for alert in payload["slo_alerts"])
+    assert any("retry_backlog_age_critical" in alert for alert in payload["slo_alerts"])
+    assert any("recent_failure_rate_critical" in alert for alert in payload["slo_alerts"])
 
 
 def test_auto_apply_queue_api_requeue_failed_items(tmp_path):

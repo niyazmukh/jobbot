@@ -567,6 +567,13 @@ def show_auto_apply_summary_cmd(
         console.print(f"Top failure queue IDs: {summary.top_failure_queue_ids}")
     if summary.recommended_cli_command:
         console.print(f"Suggested CLI: {summary.recommended_cli_command}")
+    console.print(
+        "Queue SLO: "
+        f"status={summary.slo_status} "
+        f"alerts={summary.slo_alerts if summary.slo_alerts else 'none'}"
+    )
+    if summary.slo_recommended_actions:
+        console.print(f"SLO actions: {summary.slo_recommended_actions}")
 
 
 @app.command("run-auto-apply-queue")
