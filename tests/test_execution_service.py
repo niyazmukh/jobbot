@@ -24,6 +24,7 @@ from jobbot.execution.service import (
     list_execution_overview,
     list_draft_application_attempts,
     open_site_target_page,
+    run_submit_remediation_action,
     start_draft_execution_attempt,
 )
 from jobbot.models.enums import BrowserProfileType
@@ -1223,6 +1224,82 @@ def test_build_submit_remediation_guidance_covers_known_classifications():
         assert guidance["message"] is not None
         assert expected_keyword.lower() in str(guidance["message"]).lower()
         assert guidance["primary_route"] is not None
+
+
+def test_run_submit_remediation_action_replays_refresh_steps_for_probe_failure(
+    tmp_path: Path, monkeypatch
+):
+    session = make_session()
+    job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
+    candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
+    candidate.personal_details = {
+        "email": "alex@example.com",
+        "phone": "+1-555-0100",
+        "location": "Remote",
+        "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    }
+    job = session.query(models.Job).filter_by(id=job_id).one()
+    job.ats_vendor = "greenhouse"
+    browser = BrowserProfile(
+        profile_key="apply-main",
+        profile_type=BrowserProfileType.APPLICATION,
+        display_name="Apply Main",
+        storage_path="/profiles/apply-main",
+        session_health="healthy",
+        validation_details={"reasons": ["session_healthy"]},
+    )
+    session.add(browser)
+    session.commit()
+    attempt = bootstrap_draft_application_attempt(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        browser_profile_key="apply-main",
+    )
+    start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
+    build_draft_field_plan(session, attempt_id=attempt.attempt_id)
+    build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_html",
+        lambda **kwargs: (
+            "<html><body><div data-qa='application-review'>Review</div></body></html>",
+            {
+                "capture_method": "http_get",
+                "status_code": 200,
+                "final_url": kwargs["target_url"],
+            },
+        ),
+    )
+    open_site_target_page(session, attempt_id=attempt.attempt_id)
+    mappings = session.query(models.FieldMapping).filter_by(attempt_id=attempt.attempt_id).all()
+    for mapping in mappings:
+        if mapping.field_key == "why_this_role":
+            mapping.field_key = "prepared_answer_why_role"
+        parsed = json.loads(mapping.raw_dom_signature or "{}")
+        parsed["manual_review_required"] = False
+        parsed["resolution_status"] = "resolved"
+        if not parsed.get("resolved_selector"):
+            parsed["resolved_selector"] = "input[name='autofill']"
+        mapping.raw_dom_signature = json.dumps(parsed, ensure_ascii=True)
+    session.commit()
+    gate = evaluate_submit_gate(session, attempt_id=attempt.attempt_id)
+    assert gate.allow_submit is True
+    try:
+        execute_guarded_submit(session, attempt_id=attempt.attempt_id)
+        assert False, "expected guarded submit probe failure"
+    except ValueError as exc:
+        assert str(exc) == "guarded_submit_probe_failed"
+
+    remediation = run_submit_remediation_action(session, attempt_id=attempt.attempt_id)
+    assert remediation.source_attempt_id == attempt.attempt_id
+    assert remediation.attempt_id != attempt.attempt_id
+    assert remediation.remediation_action == "refresh_target_and_submit_gate"
+    assert "bootstrap" in remediation.executed_steps
+    assert "open_target" in remediation.executed_steps
+    assert "submit_gate" in remediation.executed_steps
+    assert remediation.stop_reason is None
+    assert remediation.allow_submit is True
+    assert remediation.final_failure_code is None
 
 
 def test_execute_guarded_submit_is_idempotent_after_first_success(tmp_path: Path):

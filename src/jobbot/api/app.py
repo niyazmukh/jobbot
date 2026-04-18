@@ -25,6 +25,7 @@ from jobbot.execution import (
     DraftExecutionOverviewRead,
     DraftExecutionReplayBundleRead,
     DraftGuardedSubmitRead,
+    DraftSubmitRemediationActionRead,
     DraftExecutionStartupRead,
     DraftFieldPlanRead,
     DraftSiteFieldPlanRead,
@@ -44,6 +45,7 @@ from jobbot.execution import (
     list_execution_overview,
     list_draft_application_attempts,
     open_site_target_page,
+    run_submit_remediation_action,
     start_draft_execution_attempt,
 )
 from jobbot.discovery.inbox import (
@@ -994,6 +996,80 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=409, detail=detail) from exc
             raise
 
+    @app.post(
+        "/api/execution/draft-attempts/{attempt_id}/remediate-submit",
+        response_model=DraftSubmitRemediationActionRead,
+    )
+    def remediate_submit_attempt_endpoint(
+        attempt_id: int,
+        db: DbSession,
+    ) -> DraftSubmitRemediationActionRead:
+        """Run deterministic remediation replay steps for a blocked submit attempt."""
+
+        try:
+            return run_submit_remediation_action(
+                db,
+                attempt_id=attempt_id,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail in {
+                "application_attempt_not_found",
+                "application_attempt_not_draft",
+                "application_already_applied",
+                "application_not_ready_to_apply",
+                "browser_profile_not_found",
+                "browser_profile_not_application_type",
+                "browser_profile_not_ready_for_application",
+                "prepared_outputs_not_found",
+                "draft_execution_not_started",
+                "draft_field_plan_not_created",
+                "draft_field_plan_empty",
+                "draft_site_overlay_not_created",
+                "browser_profile_required_for_page_open",
+                "page_open_not_supported_for_site",
+                "draft_target_not_opened",
+                "submit_gate_not_supported_for_site",
+            }:
+                raise HTTPException(status_code=404, detail=detail) from exc
+            raise
+
+    @app.post("/execution/draft-attempts/{attempt_id}/remediate-submit", response_class=RedirectResponse)
+    def remediate_submit_attempt_page(
+        attempt_id: int,
+        db: DbSession,
+    ) -> RedirectResponse:
+        """Trigger submit remediation replay from HTML views and redirect to attempt detail."""
+
+        try:
+            run_submit_remediation_action(
+                db,
+                attempt_id=attempt_id,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail in {
+                "application_attempt_not_found",
+                "application_attempt_not_draft",
+                "application_already_applied",
+                "application_not_ready_to_apply",
+                "browser_profile_not_found",
+                "browser_profile_not_application_type",
+                "browser_profile_not_ready_for_application",
+                "prepared_outputs_not_found",
+                "draft_execution_not_started",
+                "draft_field_plan_not_created",
+                "draft_field_plan_empty",
+                "draft_site_overlay_not_created",
+                "browser_profile_required_for_page_open",
+                "page_open_not_supported_for_site",
+                "draft_target_not_opened",
+                "submit_gate_not_supported_for_site",
+            }:
+                raise HTTPException(status_code=404, detail=detail) from exc
+            raise
+        return RedirectResponse(url=f"/execution/attempts/{attempt_id}", status_code=303)
+
     @app.get("/api/review-queue", response_model=list[ReviewQueueRead])
     def list_review_queue_endpoint(
         db: DbSession,
@@ -1528,6 +1604,14 @@ def _render_execution_overview_page(
             if row.submit_remediation_secondary_route
             else ""
         )
+        remediation_retry_form = (
+            "<form method='post' "
+            f"action='{escape(row.submit_remediation_retry_route)}' style='margin-top: 6px;'>"
+            f"<button type='submit'>{escape(str(row.submit_remediation_retry_label or 'Run remediation replay'))}</button>"
+            "</form>"
+            if row.submit_remediation_retry_route
+            else ""
+        )
         card_items.append(
             "<article class='card'>"
             f"<h2>{escape(row.job_title)}</h2>"
@@ -1550,6 +1634,7 @@ def _render_execution_overview_page(
             f"<div class='status'>Troubleshoot: {submit_event_link}{submit_artifact_link}</div>"
             f"<div class='status'>Remediation: {escape(str(row.submit_remediation_message or 'n/a'))}</div>"
             f"<div class='status'>Actions: {remediation_primary_link}{remediation_secondary_link}</div>"
+            f"{remediation_retry_form}"
             f"<div class='status'>Latest stage: {escape(str(row.latest_event_type or 'none'))}</div>"
             f"<div class='status'>Artifacts: {row.artifact_count} total | "
             f"HTML {row.html_snapshot_count} | Model IO {row.model_io_count} | "
@@ -1868,6 +1953,7 @@ def _render_execution_attempt_detail_page(detail: DraftExecutionAttemptDetailRea
         <p>{escape(str(detail.submit_remediation_message or 'No remediation guidance available.'))}</p>
         <p>{f"<a href='{escape(detail.submit_remediation_primary_route)}'>{escape(str(detail.submit_remediation_primary_label or 'Primary remediation action'))}</a>" if detail.submit_remediation_primary_route else "Primary remediation route unavailable."}</p>
         <p>{f"<a href='{escape(detail.submit_remediation_secondary_route)}'>{escape(str(detail.submit_remediation_secondary_label or 'Secondary remediation action'))}</a>" if detail.submit_remediation_secondary_route else "Secondary remediation route unavailable."}</p>
+        <p>{f"<form method='post' action='{escape(detail.submit_remediation_retry_route)}'><button type='submit'>{escape(str(detail.submit_remediation_retry_label or 'Run remediation replay'))}</button></form>" if detail.submit_remediation_retry_route else "Remediation replay route unavailable."}</p>
       </section>
       <section class="panel">
         <h2>Execution Events</h2>

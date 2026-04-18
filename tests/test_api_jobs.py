@@ -1656,6 +1656,9 @@ def test_execution_api_guarded_submit_returns_conflict_when_submit_selector_prob
         inbox_detail_response = client.get(
             f"/api/jobs/{first_job.id}?candidate_profile_slug=alex-doe"
         )
+        remediation_response = client.post(
+            f"/api/execution/draft-attempts/{attempt_id}/remediate-submit"
+        )
     finally:
         app.dependency_overrides.clear()
         session.close()
@@ -1704,6 +1707,16 @@ def test_execution_api_guarded_submit_returns_conflict_when_submit_selector_prob
         inbox_detail_response.json()["execution_summary"]["failure_classification"]
         == "page_changed_still_recognizable"
     )
+
+    assert remediation_response.status_code == 200
+    remediation_payload = remediation_response.json()
+    assert remediation_payload["source_attempt_id"] == attempt_id
+    assert remediation_payload["attempt_id"] != attempt_id
+    assert remediation_payload["remediation_action"] == "refresh_target_and_submit_gate"
+    assert "bootstrap" in remediation_payload["executed_steps"]
+    assert "open_target" in remediation_payload["executed_steps"]
+    assert "submit_gate" in remediation_payload["executed_steps"]
+    assert remediation_payload["stop_reason"] is None
 
 
 def test_execution_api_guarded_submit_returns_conflict_when_submit_interaction_fails(

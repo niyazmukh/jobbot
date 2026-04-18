@@ -68,6 +68,8 @@ class DraftExecutionOverviewRead(BaseModel):
     submit_remediation_primary_label: str | None = None
     submit_remediation_secondary_route: str | None = None
     submit_remediation_secondary_label: str | None = None
+    submit_remediation_retry_route: str | None = None
+    submit_remediation_retry_label: str | None = None
     attempt_route: str
     replay_route: str
     primary_action_route: str
@@ -232,6 +234,8 @@ class DraftExecutionAttemptDetailRead(BaseModel):
     submit_remediation_primary_label: str | None = None
     submit_remediation_secondary_route: str | None = None
     submit_remediation_secondary_label: str | None = None
+    submit_remediation_retry_route: str | None = None
+    submit_remediation_retry_label: str | None = None
     reasons: list[str]
     started_at: datetime
     events: list[DraftExecutionEventRead]
@@ -403,3 +407,27 @@ class DraftGuardedSubmitRead(BaseModel):
     screenshot_artifact_id: int | None = None
     trace_artifact_id: int | None = None
     submitted_at: datetime
+
+
+class DraftSubmitRemediationActionRead(BaseModel):
+    """Read model for deterministic submit-remediation orchestration actions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_attempt_id: int
+    application_id: int
+    attempt_id: int
+    job_id: int
+    candidate_profile_slug: str
+    remediation_action: str
+    executed_steps: list[str]
+    stop_reason: str | None = None
+    failure_code: str | None = None
+    failure_classification: str | None = None
+    allow_submit: bool | None = None
+    submit_confidence: float | None = None
+    final_attempt_result: str | None = None
+    final_failure_code: str | None = None
+    final_failure_classification: str | None = None
+    detail_route: str
+    replay_route: str

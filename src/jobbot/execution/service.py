@@ -37,6 +37,7 @@ from jobbot.execution.schemas import (
     DraftExecutionAttemptDetailRead,
     DraftExecutionEventRead,
     DraftGuardedSubmitRead,
+    DraftSubmitRemediationActionRead,
     DraftExecutionOverviewRead,
     DraftExecutionReplayAssetRead,
     DraftExecutionReplayBundleRead,
@@ -433,6 +434,8 @@ def list_execution_overview(
                 submit_remediation_primary_label=submit_remediation["primary_label"],
                 submit_remediation_secondary_route=submit_remediation["secondary_route"],
                 submit_remediation_secondary_label=submit_remediation["secondary_label"],
+                submit_remediation_retry_route=submit_remediation["retry_route"],
+                submit_remediation_retry_label=submit_remediation["retry_label"],
                 attempt_route=attempt_route,
                 replay_route=replay_route,
                 primary_action_route=primary_action_route,
@@ -696,6 +699,8 @@ def get_execution_attempt_detail(
         submit_remediation_primary_label=submit_remediation["primary_label"],
         submit_remediation_secondary_route=submit_remediation["secondary_route"],
         submit_remediation_secondary_label=submit_remediation["secondary_label"],
+        submit_remediation_retry_route=submit_remediation["retry_route"],
+        submit_remediation_retry_label=submit_remediation["retry_label"],
         reasons=list(eligibility.reasons or []),
         started_at=attempt.started_at,
         events=[
@@ -2198,6 +2203,157 @@ def execute_guarded_submit(
     )
 
 
+def run_submit_remediation_action(
+    session: Session,
+    *,
+    attempt_id: int,
+) -> DraftSubmitRemediationActionRead:
+    """Run deterministic remediation orchestration steps for a blocked draft attempt."""
+
+    detail = get_execution_attempt_detail(session, attempt_id=attempt_id)
+    remediation_action = _resolve_submit_remediation_action(
+        failure_code=detail.failure_code,
+        failure_classification=detail.failure_classification,
+    )
+    executed_steps: list[str] = []
+    stop_reason: str | None = None
+    remediated_attempt_id = attempt_id
+
+    def _run_step(step_name: str, fn):
+        nonlocal stop_reason
+        if stop_reason is not None:
+            return None
+        try:
+            result = fn()
+            executed_steps.append(step_name)
+            return result
+        except ValueError as exc:
+            stop_reason = str(exc)
+            return None
+
+    bootstrap = _run_step(
+        "bootstrap",
+        lambda: bootstrap_draft_application_attempt(
+            session,
+            job_id=detail.job_id,
+            candidate_profile_slug=detail.candidate_profile_slug,
+            browser_profile_key=detail.browser_profile_key,
+        ),
+    )
+    if bootstrap is not None:
+        remediated_attempt_id = bootstrap.attempt_id
+    _run_step(
+        "start",
+        lambda: start_draft_execution_attempt(session, attempt_id=remediated_attempt_id),
+    )
+    _run_step(
+        "field_plan",
+        lambda: build_draft_field_plan(session, attempt_id=remediated_attempt_id),
+    )
+    _run_step(
+        "site_overlay",
+        lambda: build_site_field_overlay(session, attempt_id=remediated_attempt_id),
+    )
+    _run_step(
+        "open_target",
+        lambda: open_site_target_page(session, attempt_id=remediated_attempt_id),
+    )
+    _run_step(
+        "carry_forward_resolution_state",
+        lambda: _carry_forward_resolved_field_state(
+            session=session,
+            source_attempt_id=attempt_id,
+            target_attempt_id=remediated_attempt_id,
+        ),
+    )
+    gate = _run_step(
+        "submit_gate",
+        lambda: evaluate_submit_gate(session, attempt_id=remediated_attempt_id),
+    )
+
+    final_detail = get_execution_attempt_detail(session, attempt_id=remediated_attempt_id)
+    return DraftSubmitRemediationActionRead(
+        source_attempt_id=attempt_id,
+        application_id=final_detail.application_id,
+        attempt_id=final_detail.attempt_id,
+        job_id=final_detail.job_id,
+        candidate_profile_slug=final_detail.candidate_profile_slug,
+        remediation_action=remediation_action,
+        executed_steps=executed_steps,
+        stop_reason=stop_reason,
+        failure_code=detail.failure_code,
+        failure_classification=detail.failure_classification,
+        allow_submit=(gate.allow_submit if gate is not None else None),
+        submit_confidence=(gate.confidence_score if gate is not None else None),
+        final_attempt_result=final_detail.attempt_result,
+        final_failure_code=final_detail.failure_code,
+        final_failure_classification=final_detail.failure_classification,
+        detail_route=f"/execution/attempts/{remediated_attempt_id}",
+        replay_route=f"/execution/replay/{remediated_attempt_id}",
+    )
+
+
+def _carry_forward_resolved_field_state(
+    *,
+    session: Session,
+    source_attempt_id: int,
+    target_attempt_id: int,
+) -> int:
+    """Carry forward operator-reviewed field-key and resolution metadata to a remediated attempt."""
+
+    source_mappings = session.scalars(
+        select(FieldMapping)
+        .where(FieldMapping.attempt_id == source_attempt_id)
+        .order_by(FieldMapping.id)
+    ).all()
+    target_mappings = session.scalars(
+        select(FieldMapping)
+        .where(FieldMapping.attempt_id == target_attempt_id)
+        .order_by(FieldMapping.id)
+    ).all()
+    if not source_mappings or not target_mappings:
+        return 0
+
+    source_by_field_key = {mapping.field_key: mapping for mapping in source_mappings}
+    source_by_answer_id = {
+        int(mapping.answer_id): mapping
+        for mapping in source_mappings
+        if mapping.answer_id is not None
+    }
+    updated = 0
+    for target in target_mappings:
+        source = source_by_field_key.get(target.field_key)
+        if source is None and target.answer_id is not None:
+            source = source_by_answer_id.get(int(target.answer_id))
+        if source is None:
+            continue
+
+        parsed_source = {}
+        if source.raw_dom_signature:
+            try:
+                parsed_source = json.loads(source.raw_dom_signature)
+            except json.JSONDecodeError:
+                parsed_source = {}
+        parsed_target = {}
+        if target.raw_dom_signature:
+            try:
+                parsed_target = json.loads(target.raw_dom_signature)
+            except json.JSONDecodeError:
+                parsed_target = {}
+        for key in ("manual_review_required", "resolution_status", "resolved_selector"):
+            if key in parsed_source:
+                parsed_target[key] = parsed_source[key]
+
+        if source.field_key != target.field_key:
+            target.field_key = source.field_key
+        target.raw_dom_signature = json.dumps(parsed_target, ensure_ascii=True)
+        updated += 1
+
+    if updated:
+        session.commit()
+    return updated
+
+
 def _execution_startup_dir(candidate_slug: str, job_id: int, attempt_id: int) -> Path:
     """Build the filesystem path for a staged execution startup bundle."""
 
@@ -2511,6 +2667,8 @@ def _build_submit_remediation_guidance(
     primary_label = default_primary_label
     secondary_route = replay_route
     secondary_label = "Open replay bundle"
+    retry_route = f"/execution/draft-attempts/{attempt_id}/remediate-submit" if attempt_id > 0 else None
+    retry_label = "Run remediation replay"
 
     if classification == "page_changed_still_recognizable":
         message = (
@@ -2552,6 +2710,8 @@ def _build_submit_remediation_guidance(
             "primary_label": None,
             "secondary_route": None,
             "secondary_label": None,
+            "retry_route": None,
+            "retry_label": None,
         }
 
     if secondary_route == primary_route:
@@ -2565,6 +2725,8 @@ def _build_submit_remediation_guidance(
             "primary_label": primary_label,
             "secondary_route": secondary_route,
             "secondary_label": secondary_label,
+            "retry_route": retry_route,
+            "retry_label": retry_label,
         }
 
     return {
@@ -2573,7 +2735,25 @@ def _build_submit_remediation_guidance(
         "primary_label": primary_label,
         "secondary_route": secondary_route,
         "secondary_label": secondary_label,
+        "retry_route": retry_route,
+        "retry_label": retry_label,
     }
+
+
+def _resolve_submit_remediation_action(
+    *,
+    failure_code: str | None,
+    failure_classification: str | None,
+) -> str:
+    """Resolve one deterministic remediation action key from submit-stage failure signals."""
+
+    classification = (failure_classification or "").strip().lower()
+    normalized_failure_code = (failure_code or "").strip().lower()
+    if classification == "authentication_session_issue":
+        return "reauth_then_refresh_target_and_submit_gate"
+    if normalized_failure_code == "submit_gate_blocked":
+        return "refresh_submit_gate_after_manual_resolution"
+    return "refresh_target_and_submit_gate"
 
 
 def _selector_matches_html(selector: str, html: str) -> bool:

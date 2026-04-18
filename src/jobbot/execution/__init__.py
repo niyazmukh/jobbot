@@ -7,6 +7,8 @@ from jobbot.execution.schemas import (
     DraftExecutionDashboardRead,
     DraftExecutionAttemptDetailRead,
     DraftExecutionEventRead,
+    DraftGuardedSubmitRead,
+    DraftSubmitRemediationActionRead,
     DraftExecutionOverviewRead,
     DraftExecutionReplayAssetRead,
     DraftExecutionReplayBundleRead,
@@ -23,6 +25,7 @@ from jobbot.execution.service import (
     bootstrap_draft_application_attempt,
     build_draft_field_plan,
     build_site_field_overlay,
+    execute_guarded_submit,
     evaluate_submit_gate,
     get_execution_artifact_detail,
     get_execution_artifact_file,
@@ -33,6 +36,7 @@ from jobbot.execution.service import (
     list_execution_overview,
     list_draft_application_attempts,
     open_site_target_page,
+    run_submit_remediation_action,
     start_draft_execution_attempt,
 )
 
@@ -43,6 +47,8 @@ __all__ = [
     "DraftExecutionDashboardRead",
     "DraftExecutionAttemptDetailRead",
     "DraftExecutionEventRead",
+    "DraftGuardedSubmitRead",
+    "DraftSubmitRemediationActionRead",
     "DraftExecutionOverviewRead",
     "DraftExecutionReplayAssetRead",
     "DraftExecutionReplayBundleRead",
@@ -57,6 +63,7 @@ __all__ = [
     "bootstrap_draft_application_attempt",
     "build_draft_field_plan",
     "build_site_field_overlay",
+    "execute_guarded_submit",
     "evaluate_submit_gate",
     "get_execution_artifact_detail",
     "get_execution_artifact_file",
@@ -67,5 +74,6 @@ __all__ = [
     "list_execution_overview",
     "list_draft_application_attempts",
     "open_site_target_page",
+    "run_submit_remediation_action",
     "start_draft_execution_attempt",
 ]
