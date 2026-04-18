@@ -238,6 +238,11 @@ def create_app() -> FastAPI:
         bulk_failed: Annotated[int | None, Query(ge=0)] = None,
         bulk_first_failure_attempt: Annotated[int | None, Query(ge=1)] = None,
         bulk_first_failure_code: str | None = None,
+        history_retention_configured: Annotated[int | None, Query(ge=1, le=500)] = None,
+        history_retention_keep: Annotated[int | None, Query(ge=1, le=500)] = None,
+        history_retention_before: Annotated[int | None, Query(ge=0)] = None,
+        history_retention_after: Annotated[int | None, Query(ge=0)] = None,
+        history_retention_removed: Annotated[int | None, Query(ge=0)] = None,
     ) -> HTMLResponse:
         """Render a candidate-scoped execution dashboard."""
 
@@ -275,6 +280,11 @@ def create_app() -> FastAPI:
                 bulk_failed=bulk_failed,
                 bulk_first_failure_attempt=bulk_first_failure_attempt,
                 bulk_first_failure_code=bulk_first_failure_code,
+                history_retention_configured=history_retention_configured,
+                history_retention_keep=history_retention_keep,
+                history_retention_before=history_retention_before,
+                history_retention_after=history_retention_after,
+                history_retention_removed=history_retention_removed,
                 bulk_history=history,
                 history_sort=history_sort,
             )
@@ -378,6 +388,82 @@ def create_app() -> FastAPI:
             first_failure = remediation_batch.failures[0]
             query_params["bulk_first_failure_attempt"] = str(first_failure.source_attempt_id)
             query_params["bulk_first_failure_code"] = first_failure.error_code
+        query_string = urlencode(query_params)
+        if query_string:
+            redirect_url = f"{redirect_url}?{query_string}"
+        return RedirectResponse(url=redirect_url, status_code=303)
+
+    @app.post(
+        "/execution/dashboard/{candidate_profile_slug}/remediation-history/limit",
+        response_class=RedirectResponse,
+    )
+    def execution_dashboard_history_limit_page(
+        candidate_profile_slug: str,
+        request: Request,
+        db: DbSession,
+        history_limit: Annotated[int, Query(ge=1, le=500)] = 10,
+    ) -> RedirectResponse:
+        """Set remediation-history limit from dashboard HTML and return to dashboard."""
+
+        try:
+            retention = set_execution_dashboard_bulk_history_limit(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                history_limit=history_limit,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
+            if detail == "invalid_execution_dashboard_history_limit":
+                raise HTTPException(status_code=400, detail="invalid_execution_dashboard_history_limit") from exc
+            raise
+
+        redirect_url = f"/execution/dashboard/{candidate_profile_slug}"
+        query_params = dict(parse_qsl(str(request.url.query), keep_blank_values=True))
+        query_params["history_retention_configured"] = str(retention.configured_limit)
+        query_params["history_retention_keep"] = str(retention.keep_limit)
+        query_params["history_retention_before"] = str(retention.before_count)
+        query_params["history_retention_after"] = str(retention.after_count)
+        query_params["history_retention_removed"] = str(retention.removed_count)
+        query_string = urlencode(query_params)
+        if query_string:
+            redirect_url = f"{redirect_url}?{query_string}"
+        return RedirectResponse(url=redirect_url, status_code=303)
+
+    @app.post(
+        "/execution/dashboard/{candidate_profile_slug}/remediation-history/prune",
+        response_class=RedirectResponse,
+    )
+    def execution_dashboard_history_prune_page(
+        candidate_profile_slug: str,
+        request: Request,
+        db: DbSession,
+        keep_limit: Annotated[int | None, Query(ge=1, le=500)] = None,
+    ) -> RedirectResponse:
+        """Prune remediation-history rows from dashboard HTML and return to dashboard."""
+
+        try:
+            retention = prune_execution_dashboard_bulk_history(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                keep_limit=keep_limit,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
+            if detail == "invalid_execution_dashboard_history_limit":
+                raise HTTPException(status_code=400, detail="invalid_execution_dashboard_history_limit") from exc
+            raise
+
+        redirect_url = f"/execution/dashboard/{candidate_profile_slug}"
+        query_params = dict(parse_qsl(str(request.url.query), keep_blank_values=True))
+        query_params["history_retention_configured"] = str(retention.configured_limit)
+        query_params["history_retention_keep"] = str(retention.keep_limit)
+        query_params["history_retention_before"] = str(retention.before_count)
+        query_params["history_retention_after"] = str(retention.after_count)
+        query_params["history_retention_removed"] = str(retention.removed_count)
         query_string = urlencode(query_params)
         if query_string:
             redirect_url = f"{redirect_url}?{query_string}"
@@ -1995,6 +2081,11 @@ def _render_execution_dashboard_page(
     bulk_failed: int | None = None,
     bulk_first_failure_attempt: int | None = None,
     bulk_first_failure_code: str | None = None,
+    history_retention_configured: int | None = None,
+    history_retention_keep: int | None = None,
+    history_retention_before: int | None = None,
+    history_retention_after: int | None = None,
+    history_retention_removed: int | None = None,
     bulk_history: list[DraftExecutionDashboardRemediationHistoryRead] | None = None,
     history_sort: str = "newest",
 ) -> str:
@@ -2076,6 +2167,12 @@ def _render_execution_dashboard_page(
     bulk_by_classification_route = (
         f"{base_bulk_route}?failure_classification={quote(top_failure_classification, safe='')}"
     )
+    history_limit_route = (
+        f"/execution/dashboard/{escape(detail.candidate_profile_slug)}/remediation-history/limit"
+    )
+    history_prune_route = (
+        f"/execution/dashboard/{escape(detail.candidate_profile_slug)}/remediation-history/prune"
+    )
 
     actions_html = "\n".join(f"<li>{escape(action)}</li>" for action in detail.recommended_actions)
     bulk_feedback_html = ""
@@ -2105,6 +2202,33 @@ def _render_execution_dashboard_page(
             "</section>"
         )
     history_rows = list(bulk_history or [])
+    history_retention_feedback_html = ""
+    if history_retention_configured is not None:
+        history_retention_feedback_html = (
+            "<section class='panel'>"
+            "<h2>History Retention Result</h2>"
+            "<div>"
+            f"configured={history_retention_configured} | "
+            f"keep={history_retention_keep if history_retention_keep is not None else history_retention_configured} | "
+            f"before={history_retention_before if history_retention_before is not None else 0} | "
+            f"after={history_retention_after if history_retention_after is not None else 0} | "
+            f"removed={history_retention_removed if history_retention_removed is not None else 0}"
+            "</div>"
+            "</section>"
+        )
+    history_retention_controls_html = (
+        "<section class='panel'>"
+        "<h2>History Retention</h2>"
+        f"<form method='post' action='{history_limit_route}'>"
+        "<label>Set limit: <input type='number' min='1' max='500' name='history_limit' value='10'></label> "
+        "<button type='submit'>Save limit</button>"
+        "</form>"
+        f"<form method='post' action='{history_prune_route}'>"
+        "<label>Prune keep limit (optional): <input type='number' min='1' max='500' name='keep_limit'></label> "
+        "<button type='submit'>Prune now</button>"
+        "</form>"
+        "</section>"
+    )
     bulk_history_html = ""
     if history_rows:
         history_sort_controls = (
@@ -2211,6 +2335,8 @@ def _render_execution_dashboard_page(
         <div><a href="/execution/overview/{escape(detail.candidate_profile_slug)}">Open execution overview</a></div>
       </section>
       {bulk_feedback_html}
+      {history_retention_feedback_html}
+      {history_retention_controls_html}
       {bulk_history_html}
       <section class="panel">
         <h2>Bulk Remediation</h2>

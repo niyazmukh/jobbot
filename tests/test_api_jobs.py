@@ -4094,3 +4094,101 @@ def test_execution_dashboard_remediation_history_api_can_set_limit_and_prune():
     assert prune_payload["before_count"] == 2
     assert prune_payload["after_count"] == 2
     assert prune_payload["removed_count"] == 0
+
+
+def test_execution_dashboard_html_surfaces_history_retention_controls():
+    session = make_session()
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={"email": "alex@example.com"},
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.get("/execution/dashboard/alex-doe")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    assert "History Retention" in response.text
+    assert "/execution/dashboard/alex-doe/remediation-history/limit" in response.text
+    assert "/execution/dashboard/alex-doe/remediation-history/prune" in response.text
+
+
+def test_execution_dashboard_html_history_retention_actions_apply_and_redirect():
+    session = make_session()
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={"email": "alex@example.com"},
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={
+            "resume_path": "/profiles/alex-doe/resume.pdf",
+            "execution_dashboard_bulk_history": [
+                {
+                    "history_id": "hist-ui-1",
+                    "created_at": "2026-04-18T08:00:00+00:00",
+                    "requested_count": 1,
+                    "remediated_count": 1,
+                    "failed_count": 0,
+                },
+                {
+                    "history_id": "hist-ui-2",
+                    "created_at": "2026-04-18T09:00:00+00:00",
+                    "requested_count": 1,
+                    "remediated_count": 1,
+                    "failed_count": 0,
+                },
+                {
+                    "history_id": "hist-ui-3",
+                    "created_at": "2026-04-18T10:00:00+00:00",
+                    "requested_count": 1,
+                    "remediated_count": 1,
+                    "failed_count": 0,
+                },
+            ],
+        },
+    )
+    session.add(candidate)
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        set_limit = client.post(
+            "/execution/dashboard/alex-doe/remediation-history/limit?history_limit=2",
+            follow_redirects=False,
+        )
+        prune = client.post(
+            "/execution/dashboard/alex-doe/remediation-history/prune",
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert set_limit.status_code == 303
+    assert "history_retention_configured=2" in set_limit.headers["location"]
+    assert "history_retention_removed=1" in set_limit.headers["location"]
+    assert prune.status_code == 303
+    assert "history_retention_configured=2" in prune.headers["location"]
+    assert "history_retention_removed=0" in prune.headers["location"]
