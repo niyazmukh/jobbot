@@ -32,6 +32,7 @@ def test_cli_list_remediation_history_shows_rows(monkeypatch):
                 "resume_path": "/profiles/alex-doe/resume.pdf",
                 "execution_dashboard_bulk_history": [
                     {
+                        "history_id": "hist-cli-001",
                         "created_at": "2026-04-18T10:00:00+00:00",
                         "requested_count": 4,
                         "remediated_count": 3,
@@ -68,6 +69,7 @@ def test_cli_list_remediation_history_shows_rows(monkeypatch):
     assert result.exit_code == 0
     assert "Execution Remediation History" in result.stdout
     assert "4/3/1" in result.stdout
+    assert "hist-cli-001" in result.stdout
 
 
 def test_cli_replay_remediation_history_replays_scope(monkeypatch):
@@ -83,6 +85,7 @@ def test_cli_replay_remediation_history_replays_scope(monkeypatch):
                 "resume_path": "/profiles/alex-doe/resume.pdf",
                 "execution_dashboard_bulk_history": [
                     {
+                        "history_id": "hist-cli-002",
                         "created_at": "2026-04-18T09:00:00+00:00",
                         "requested_count": 5,
                         "remediated_count": 2,
@@ -109,10 +112,8 @@ def test_cli_replay_remediation_history_replays_scope(monkeypatch):
             "replay-remediation-history",
             "--candidate-profile",
             "alex-doe",
-            "--history-index",
-            "1",
-            "--history-sort",
-            "newest",
+            "--history-id",
+            "hist-cli-002",
         ],
     )
 

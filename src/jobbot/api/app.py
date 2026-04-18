@@ -45,12 +45,12 @@ from jobbot.execution import (
     get_execution_attempt_detail,
     get_execution_replay_asset_file,
     get_execution_replay_bundle,
-    list_execution_dashboard_bulk_history,
     list_execution_dashboard_bulk_history_reads,
     list_execution_overview,
     list_draft_application_attempts,
     open_site_target_page,
     record_execution_dashboard_bulk_history,
+    replay_execution_dashboard_bulk_history_by_id,
     run_dashboard_bulk_submit_remediation,
     run_submit_remediation_action,
     start_draft_execution_attempt,
@@ -250,7 +250,7 @@ def create_app() -> FastAPI:
                 descending=descending,
                 limit=limit,
             )
-            history = list_execution_dashboard_bulk_history(
+            history = list_execution_dashboard_bulk_history_reads(
                 db,
                 candidate_profile_slug=candidate_profile_slug,
                 history_sort=history_sort,
@@ -323,6 +323,47 @@ def create_app() -> FastAPI:
             if str(exc) == "candidate_profile_not_found":
                 raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
             if str(exc) == "invalid_execution_overview_sort":
+                raise HTTPException(status_code=400, detail="invalid_execution_overview_sort") from exc
+            raise
+        redirect_url = f"/execution/dashboard/{candidate_profile_slug}"
+        query_params = dict(parse_qsl(str(request.url.query), keep_blank_values=True))
+        query_params["bulk_requested"] = str(remediation_batch.requested_count)
+        query_params["bulk_remediated"] = str(remediation_batch.remediated_count)
+        query_params["bulk_failed"] = str(remediation_batch.failed_count)
+        if remediation_batch.failures:
+            first_failure = remediation_batch.failures[0]
+            query_params["bulk_first_failure_attempt"] = str(first_failure.source_attempt_id)
+            query_params["bulk_first_failure_code"] = first_failure.error_code
+        query_string = urlencode(query_params)
+        if query_string:
+            redirect_url = f"{redirect_url}?{query_string}"
+        return RedirectResponse(url=redirect_url, status_code=303)
+
+    @app.post(
+        "/execution/dashboard/{candidate_profile_slug}/bulk-remediate-submit/history/{history_id}",
+        response_class=RedirectResponse,
+    )
+    def execution_dashboard_bulk_remediation_history_replay_page(
+        candidate_profile_slug: str,
+        history_id: str,
+        request: Request,
+        db: DbSession,
+    ) -> RedirectResponse:
+        """Replay one persisted dashboard remediation-history scope and return to dashboard."""
+
+        try:
+            remediation_batch = replay_execution_dashboard_bulk_history_by_id(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                history_id=history_id,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
+            if detail == "execution_dashboard_history_id_not_found":
+                raise HTTPException(status_code=404, detail="execution_dashboard_history_id_not_found") from exc
+            if detail == "invalid_execution_overview_sort":
                 raise HTTPException(status_code=400, detail="invalid_execution_overview_sort") from exc
             raise
         redirect_url = f"/execution/dashboard/{candidate_profile_slug}"
@@ -841,6 +882,33 @@ def create_app() -> FastAPI:
             if str(exc) == "candidate_profile_not_found":
                 raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
             if str(exc) == "invalid_execution_overview_sort":
+                raise HTTPException(status_code=400, detail="invalid_execution_overview_sort") from exc
+            raise
+
+    @app.post(
+        "/api/execution/dashboard/{candidate_profile_slug}/bulk-remediate-submit/history/{history_id}",
+        response_model=DraftSubmitRemediationBatchRead,
+    )
+    def execution_dashboard_bulk_remediation_history_replay_endpoint(
+        candidate_profile_slug: str,
+        history_id: str,
+        db: DbSession,
+    ) -> DraftSubmitRemediationBatchRead:
+        """Replay one persisted dashboard bulk-remediation history row by stable id."""
+
+        try:
+            return replay_execution_dashboard_bulk_history_by_id(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                history_id=history_id,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
+            if detail == "execution_dashboard_history_id_not_found":
+                raise HTTPException(status_code=404, detail="execution_dashboard_history_id_not_found") from exc
+            if detail == "invalid_execution_overview_sort":
                 raise HTTPException(status_code=400, detail="invalid_execution_overview_sort") from exc
             raise
 
@@ -1874,7 +1942,7 @@ def _render_execution_dashboard_page(
     bulk_failed: int | None = None,
     bulk_first_failure_attempt: int | None = None,
     bulk_first_failure_code: str | None = None,
-    bulk_history: list[dict] | None = None,
+    bulk_history: list[DraftExecutionDashboardRemediationHistoryRead] | None = None,
     history_sort: str = "newest",
 ) -> str:
     """Render a candidate-scoped execution dashboard page."""
@@ -1996,46 +2064,34 @@ def _render_execution_dashboard_page(
         history_items = []
         for row in history_rows:
             summary = (
-                f"targeted={int(row.get('requested_count', 0))} | "
-                f"remediated={int(row.get('remediated_count', 0))} | "
-                f"failed={int(row.get('failed_count', 0))}"
+                f"targeted={row.requested_count} | "
+                f"remediated={row.remediated_count} | "
+                f"failed={row.failed_count}"
             )
             scopes: list[str] = []
-            if row.get("failure_code"):
-                scopes.append(f"failure_code={row['failure_code']}")
-            if row.get("failure_classification"):
-                scopes.append(f"failure_classification={row['failure_classification']}")
-            if row.get("manual_review_only"):
+            if row.failure_code:
+                scopes.append(f"failure_code={row.failure_code}")
+            if row.failure_classification:
+                scopes.append(f"failure_classification={row.failure_classification}")
+            if row.manual_review_only:
                 scopes.append("manual_review_only=true")
             scope_line = f"<br><small>{escape(' | '.join(scopes))}</small>" if scopes else ""
             recorded_line = (
-                f"<br><small>Recorded: {escape(str(row.get('created_at') or 'unknown'))}</small>"
+                f"<br><small>Recorded: {escape(str(row.created_at or 'unknown'))}</small>"
             )
             first_failure_line = ""
-            if row.get("first_failure_attempt_id") is not None and row.get("first_failure_code"):
+            if row.first_failure_attempt_id is not None and row.first_failure_code:
                 first_failure_line = (
                     "<br><small>"
-                    f"First failure: attempt #{int(row['first_failure_attempt_id'])} "
-                    f"({escape(str(row['first_failure_code']))})"
+                    f"First failure: attempt #{row.first_failure_attempt_id} "
+                    f"({escape(str(row.first_failure_code))})"
                     "</small>"
                 )
-            rerun_params: list[tuple[str, str]] = []
-            if row.get("failure_code"):
-                rerun_params.append(("failure_code", str(row["failure_code"])))
-            if row.get("failure_classification"):
-                rerun_params.append(("failure_classification", str(row["failure_classification"])))
-            if row.get("manual_review_only"):
-                rerun_params.append(("manual_review_only", "true"))
-            rerun_params.append(("limit", str(int(row.get("limit", 25)))))
-            rerun_params.append(("sort_by", str(row.get("sort_by", "started_at"))))
-            rerun_params.append(("descending", "true" if row.get("descending", True) else "false"))
-            if row.get("max_submit_confidence") is not None:
-                rerun_params.append(("max_submit_confidence", str(row["max_submit_confidence"])))
-            rerun_route = f"{base_bulk_route}?{urlencode(rerun_params)}"
             history_items.append(
                 "<li>"
                 f"{escape(summary)}{scope_line}{recorded_line}{first_failure_line}"
-                f"<br><form method='post' action='{escape(rerun_route)}'>"
+                f"<br><small>History ID: {escape(row.history_id)}</small>"
+                f"<br><form method='post' action='{escape(row.rerun_route)}'>"
                 "<button type='submit'>Re-run scope</button>"
                 "</form>"
                 "</li>"

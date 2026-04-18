@@ -36,13 +36,11 @@ from jobbot.execution.service import (
     get_execution_attempt_detail,
     get_execution_dashboard,
     get_execution_replay_bundle,
-    list_execution_dashboard_bulk_history,
     list_execution_dashboard_bulk_history_reads,
     list_execution_overview,
     list_draft_application_attempts,
     open_site_target_page,
-    record_execution_dashboard_bulk_history,
-    run_dashboard_bulk_submit_remediation,
+    replay_execution_dashboard_bulk_history_by_id,
     start_draft_execution_attempt,
 )
 from jobbot.discovery.inbox import list_inbox_jobs, list_ready_to_apply_jobs
@@ -675,6 +673,7 @@ def list_remediation_history_cmd(
 
     table = Table(title="Execution Remediation History", show_header=True, header_style="bold cyan")
     table.add_column("#", justify="right")
+    table.add_column("History ID", no_wrap=True)
     table.add_column("Recorded")
     table.add_column("Targeted/Remediated/Failed")
     table.add_column("Scope")
@@ -694,6 +693,7 @@ def list_remediation_history_cmd(
             first_failure = f"{row.first_failure_attempt_id}:{row.first_failure_code}"
         table.add_row(
             str(index),
+            row.history_id,
             row.created_at,
             f"{row.requested_count}/{row.remediated_count}/{row.failed_count}",
             " | ".join(scope_bits),
@@ -707,56 +707,32 @@ def list_remediation_history_cmd(
 @app.command("replay-remediation-history")
 def replay_remediation_history_cmd(
     candidate_profile: str = typer.Option(..., "--candidate-profile"),
-    history_index: int = typer.Option(1, "--history-index", min=1),
+    history_id: str | None = typer.Option(None, "--history-id"),
+    history_index: int | None = typer.Option(None, "--history-index", min=1),
     history_sort: str = typer.Option("newest", "--history-sort"),
 ) -> None:
-    """Replay a persisted remediation-history scope by index."""
+    """Replay a persisted remediation-history scope by stable id or fallback index."""
 
     session = SessionLocal()
     try:
-        history_rows = list_execution_dashboard_bulk_history(
+        if history_id and history_index is not None:
+            raise typer.BadParameter("choose_history_id_or_history_index")
+        replay_history_id = history_id
+        if replay_history_id is None:
+            resolved_history_index = history_index or 1
+            history_rows = list_execution_dashboard_bulk_history_reads(
+                session,
+                candidate_profile_slug=candidate_profile,
+                history_sort=history_sort,
+                limit=max(resolved_history_index, 50),
+            )
+            if resolved_history_index > len(history_rows):
+                raise typer.BadParameter("remediation_history_index_out_of_range")
+            replay_history_id = history_rows[resolved_history_index - 1].history_id
+        batch = replay_execution_dashboard_bulk_history_by_id(
             session,
             candidate_profile_slug=candidate_profile,
-            history_sort=history_sort,
-            limit=max(history_index, 50),
-        )
-        if history_index > len(history_rows):
-            raise typer.BadParameter("remediation_history_index_out_of_range")
-        row = history_rows[history_index - 1]
-        batch = run_dashboard_bulk_submit_remediation(
-            session,
-            candidate_profile_slug=candidate_profile,
-            manual_review_only=bool(row.get("manual_review_only", False)),
-            failure_code=(str(row["failure_code"]) if row.get("failure_code") else None),
-            failure_classification=(
-                str(row["failure_classification"]) if row.get("failure_classification") else None
-            ),
-            max_submit_confidence=(
-                float(row["max_submit_confidence"])
-                if row.get("max_submit_confidence") is not None
-                else None
-            ),
-            sort_by=str(row.get("sort_by", "started_at")),
-            descending=bool(row.get("descending", True)),
-            limit=int(row.get("limit", 25)),
-        )
-        record_execution_dashboard_bulk_history(
-            session,
-            candidate_profile_slug=candidate_profile,
-            remediation_batch=batch,
-            manual_review_only=bool(row.get("manual_review_only", False)),
-            failure_code=(str(row["failure_code"]) if row.get("failure_code") else None),
-            failure_classification=(
-                str(row["failure_classification"]) if row.get("failure_classification") else None
-            ),
-            max_submit_confidence=(
-                float(row["max_submit_confidence"])
-                if row.get("max_submit_confidence") is not None
-                else None
-            ),
-            sort_by=str(row.get("sort_by", "started_at")),
-            descending=bool(row.get("descending", True)),
-            limit=int(row.get("limit", 25)),
+            history_id=replay_history_id,
         )
     except ValueError as exc:
         session.close()

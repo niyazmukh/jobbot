@@ -461,6 +461,7 @@ class DraftExecutionDashboardRemediationHistoryRead(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    history_id: str
     created_at: str
     requested_count: int
     remediated_count: int

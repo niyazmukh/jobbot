@@ -3772,10 +3772,7 @@ def test_execution_dashboard_html_persists_bulk_remediation_history():
     assert "failure_code=submit_gate_blocked" in response.text
     assert "manual_review_only=true" in response.text
     assert "Re-run scope" in response.text
-    assert (
-        "/execution/dashboard/alex-doe/bulk-remediate-submit?manual_review_only=true&amp;limit=3&amp;sort_by=started_at&amp;descending=true"
-        in response.text
-    )
+    assert "/execution/dashboard/alex-doe/bulk-remediate-submit/history/" in response.text
 
 
 def test_execution_dashboard_html_history_supports_sort_and_metadata():
@@ -3934,13 +3931,14 @@ def test_execution_dashboard_remediation_history_api_supports_sort_and_replay_ro
     assert response.status_code == 200
     payload = response.json()
     assert len(payload) == 2
+    assert payload[0]["history_id"]
     assert payload[0]["failed_count"] == 3
     assert payload[0]["manual_review_only"] is True
     assert payload[0]["first_failure_attempt_id"] == 101
     assert payload[0]["first_failure_code"] == "draft_field_plan_not_created"
     assert (
         payload[0]["rerun_route"]
-        == "/execution/dashboard/alex-doe/bulk-remediate-submit?manual_review_only=true&limit=5&sort_by=started_at&descending=true"
+        == f"/execution/dashboard/alex-doe/bulk-remediate-submit/history/{payload[0]['history_id']}"
     )
 
 
@@ -3974,3 +3972,54 @@ def test_execution_dashboard_remediation_history_api_rejects_invalid_sort():
 
     assert response.status_code == 400
     assert response.json()["detail"] == "invalid_execution_dashboard_history_sort"
+
+
+def test_execution_dashboard_bulk_remediation_api_can_replay_history_by_id():
+    session = make_session()
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={"email": "alex@example.com"},
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={
+            "resume_path": "/profiles/alex-doe/resume.pdf",
+            "execution_dashboard_bulk_history": [
+                {
+                    "history_id": "hist-cli-001",
+                    "created_at": "2026-04-18T10:00:00+00:00",
+                    "requested_count": 4,
+                    "remediated_count": 3,
+                    "failed_count": 1,
+                    "manual_review_only": True,
+                    "limit": 4,
+                    "sort_by": "started_at",
+                    "descending": True,
+                }
+            ],
+        },
+    )
+    session.add(candidate)
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/api/execution/dashboard/alex-doe/bulk-remediate-submit/history/hist-cli-001"
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["candidate_profile_slug"] == "alex-doe"
+    assert payload["requested_count"] == 0
+    assert payload["remediated_count"] == 0
+    assert payload["failed_count"] == 0

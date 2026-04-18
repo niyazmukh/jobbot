@@ -7,10 +7,12 @@ import mimetypes
 import os
 import re
 import tempfile
+from hashlib import sha1
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -2376,6 +2378,7 @@ def record_execution_dashboard_bulk_history(
     history.insert(
         0,
         {
+            "history_id": f"hist-{uuid4().hex}",
             "created_at": utcnow().isoformat(),
             "requested_count": remediation_batch.requested_count,
             "remediated_count": remediation_batch.remediated_count,
@@ -2413,7 +2416,10 @@ def list_execution_dashboard_bulk_history(
     )
     if candidate is None:
         raise ValueError("candidate_profile_not_found")
-    history = list((candidate.source_profile_data or {}).get("execution_dashboard_bulk_history") or [])
+    history = [
+        _normalize_dashboard_history_row(row)
+        for row in list((candidate.source_profile_data or {}).get("execution_dashboard_bulk_history") or [])
+    ]
     if history_sort == "newest":
         history.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
     elif history_sort == "oldest":
@@ -2423,6 +2429,78 @@ def list_execution_dashboard_bulk_history(
     else:
         raise ValueError("invalid_execution_dashboard_history_sort")
     return history[:limit]
+
+
+def get_execution_dashboard_bulk_history_by_id(
+    session: Session,
+    *,
+    candidate_profile_slug: str,
+    history_id: str,
+) -> dict:
+    """Return one persisted dashboard history row by stable history identifier."""
+
+    candidate = session.scalar(
+        select(CandidateProfile).where(CandidateProfile.slug == candidate_profile_slug)
+    )
+    if candidate is None:
+        raise ValueError("candidate_profile_not_found")
+    rows = list((candidate.source_profile_data or {}).get("execution_dashboard_bulk_history") or [])
+    for row in rows:
+        normalized = _normalize_dashboard_history_row(row)
+        if normalized["history_id"] == history_id:
+            return normalized
+    raise ValueError("execution_dashboard_history_id_not_found")
+
+
+def replay_execution_dashboard_bulk_history_by_id(
+    session: Session,
+    *,
+    candidate_profile_slug: str,
+    history_id: str,
+) -> DraftSubmitRemediationBatchRead:
+    """Replay one persisted dashboard remediation-history row by stable history identifier."""
+
+    row = get_execution_dashboard_bulk_history_by_id(
+        session,
+        candidate_profile_slug=candidate_profile_slug,
+        history_id=history_id,
+    )
+    batch = run_dashboard_bulk_submit_remediation(
+        session,
+        candidate_profile_slug=candidate_profile_slug,
+        manual_review_only=bool(row.get("manual_review_only", False)),
+        failure_code=(str(row["failure_code"]) if row.get("failure_code") else None),
+        failure_classification=(
+            str(row["failure_classification"]) if row.get("failure_classification") else None
+        ),
+        max_submit_confidence=(
+            float(row["max_submit_confidence"])
+            if row.get("max_submit_confidence") is not None
+            else None
+        ),
+        sort_by=str(row.get("sort_by", "started_at")),
+        descending=bool(row.get("descending", True)),
+        limit=int(row.get("limit", 25)),
+    )
+    record_execution_dashboard_bulk_history(
+        session,
+        candidate_profile_slug=candidate_profile_slug,
+        remediation_batch=batch,
+        manual_review_only=bool(row.get("manual_review_only", False)),
+        failure_code=(str(row["failure_code"]) if row.get("failure_code") else None),
+        failure_classification=(
+            str(row["failure_classification"]) if row.get("failure_classification") else None
+        ),
+        max_submit_confidence=(
+            float(row["max_submit_confidence"])
+            if row.get("max_submit_confidence") is not None
+            else None
+        ),
+        sort_by=str(row.get("sort_by", "started_at")),
+        descending=bool(row.get("descending", True)),
+        limit=int(row.get("limit", 25)),
+    )
+    return batch
 
 
 def list_execution_dashboard_bulk_history_reads(
@@ -2440,24 +2518,13 @@ def list_execution_dashboard_bulk_history_reads(
         history_sort=history_sort,
         limit=limit,
     )
-    base_route = f"/execution/dashboard/{candidate_profile_slug}/bulk-remediate-submit"
+    base_route = f"/execution/dashboard/{candidate_profile_slug}/bulk-remediate-submit/history"
     items: list[DraftExecutionDashboardRemediationHistoryRead] = []
     for row in rows:
-        rerun_params: list[tuple[str, str]] = []
-        if row.get("failure_code"):
-            rerun_params.append(("failure_code", str(row["failure_code"])))
-        if row.get("failure_classification"):
-            rerun_params.append(("failure_classification", str(row["failure_classification"])))
-        if row.get("manual_review_only"):
-            rerun_params.append(("manual_review_only", "true"))
-        rerun_params.append(("limit", str(int(row.get("limit", 25)))))
-        rerun_params.append(("sort_by", str(row.get("sort_by", "started_at"))))
-        rerun_params.append(("descending", "true" if row.get("descending", True) else "false"))
-        if row.get("max_submit_confidence") is not None:
-            rerun_params.append(("max_submit_confidence", str(row["max_submit_confidence"])))
-        rerun_route = f"{base_route}?{urlencode(rerun_params)}"
+        rerun_route = f"{base_route}/{row['history_id']}"
         items.append(
             DraftExecutionDashboardRemediationHistoryRead(
+                history_id=str(row["history_id"]),
                 created_at=str(row.get("created_at") or ""),
                 requested_count=int(row.get("requested_count", 0)),
                 remediated_count=int(row.get("remediated_count", 0)),
@@ -2491,6 +2558,24 @@ def list_execution_dashboard_bulk_history_reads(
             )
         )
     return items
+
+
+def _normalize_dashboard_history_row(row: dict) -> dict:
+    """Return a dashboard-history row with a stable history id for replay-by-id actions."""
+
+    normalized = dict(row)
+    history_id = str(normalized.get("history_id") or "").strip()
+    if history_id:
+        normalized["history_id"] = history_id
+        return normalized
+    legacy_payload = json.dumps(
+        {key: value for key, value in normalized.items() if key != "history_id"},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    normalized["history_id"] = f"legacy-{sha1(legacy_payload.encode('utf-8')).hexdigest()[:16]}"
+    return normalized
 
 
 def _carry_forward_resolved_field_state(
