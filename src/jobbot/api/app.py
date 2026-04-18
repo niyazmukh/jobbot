@@ -22,6 +22,7 @@ from jobbot.execution import (
     DraftApplicationAttemptRead,
     DraftExecutionArtifactDetailRead,
     DraftExecutionDashboardRead,
+    DraftExecutionDashboardRemediationHistoryRead,
     DraftExecutionAttemptDetailRead,
     DraftExecutionOverviewRead,
     DraftExecutionReplayBundleRead,
@@ -45,6 +46,7 @@ from jobbot.execution import (
     get_execution_replay_asset_file,
     get_execution_replay_bundle,
     list_execution_dashboard_bulk_history,
+    list_execution_dashboard_bulk_history_reads,
     list_execution_overview,
     list_draft_application_attempts,
     open_site_target_page,
@@ -778,6 +780,32 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
             if str(exc) == "invalid_execution_overview_sort":
                 raise HTTPException(status_code=400, detail="invalid_execution_overview_sort") from exc
+            raise
+
+    @app.get(
+        "/api/execution/dashboard/{candidate_profile_slug}/remediation-history",
+        response_model=list[DraftExecutionDashboardRemediationHistoryRead],
+    )
+    def execution_dashboard_remediation_history_endpoint(
+        candidate_profile_slug: str,
+        db: DbSession,
+        history_sort: str = "newest",
+        limit: Annotated[int, Query(ge=1, le=50)] = 5,
+    ) -> list[DraftExecutionDashboardRemediationHistoryRead]:
+        """Return candidate-scoped dashboard bulk-remediation history rows."""
+
+        try:
+            return list_execution_dashboard_bulk_history_reads(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                history_sort=history_sort,
+                limit=limit,
+            )
+        except ValueError as exc:
+            if str(exc) == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
+            if str(exc) == "invalid_execution_dashboard_history_sort":
+                raise HTTPException(status_code=400, detail="invalid_execution_dashboard_history_sort") from exc
             raise
 
     @app.post(

@@ -454,3 +454,24 @@ class DraftSubmitRemediationBatchRead(BaseModel):
     targeted_attempt_ids: list[int]
     results: list[DraftSubmitRemediationActionRead]
     failures: list[DraftSubmitRemediationFailureRead]
+
+
+class DraftExecutionDashboardRemediationHistoryRead(BaseModel):
+    """Read model for one persisted dashboard bulk-remediation history entry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    created_at: str
+    requested_count: int
+    remediated_count: int
+    failed_count: int
+    failure_code: str | None = None
+    failure_classification: str | None = None
+    manual_review_only: bool = False
+    max_submit_confidence: float | None = None
+    sort_by: str
+    descending: bool
+    limit: int
+    first_failure_attempt_id: int | None = None
+    first_failure_code: str | None = None
+    rerun_route: str

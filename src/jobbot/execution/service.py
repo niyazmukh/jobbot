@@ -8,6 +8,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
+from urllib.parse import urlencode
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -37,6 +38,7 @@ from jobbot.execution.schemas import (
     DraftExecutionAttemptDetailRead,
     DraftExecutionEventRead,
     DraftGuardedSubmitRead,
+    DraftExecutionDashboardRemediationHistoryRead,
     DraftSubmitRemediationBatchRead,
     DraftSubmitRemediationActionRead,
     DraftSubmitRemediationFailureRead,
@@ -2421,6 +2423,74 @@ def list_execution_dashboard_bulk_history(
     else:
         raise ValueError("invalid_execution_dashboard_history_sort")
     return history[:limit]
+
+
+def list_execution_dashboard_bulk_history_reads(
+    session: Session,
+    *,
+    candidate_profile_slug: str,
+    history_sort: str = "newest",
+    limit: int = 5,
+) -> list[DraftExecutionDashboardRemediationHistoryRead]:
+    """Return typed dashboard bulk-remediation history entries with replay routes."""
+
+    rows = list_execution_dashboard_bulk_history(
+        session,
+        candidate_profile_slug=candidate_profile_slug,
+        history_sort=history_sort,
+        limit=limit,
+    )
+    base_route = f"/execution/dashboard/{candidate_profile_slug}/bulk-remediate-submit"
+    items: list[DraftExecutionDashboardRemediationHistoryRead] = []
+    for row in rows:
+        rerun_params: list[tuple[str, str]] = []
+        if row.get("failure_code"):
+            rerun_params.append(("failure_code", str(row["failure_code"])))
+        if row.get("failure_classification"):
+            rerun_params.append(("failure_classification", str(row["failure_classification"])))
+        if row.get("manual_review_only"):
+            rerun_params.append(("manual_review_only", "true"))
+        rerun_params.append(("limit", str(int(row.get("limit", 25)))))
+        rerun_params.append(("sort_by", str(row.get("sort_by", "started_at"))))
+        rerun_params.append(("descending", "true" if row.get("descending", True) else "false"))
+        if row.get("max_submit_confidence") is not None:
+            rerun_params.append(("max_submit_confidence", str(row["max_submit_confidence"])))
+        rerun_route = f"{base_route}?{urlencode(rerun_params)}"
+        items.append(
+            DraftExecutionDashboardRemediationHistoryRead(
+                created_at=str(row.get("created_at") or ""),
+                requested_count=int(row.get("requested_count", 0)),
+                remediated_count=int(row.get("remediated_count", 0)),
+                failed_count=int(row.get("failed_count", 0)),
+                failure_code=(str(row["failure_code"]) if row.get("failure_code") is not None else None),
+                failure_classification=(
+                    str(row["failure_classification"])
+                    if row.get("failure_classification") is not None
+                    else None
+                ),
+                manual_review_only=bool(row.get("manual_review_only", False)),
+                max_submit_confidence=(
+                    float(row["max_submit_confidence"])
+                    if row.get("max_submit_confidence") is not None
+                    else None
+                ),
+                sort_by=str(row.get("sort_by", "started_at")),
+                descending=bool(row.get("descending", True)),
+                limit=int(row.get("limit", 25)),
+                first_failure_attempt_id=(
+                    int(row["first_failure_attempt_id"])
+                    if row.get("first_failure_attempt_id") is not None
+                    else None
+                ),
+                first_failure_code=(
+                    str(row["first_failure_code"])
+                    if row.get("first_failure_code") is not None
+                    else None
+                ),
+                rerun_route=rerun_route,
+            )
+        )
+    return items
 
 
 def _carry_forward_resolved_field_state(
