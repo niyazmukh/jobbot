@@ -141,6 +141,7 @@
 - Added dashboard-scoped bulk submit remediation orchestration (`/api/execution/dashboard/{candidate_profile_slug}/bulk-remediate-submit`) with deterministic blocked-attempt targeting and failure/classification/confidence filters.
 - Added matching HTML dashboard bulk-remediation trigger route and action panel for operator-facing batch replay from dashboard surfaces.
 - Hardened dashboard-scoped bulk submit remediation with per-attempt partial-failure capture (`failed_count`, `failures`) so one replay error no longer aborts the full batch.
+- Added scoped dashboard bulk-remediation controls (top failure code, manual-review-only, top failure classification) so operators can launch filtered batch replays directly from HTML without manual query-string edits.
 - Brought the scoped JobBot test suite to green in `.venv` with `154 passed`.
 
 ## In Progress
@@ -161,7 +162,7 @@
 ## Next Tasks
 1. Promote the replay bundle and dashboard into a broader multi-ATS execution control center once multiple handlers exist.
 2. Tighten guarded-submit interaction policies from simulated fallback toward stricter browser-executed submit evidence as profile/session reliability instrumentation improves.
-3. Add scoped HTML dashboard bulk-remediation controls (failure code/classification/manual-review-only inputs) so operators can trigger filtered batches without editing query strings manually.
+3. Preserve dashboard bulk-remediation filter context on post-action redirects so operators return to the same scoped view after triggering a batch.
 
 ## Decisions
 - New implementation lives in `src/jobbot/` instead of modifying existing bot repos.

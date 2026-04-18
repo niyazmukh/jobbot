@@ -3638,3 +3638,18 @@ def test_execution_dashboard_api_and_html_surface_summary_and_links(tmp_path):
     assert f"/execution/replay/{blocked_attempt_id}" in html_response.text
     assert f"/execution/attempts/{blocked_attempt_id}" in html_response.text
     assert "Open HTML" in html_response.text
+    assert "Run blocked-only remediation" in html_response.text
+    assert "Run manual-review remediation" in html_response.text
+    assert "Run classification remediation" in html_response.text
+    assert (
+        "/execution/dashboard/alex-doe/bulk-remediate-submit?failure_code=submit_gate_blocked"
+        in html_response.text
+    )
+    assert (
+        "/execution/dashboard/alex-doe/bulk-remediate-submit?manual_review_only=true"
+        in html_response.text
+    )
+    assert (
+        "/execution/dashboard/alex-doe/bulk-remediate-submit?failure_classification=unknown_classification"
+        in html_response.text
+    )

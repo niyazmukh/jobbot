@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from html import escape
 from typing import Annotated
+from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -1844,6 +1845,27 @@ def _render_execution_dashboard_page(detail: DraftExecutionDashboardRead) -> str
         )
     ) or "<li>No blocked classifications recorded.</li>"
 
+    top_failure_code = "submit_gate_blocked"
+    if detail.blocked_failure_counts:
+        top_failure_code = max(
+            detail.blocked_failure_counts.items(),
+            key=lambda item: item[1],
+        )[0]
+    top_failure_classification = "unknown_classification"
+    if detail.blocked_failure_classification_counts:
+        top_failure_classification = max(
+            detail.blocked_failure_classification_counts.items(),
+            key=lambda item: item[1],
+        )[0]
+    base_bulk_route = (
+        f"/execution/dashboard/{escape(detail.candidate_profile_slug)}/bulk-remediate-submit"
+    )
+    bulk_by_code_route = f"{base_bulk_route}?failure_code={quote(top_failure_code, safe='')}"
+    bulk_manual_review_route = f"{base_bulk_route}?manual_review_only=true"
+    bulk_by_classification_route = (
+        f"{base_bulk_route}?failure_classification={quote(top_failure_classification, safe='')}"
+    )
+
     actions_html = "\n".join(f"<li>{escape(action)}</li>" for action in detail.recommended_actions)
 
     return f"""<!doctype html>
@@ -1901,8 +1923,17 @@ def _render_execution_dashboard_page(detail: DraftExecutionDashboardRead) -> str
       </section>
       <section class="panel">
         <h2>Bulk Remediation</h2>
-        <form method="post" action="/execution/dashboard/{escape(detail.candidate_profile_slug)}/bulk-remediate-submit">
+        <form method="post" action="{base_bulk_route}">
           <button type="submit">Run bulk submit remediation for blocked attempts</button>
+        </form>
+        <form method="post" action="{bulk_by_code_route}">
+          <button type="submit">Run blocked-only remediation</button>
+        </form>
+        <form method="post" action="{bulk_manual_review_route}">
+          <button type="submit">Run manual-review remediation</button>
+        </form>
+        <form method="post" action="{bulk_by_classification_route}">
+          <button type="submit">Run classification remediation</button>
         </form>
       </section>
       <section class="grid">{metric_cards}</section>
