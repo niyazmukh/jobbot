@@ -12,7 +12,6 @@ from jobbot.db.models import BrowserProfile, CandidateProfile
 from jobbot.execution.schemas import (
     DraftSubmitRemediationBatchRead,
     DraftSubmitRemediationActionRead,
-    DraftSubmitRemediationFailureRead,
     DraftExecutionDashboardRead,
     DraftExecutionDashboardRemediationHistoryRead,
     DraftExecutionOverviewRead,

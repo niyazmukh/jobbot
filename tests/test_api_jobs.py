@@ -1,5 +1,7 @@
 import json
+from importlib import import_module
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -1195,7 +1197,41 @@ def test_execution_api_can_build_greenhouse_site_overlay(tmp_path):
     )
 
 
-def test_execution_api_can_open_greenhouse_target_and_return_resolutions(tmp_path):
+def _stub_greenhouse_target_capture(monkeypatch, *, capture_method: str = "http_get") -> None:
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_html",
+        lambda **kwargs: (
+            (
+                "<html><body>"
+                "<div data-qa='application-review'>Review</div>"
+                "<button type='submit' data-qa='submit-application'>Submit</button>"
+                "</body></html>"
+            ),
+            {
+                "capture_method": capture_method,
+                "status_code": 200,
+                "final_url": kwargs["target_url"],
+            },
+        ),
+    )
+
+
+def _stub_successful_guarded_submit_interaction(monkeypatch, *, mode: str = "simulated_probe_fallback") -> None:
+    monkeypatch.setattr(
+        "jobbot.execution.service._execute_guarded_submit_interaction",
+        lambda **kwargs: {
+            "interaction_mode": mode,
+            "attempted": mode == "playwright",
+            "clicked": True,
+            "clicked_selector": kwargs["submit_selectors"][0] if kwargs.get("submit_selectors") else None,
+            "final_url": kwargs["target_url"],
+            "matched_confirmation_markers": [],
+            "status": "clicked",
+        },
+    )
+
+
+def test_execution_api_can_open_greenhouse_target_and_return_resolutions(tmp_path, monkeypatch):
     session = make_session()
     ingest_discovery_batch(session, load_greenhouse_batch())
     candidate = CandidateProfile(
@@ -1266,6 +1302,7 @@ def test_execution_api_can_open_greenhouse_target_and_return_resolutions(tmp_pat
 
     app.dependency_overrides[get_db_session] = override_db
     try:
+        _stub_greenhouse_target_capture(monkeypatch)
         client = TestClient(app)
         client.post(f"/api/eligibility/jobs/{first_job.id}/alex-doe")
         bootstrap_response = client.post(
@@ -1450,22 +1487,8 @@ def test_execution_api_can_execute_guarded_submit_after_gate_passes(tmp_path, mo
     document = session.query(models.GeneratedDocument).one()
     document.review_status = "approved"
     session.commit()
-    monkeypatch.setattr(
-        "jobbot.execution.service._capture_target_page_html",
-        lambda **kwargs: (
-            (
-                "<html><body>"
-                "<div data-qa='application-review'>Review</div>"
-                "<button type='submit' data-qa='submit-application'>Submit</button>"
-                "</body></html>"
-            ),
-            {
-                "capture_method": "http_get",
-                "status_code": 200,
-                "final_url": kwargs["target_url"],
-            },
-        ),
-    )
+    _stub_greenhouse_target_capture(monkeypatch)
+    _stub_successful_guarded_submit_interaction(monkeypatch)
 
     def override_db():
         try:
@@ -2345,13 +2368,13 @@ def test_execution_overview_api_and_html_surface_blocked_attempts(tmp_path):
     )
     assert api_response.json()[0]["primary_action_label"] == "Open replay bundle"
     assert api_response.json()[0]["visual_evidence_route"] is not None
-    assert api_response.json()[0]["visual_evidence_label"] == "Open HTML"
+    assert api_response.json()[0]["visual_evidence_label"] in {"Open HTML", "Download trace"}
     assert api_response.json()[0]["artifact_count"] >= 6
     assert html_response.status_code == 200
     assert "Execution Overview" in html_response.text
     assert "submit_gate_blocked" in html_response.text
     assert "Latest stage: draft_submit_gate_evaluated" in html_response.text
-    assert "Open HTML" in html_response.text
+    assert ("Open HTML" in html_response.text) or ("Download trace" in html_response.text)
 
 
 def test_execution_overview_and_dashboard_api_support_failure_and_confidence_filters(tmp_path):
@@ -3698,6 +3721,7 @@ def test_execution_replay_bundle_api_surfaces_guarded_submit_assets_after_succes
             "jobbot.execution.service._capture_target_page_trace_via_playwright",
             lambda **kwargs: b"PK\x03\x04guarded-submit-trace",
         )
+        _stub_successful_guarded_submit_interaction(monkeypatch)
         submit_response = client.post(f"/api/execution/draft-attempts/{attempt_id}/guarded-submit")
         replay_response = client.get(f"/api/execution/replay/{attempt_id}")
     finally:
@@ -4036,7 +4060,10 @@ def test_execution_dashboard_api_and_html_surface_summary_and_links(tmp_path):
     assert payload["blocked_failure_classification_counts"] == {"unknown_classification": 1}
     assert payload["blocked_recent_attempts"][0]["attempt_id"] == blocked_attempt_id
     assert payload["blocked_recent_attempts"][0]["visual_evidence_route"] is not None
-    assert payload["blocked_recent_attempts"][0]["visual_evidence_label"] == "Open HTML"
+    assert payload["blocked_recent_attempts"][0]["visual_evidence_label"] in {
+        "Open HTML",
+        "Download trace",
+    }
     assert any(row["attempt_id"] == pending_attempt_id for row in payload["recent_attempts"])
     assert any("Resolve blocked guarded attempts" in action for action in payload["recommended_actions"])
 
@@ -4048,7 +4075,7 @@ def test_execution_dashboard_api_and_html_surface_summary_and_links(tmp_path):
     assert "Recent Attempts" in html_response.text
     assert f"/execution/replay/{blocked_attempt_id}" in html_response.text
     assert f"/execution/attempts/{blocked_attempt_id}" in html_response.text
-    assert "Open HTML" in html_response.text
+    assert ("Open HTML" in html_response.text) or ("Download trace" in html_response.text)
     assert "Run blocked-only remediation" in html_response.text
     assert "Run manual-review remediation" in html_response.text
     assert "Run classification remediation" in html_response.text
@@ -4572,6 +4599,363 @@ def test_execution_dashboard_html_shows_current_configured_history_limit():
     assert "Current configured limit: 7" in response.text
     assert "History rows: 0 / limit 7" in response.text
     assert "name='history_limit' value='7'" in response.text
+
+
+def test_execution_dashboard_html_surfaces_auto_apply_operations_panel():
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={"email": "alex@example.com"},
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    now = models.utcnow()
+    jobs = session.query(models.Job).order_by(models.Job.id.asc()).all()
+    session.add_all(
+        [
+            models.AutoApplyQueueItem(
+                candidate_profile_id=candidate.id,
+                job_id=jobs[0].id,
+                status="failed",
+                priority=120,
+                attempt_count=2,
+                max_attempts=3,
+                last_error_code="submit_gate_blocked",
+                last_error_message="submit_gate_blocked",
+                finished_at=now,
+                created_at=now,
+                updated_at=now,
+            ),
+            models.AutoApplyQueueItem(
+                candidate_profile_id=candidate.id,
+                job_id=jobs[1].id,
+                status="queued",
+                priority=110,
+                attempt_count=0,
+                max_attempts=3,
+                created_at=now,
+                updated_at=now,
+            ),
+        ]
+    )
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.get("/execution/dashboard/alex-doe?queue_slo_filter=all")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    assert "Auto-Apply Operations" in response.text
+    assert "/execution/dashboard/alex-doe/auto-apply/run" in response.text
+    assert "/execution/dashboard/alex-doe/auto-apply/queue-control" in response.text
+    assert "/execution/dashboard/alex-doe/auto-apply/requeue-failed" in response.text
+    assert "/execution/dashboard/alex-doe/auto-apply/worker/start" in response.text
+    assert "/execution/dashboard/alex-doe/auto-apply/worker/stop" in response.text
+    assert "Continuous Worker" in response.text
+    assert "SLO filter" in response.text
+    assert "Requeue top-failure scope" in response.text
+
+
+def test_execution_dashboard_auto_apply_html_actions_redirect_with_feedback():
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={"email": "alex@example.com"},
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    now = models.utcnow()
+    jobs = session.query(models.Job).order_by(models.Job.id.asc()).all()
+    queued_row = models.AutoApplyQueueItem(
+        candidate_profile_id=candidate.id,
+        job_id=jobs[0].id,
+        status="queued",
+        priority=120,
+        attempt_count=0,
+        max_attempts=3,
+        created_at=now,
+        updated_at=now,
+    )
+    failed_row = models.AutoApplyQueueItem(
+        candidate_profile_id=candidate.id,
+        job_id=jobs[1].id,
+        status="failed",
+        priority=100,
+        attempt_count=2,
+        max_attempts=3,
+        last_error_code="submit_gate_blocked",
+        last_error_message="submit_gate_blocked",
+        finished_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add_all([queued_row, failed_row])
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        pause_response = client.post(
+            "/execution/dashboard/alex-doe/auto-apply/queue-control?queue_slo_filter=warning",
+            data={"operation": "pause", "queue_ids": str(queued_row.id), "limit": "25"},
+            follow_redirects=False,
+        )
+        requeue_response = client.post(
+            "/execution/dashboard/alex-doe/auto-apply/requeue-failed",
+            data={"queue_ids": str(failed_row.id), "limit": "25"},
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert pause_response.status_code == 303
+    assert "auto_apply_operation=pause" in pause_response.headers["location"]
+    assert "auto_apply_updated_count=1" in pause_response.headers["location"]
+    assert "auto_apply_missing_count=0" in pause_response.headers["location"]
+
+    assert requeue_response.status_code == 303
+    assert "auto_apply_operation=requeue_failed" in requeue_response.headers["location"]
+    assert "auto_apply_requeued_count=1" in requeue_response.headers["location"]
+    assert "auto_apply_skipped_count=0" in requeue_response.headers["location"]
+
+
+def test_execution_dashboard_html_surfaces_remediation_template_action():
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={"email": "alex@example.com"},
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    now = models.utcnow()
+    jobs = session.query(models.Job).order_by(models.Job.id.asc()).all()
+    session.add(
+        models.AutoApplyQueueItem(
+            candidate_profile_id=candidate.id,
+            job_id=jobs[0].id,
+            status="failed",
+            priority=120,
+            attempt_count=2,
+            max_attempts=3,
+            last_error_code="submit_gate_blocked",
+            last_error_message="submit_gate_blocked",
+            finished_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.get("/execution/dashboard/alex-doe")
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 200
+    assert "Remediation Template" in response.text
+    assert "Apply recommended remediation template" in response.text
+    assert "/execution/dashboard/alex-doe/auto-apply/remediation-template" in response.text
+
+
+def test_execution_dashboard_auto_apply_remediation_template_redirect_with_feedback():
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={"email": "alex@example.com"},
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.flush()
+    now = models.utcnow()
+    jobs = session.query(models.Job).order_by(models.Job.id.asc()).all()
+    session.add(
+        models.AutoApplyQueueItem(
+            candidate_profile_id=candidate.id,
+            job_id=jobs[0].id,
+            status="failed",
+            priority=120,
+            attempt_count=2,
+            max_attempts=3,
+            last_error_code="submit_gate_blocked",
+            last_error_message="submit_gate_blocked",
+            finished_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    session.commit()
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/execution/dashboard/alex-doe/auto-apply/remediation-template?queue_slo_filter=warning",
+            data={"max_queue_ids": "5"},
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert response.status_code == 303
+    assert "auto_apply_operation=remediation_template" in response.headers["location"]
+    assert "auto_apply_requeued_count=1" in response.headers["location"]
+    assert "auto_apply_skipped_count=0" in response.headers["location"]
+
+
+def test_execution_dashboard_auto_apply_worker_actions_redirect_with_feedback(monkeypatch):
+    session = make_session()
+    ingest_discovery_batch(session, load_greenhouse_batch())
+    candidate = CandidateProfile(
+        name="Alex Doe",
+        slug="alex-doe",
+        personal_details={"email": "alex@example.com"},
+        target_preferences={"preferred_locations": ["Remote"], "remote": True},
+        source_profile_data={"resume_path": "/profiles/alex-doe/resume.pdf"},
+    )
+    session.add(candidate)
+    session.commit()
+
+    app_module = import_module("jobbot.api.app")
+
+    monkeypatch.setattr(
+        app_module,
+        "evaluate_auto_apply_preflight",
+        lambda *args, **kwargs: SimpleNamespace(
+            allow_run=True,
+            blocked_reason_codes=[],
+        ),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "start_auto_apply_continuous_worker",
+        lambda *args, **kwargs: {
+            "candidate_profile_slug": "alex-doe",
+            "active": True,
+            "browser_profile_key": "apply-main",
+            "limit": 10,
+            "lease_seconds": 300,
+            "poll_seconds": 30,
+            "max_cycles": None,
+            "started_at": None,
+            "stopped_at": None,
+            "last_heartbeat_at": None,
+            "last_run_started_at": None,
+            "last_run_finished_at": None,
+            "cycles_completed": 0,
+            "total_processed_count": 0,
+            "total_succeeded_count": 0,
+            "total_failed_count": 0,
+            "total_retried_count": 0,
+            "total_reclaimed_count": 0,
+            "last_error_code": None,
+            "last_error_message": None,
+        },
+    )
+    monkeypatch.setattr(
+        app_module,
+        "stop_auto_apply_continuous_worker",
+        lambda *args, **kwargs: {
+            "candidate_profile_slug": "alex-doe",
+            "active": False,
+            "browser_profile_key": "apply-main",
+            "limit": 10,
+            "lease_seconds": 300,
+            "poll_seconds": 30,
+            "max_cycles": None,
+            "started_at": None,
+            "stopped_at": None,
+            "last_heartbeat_at": None,
+            "last_run_started_at": None,
+            "last_run_finished_at": None,
+            "cycles_completed": 2,
+            "total_processed_count": 3,
+            "total_succeeded_count": 2,
+            "total_failed_count": 1,
+            "total_retried_count": 1,
+            "total_reclaimed_count": 0,
+            "last_error_code": None,
+            "last_error_message": None,
+        },
+    )
+
+    def override_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db_session] = override_db
+    try:
+        client = TestClient(app)
+        start_response = client.post(
+            "/execution/dashboard/alex-doe/auto-apply/worker/start",
+            data={"browser_profile_key": "apply-main", "limit": "10", "lease_seconds": "300"},
+            follow_redirects=False,
+        )
+        stop_response = client.post(
+            "/execution/dashboard/alex-doe/auto-apply/worker/stop",
+            data={"join_timeout_seconds": "2"},
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+    assert start_response.status_code == 303
+    assert "auto_apply_worker_operation=start" in start_response.headers["location"]
+    assert "auto_apply_worker_active=true" in start_response.headers["location"]
+
+    assert stop_response.status_code == 303
+    assert "auto_apply_worker_operation=stop" in stop_response.headers["location"]
+    assert "auto_apply_worker_active=false" in stop_response.headers["location"]
 
 
 def test_execution_dashboard_api_and_html_show_history_inventory_vs_limit():

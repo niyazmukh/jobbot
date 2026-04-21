@@ -16,7 +16,11 @@ from jobbot.db.models import (
     ReviewQueueItem,
 )
 from jobbot.preparation.read_models import get_prepared_job_read
-from jobbot.preparation.service import prepare_job_for_candidate
+from jobbot.preparation.service import (
+    _sort_education_rows_desc,
+    _sort_experience_rows_desc,
+    prepare_job_for_candidate,
+)
 from jobbot.scoring.service import score_job_for_candidate
 
 
@@ -74,9 +78,11 @@ def seed_scored_job(session, *, enable_tier3_extensions: bool = False):
     return job.id
 
 
-def test_prepare_job_for_candidate_persists_documents_answers_and_review_items(tmp_path: Path):
+def test_prepare_job_for_candidate_persists_documents_answers_and_review_items(tmp_path: Path, monkeypatch):
     session = make_session()
     job_id = seed_scored_job(session)
+
+    monkeypatch.setattr("jobbot.preparation.service.llm_provider_ready", lambda: False)
 
     summary = prepare_job_for_candidate(
         session,
@@ -205,3 +211,103 @@ def test_prepare_job_for_candidate_skips_extension_answer_when_budget_ceiling_ex
     assert extension_answers == []
     assert extension_review_count == 0
     assert blocked_calls == 1
+
+
+def test_prepare_job_for_candidate_uses_iterative_llm_cv_writer_when_enabled(tmp_path: Path, monkeypatch):
+    session = make_session()
+    job_id = seed_scored_job(session)
+
+    class _LlmSettings:
+        model_call_daily_budget_usd = 10.0
+        model_call_weekly_budget_usd = 50.0
+        llm_cv_writer_enabled = True
+
+    class _LlmResult:
+        markdown = "# Alex Doe\n\n## Professional Summary\n- LLM generated resume content"
+        metadata = {"provider": "gemini", "model_name": "gemini-3.0-flash"}
+
+    monkeypatch.setattr("jobbot.preparation.service.get_settings", lambda: _LlmSettings())
+    monkeypatch.setattr("jobbot.preparation.service.llm_provider_ready", lambda: True)
+    monkeypatch.setattr(
+        "jobbot.preparation.service.build_iterative_llm_resume",
+        lambda *args, **kwargs: _LlmResult(),
+    )
+
+    summary = prepare_job_for_candidate(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+
+    document = session.query(GeneratedDocument).filter(GeneratedDocument.id == summary.generated_document_ids[0]).one()
+    content = Path(document.content_path).read_text(encoding="utf-8")
+    assert "LLM generated resume content" in content
+    assert document.metadata_json["generation_method"] == "iterative_llm_cv_writer_v1"
+    assert document.metadata_json["generation_metadata"]["provider"] == "gemini"
+
+
+def test_prepare_job_for_candidate_records_deterministic_fallback_when_llm_writer_enabled_but_provider_not_ready(
+    tmp_path: Path, monkeypatch
+):
+    session = make_session()
+    job_id = seed_scored_job(session)
+
+    class _LlmSettings:
+        model_call_daily_budget_usd = 10.0
+        model_call_weekly_budget_usd = 50.0
+        llm_cv_writer_enabled = True
+
+    monkeypatch.setattr("jobbot.preparation.service.get_settings", lambda: _LlmSettings())
+    monkeypatch.setattr("jobbot.preparation.service.llm_provider_ready", lambda: False)
+
+    summary = prepare_job_for_candidate(
+        session,
+        job_id=job_id,
+        candidate_profile_slug="alex-doe",
+        output_dir=tmp_path,
+    )
+
+    document = (
+        session.query(GeneratedDocument)
+        .filter(GeneratedDocument.id == summary.generated_document_ids[0])
+        .one()
+    )
+
+    assert document.metadata_json["generation_method"] == "deterministic_prepare_v1"
+    assert document.metadata_json["generation_metadata"]["llm_writer_fallback_reason"] == (
+        "llm_provider_not_ready"
+    )
+
+
+def test_sort_helpers_order_experience_and_education_descending():
+    experience_rows = [
+        CandidateFact(category="experience", content="Senior HRBP & Advisor to CEO at SEZ Alabuga (2016-2020)"),
+        CandidateFact(category="experience", content="CHRO at Tattelecom JSC (2021-2023)"),
+        CandidateFact(category="experience", content="Researcher at University of Haifa / Technion (2024-Present)"),
+        CandidateFact(category="experience", content="Product Manager at Digitrade (2025-Present)"),
+    ]
+    sorted_experience = _sort_experience_rows_desc(experience_rows)
+    sorted_experience_content = [row.content for row in sorted_experience]
+
+    assert sorted_experience_content == [
+        "Product Manager at Digitrade (2025-Present)",
+        "Researcher at University of Haifa / Technion (2024-Present)",
+        "CHRO at Tattelecom JSC (2021-2023)",
+        "Senior HRBP & Advisor to CEO at SEZ Alabuga (2016-2020)",
+    ]
+
+    education_rows = [
+        "MA in Linguistics and Pedagogy, Kazan Federal University, Russia (2011)",
+        "MBA in Technology Management and Product Commercialization, Rochester Institute of Technology, USA (2016)",
+        "MS in Human Services (research track), University of Haifa, Israel (2025)",
+        "PhD in Behavioral Science, Technion - Israel Institute of Technology, Israel (2028 (Expected))",
+    ]
+    sorted_education = _sort_education_rows_desc(education_rows)
+
+    assert sorted_education == [
+        "PhD in Behavioral Science, Technion - Israel Institute of Technology, Israel (2028 (Expected))",
+        "MS in Human Services (research track), University of Haifa, Israel (2025)",
+        "MBA in Technology Management and Product Commercialization, Rochester Institute of Technology, USA (2016)",
+        "MA in Linguistics and Pedagogy, Kazan Federal University, Russia (2011)",
+    ]

@@ -14,3 +14,6 @@ graphify-out/
 htmlcov/
 manual_validation/
 resume_variant_v1.md
+.env
+universal-baseline-bank.json
+fixtures/profiles/user-background.from-universal-baseline.json

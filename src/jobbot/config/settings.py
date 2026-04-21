@@ -30,6 +30,29 @@ class Settings(BaseSettings):
     answer_threshold: float = 0.88
     model_call_daily_budget_usd: float = 5.0
     model_call_weekly_budget_usd: float = 25.0
+    auto_apply_selector_probe_window: int = 20
+    auto_apply_selector_probe_min_sample: int = 4
+    auto_apply_selector_probe_failure_rate_warning: float = 0.30
+    auto_apply_selector_probe_failure_rate_critical: float = 0.50
+    auto_apply_admission_sample_size: int = 5
+    auto_apply_admission_enforce_on_enqueue: bool = True
+    auto_apply_min_confidence_score: float = 0.55
+    auto_apply_require_review_approved: bool = True
+    auto_apply_canary_max_verified_per_hour: int = 5
+    auto_apply_canary_max_verified_per_day: int = 20
+    auto_apply_canary_vendor_allowlist: str = "greenhouse,lever,workday"
+    auto_apply_requeue_actionable_cooldown_seconds: int = 120
+    llm_cv_writer_enabled: bool = True
+    llm_cv_writer_temperature: float = 0.2
+    llm_cv_writer_max_tokens: int = 1800
+    llm_cv_writer_model: str = "gemini-3-flash-preview"
+    llm_cv_writer_fallback_model: str = "gemini-3.1-flash-lite-preview"
+    llm_cv_reviewer_model: str | None = None
+    llm_api_rpm: int = 5
+    llm_provider: str = "gemini"
+    gemini_api_key: str | None = None
+    openai_api_key: str | None = None
+    anthropic_api_key: str | None = None
 
     @property
     def db_path(self) -> Path:

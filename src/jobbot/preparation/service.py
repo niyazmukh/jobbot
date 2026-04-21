@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from sqlalchemy import select
@@ -24,6 +25,7 @@ from jobbot.db.models import (
 from jobbot.models.enums import ApplicationState, ReviewStatus, TruthTier
 from jobbot.model_calls import allow_non_essential_model_call
 from jobbot.preparation.schemas import PreparedAnswerPlan, PreparedClaim, PreparedJobSummary
+from jobbot.preparation.llm_cv_writer import build_iterative_llm_resume, llm_provider_ready
 
 
 def prepare_job_for_candidate(
@@ -84,7 +86,52 @@ def prepare_job_for_candidate(
     base_dir.mkdir(parents=True, exist_ok=True)
 
     resume_path = base_dir / "resume_variant_v1.md"
-    resume_text = _render_resume_markdown(job, candidate, claims, score.score_json or {})
+    resume_generation_method = "deterministic_prepare_v1"
+    resume_generation_metadata: dict[str, object] = {}
+    llm_writer_enabled = bool(getattr(settings, "llm_cv_writer_enabled", False))
+    provider_ready = llm_provider_ready()
+    use_llm_cv_writer = llm_writer_enabled and provider_ready
+    if use_llm_cv_writer and allow_non_essential_model_call(
+        session,
+        stage="preparation_cv_writer",
+        linked_entity_id=job.id,
+        daily_budget_usd=settings.model_call_daily_budget_usd,
+        weekly_budget_usd=settings.model_call_weekly_budget_usd,
+    ):
+        try:
+            llm_result = build_iterative_llm_resume(
+                session,
+                job=job,
+                candidate=candidate,
+                facts=facts,
+                score_json=score.score_json or {},
+            )
+            resume_text = llm_result.markdown
+            resume_generation_method = "iterative_llm_cv_writer_v1"
+            resume_generation_metadata = llm_result.metadata
+        except Exception as exc:  # pragma: no cover - provider/network dependent
+            resume_text = _render_resume_markdown(
+                job,
+                candidate,
+                facts,
+                claims,
+                score.score_json or {},
+            )
+            resume_generation_metadata = {
+                "llm_writer_fallback_reason": str(exc),
+            }
+    else:
+        resume_text = _render_resume_markdown(
+            job,
+            candidate,
+            facts,
+            claims,
+            score.score_json or {},
+        )
+        if llm_writer_enabled and not provider_ready:
+            resume_generation_metadata = {
+                "llm_writer_fallback_reason": "llm_provider_not_ready",
+            }
     resume_path.write_text(resume_text, encoding="utf-8")
 
     document = GeneratedDocument(
@@ -95,7 +142,8 @@ def prepare_job_for_candidate(
         review_status=_review_status_for_claims(claims),
         content_path=str(resume_path),
         metadata_json={
-            "generation_method": "deterministic_prepare_v1",
+            "generation_method": resume_generation_method,
+            "generation_metadata": resume_generation_metadata,
             "claims": [claim.model_dump() for claim in claims],
             "score_summary": {
                 "overall_score": score.overall_score,
@@ -290,28 +338,272 @@ def _build_answer_pack(
 def _render_resume_markdown(
     job: Job,
     candidate: CandidateProfile,
+    facts: list[CandidateFact],
     claims: list[PreparedClaim],
     score_json: dict,
 ) -> str:
-    """Render a deterministic markdown resume variant."""
+    """Render a deterministic resume markdown with explicit structure and job alignment."""
 
-    summary = "\n".join(f"- {claim.text} [{claim.truth_tier}]" for claim in claims)
+    personal_details = candidate.personal_details or {}
+    email = str(personal_details.get("email") or "")
+    phone = str(personal_details.get("phone") or "")
+    linkedin_url = str(personal_details.get("linkedin_url") or "")
+    location = str(personal_details.get("location") or "")
+
+    target_company = job.company.name if job.company else "Unknown company"
+    requirement_tokens = _job_requirement_tokens(job)
+    ranked_facts = _rank_facts_for_job(facts, requirement_tokens)
+
+    summary_points = [
+        row.content
+        for row in ranked_facts
+        if row.category in {"achievement", "experience", "employment"}
+    ][:3]
+    if not summary_points:
+        summary_points = [claim.text for claim in claims][:3]
+
+    experience_rows = [row for row in facts if row.category in {"experience", "employment"}]
+    experience_rows = _sort_experience_rows_desc(experience_rows)
+    achievement_rows = [row for row in ranked_facts if row.category == "achievement"]
+    experience_block = _render_experience_sections(
+        experience_rows=experience_rows,
+        ranked_achievements=achievement_rows,
+    )
+
+    transferable_value_rows = [
+        row.content
+        for row in ranked_facts
+        if row.category in {"achievement", "skill", "skills", "experience", "employment"}
+    ][:6]
+    transferable_value_block = "\n".join(f"- {row}" for row in transferable_value_rows) or "- Not enough ranked evidence"
+
+    education_rows = [row.content for row in facts if row.category == "education"]
+    education_rows = _sort_education_rows_desc(education_rows)
+    education_block = "\n".join(f"- {row}" for row in education_rows[:6]) or "- Education details unavailable"
+
+    skill_rows = [row.content for row in facts if row.category in {"skill", "skills"}]
+    skill_block = "\n".join(f"- {row}" for row in skill_rows[:12]) or "- Skills details unavailable"
+
+    matched_skills = score_json.get("matched_skills") or []
+    missing_skills = score_json.get("missing_skills") or []
+    blocking_reasons = score_json.get("blocking_reasons") or []
+    seniority_matches = score_json.get("seniority_matches") or []
+
+    requirement_lines: list[str] = []
+    required_years = (job.requirements_structured or {}).get("required_years_experience")
+    if required_years is not None:
+        requirement_lines.append(f"- Required years (parsed): {required_years}")
+    if matched_skills:
+        requirement_lines.append(f"- Matched skills: {', '.join(matched_skills)}")
+    if missing_skills:
+        requirement_lines.append(f"- Missing skills to evidence: {', '.join(missing_skills)}")
+    if seniority_matches:
+        requirement_lines.append(f"- Seniority alignment: {', '.join(seniority_matches)}")
+    requirement_lines.extend(_build_requirement_coverage_lines(job, ranked_facts))
+    if not requirement_lines:
+        requirement_lines.append("- Requirement parser returned limited structured signals; alignment inferred from role text and evidence.")
+
+    gap_lines = [f"- {reason}" for reason in blocking_reasons] or ["- No blocking gap flags from deterministic scorer"]
+
+    summary_block = "\n".join(f"- {text}" for text in summary_points)
     score_line = json.dumps(
         {
             "overall_score": score_json.get("overall_score"),
             "confidence_score": score_json.get("confidence_score"),
             "blocked": score_json.get("blocked"),
+            "blocking_reasons": blocking_reasons,
         },
         ensure_ascii=True,
     )
+
     return (
-        f"# Resume Variant\n\n"
-        f"Candidate: {candidate.name}\n"
-        f"Target role: {job.title}\n"
-        f"Company: {job.company.name if job.company else 'Unknown company'}\n\n"
-        f"## Selected Evidence\n{summary}\n\n"
+        f"# {candidate.name}\n\n"
+        f"## Contact Information\n"
+        f"- Email: {email or 'Not provided'}\n"
+        f"- Phone: {phone or 'Not provided'}\n"
+        f"- LinkedIn: {linkedin_url or 'Not provided'}\n"
+        f"- Location: {location or 'Not provided'}\n\n"
+        f"## Target Role\n"
+        f"- Role: {job.title}\n"
+        f"- Company: {target_company}\n"
+        f"- Job URL: {job.canonical_url}\n\n"
+        f"## Professional Summary\n{summary_block}\n\n"
+        f"## Professional Experience\n{experience_block}\n\n"
+        f"## Role-Relevant Value Evidence\n{transferable_value_block}\n\n"
+        f"## Education\n{education_block}\n\n"
+        f"## Skills\n{skill_block}\n\n"
+        f"## Requirements Alignment\n"
+        f"{chr(10).join(requirement_lines)}\n\n"
+        f"## Gap Notes\n"
+        f"{chr(10).join(gap_lines)}\n\n"
         f"## Score Summary\n{score_line}\n"
     )
+
+
+def _job_requirement_tokens(job: Job) -> set[str]:
+    """Build normalized role tokens from job title, structured requirements, and description."""
+
+    raw_parts: list[str] = [job.title or "", job.description_text or ""]
+    structured = job.requirements_structured or {}
+    for key in (
+        "required_skills",
+        "preferred_skills",
+        "seniority_signals",
+        "domain_signals",
+        "workplace_signals",
+    ):
+        value = structured.get(key)
+        if isinstance(value, list):
+            raw_parts.extend(str(item) for item in value)
+
+    text = " ".join(raw_parts).lower()
+    tokens = {token for token in re.findall(r"[a-z0-9]{3,}", text)}
+    stopwords = {
+        "with",
+        "from",
+        "that",
+        "this",
+        "your",
+        "their",
+        "will",
+        "have",
+        "years",
+        "year",
+        "into",
+        "about",
+        "across",
+        "through",
+        "using",
+    }
+    return {token for token in tokens if token not in stopwords}
+
+
+def _rank_facts_for_job(facts: list[CandidateFact], requirement_tokens: set[str]) -> list[CandidateFact]:
+    """Rank candidate facts by keyword overlap against job tokens."""
+
+    if not requirement_tokens:
+        return list(facts)
+
+    def score(fact: CandidateFact) -> tuple[int, int]:
+        haystack = f"{fact.category} {fact.content}".lower()
+        overlap = sum(1 for token in requirement_tokens if token in haystack)
+        return overlap, len(fact.content)
+
+    return sorted(facts, key=score, reverse=True)
+
+
+def _render_experience_sections(
+    *,
+    experience_rows: list[CandidateFact],
+    ranked_achievements: list[CandidateFact],
+) -> str:
+    """Render experience in best-practice blocks grouped by role/employer with bullets."""
+
+    if not experience_rows:
+        return "- Experience details unavailable"
+
+    lines: list[str] = []
+    for index, row in enumerate(experience_rows[:6]):
+        role, employer, period = _parse_experience_entry(row.content)
+        heading = role if not employer else f"{role} — {employer}"
+        lines.append(f"### {heading}")
+        if period:
+            lines.append(f"*{period}*")
+
+        start = index * 2
+        mapped = ranked_achievements[start : start + 2]
+        if mapped:
+            for item in mapped:
+                lines.append(f"- {item.content}")
+        else:
+            lines.append(f"- {row.content}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def _sort_experience_rows_desc(rows: list[CandidateFact]) -> list[CandidateFact]:
+    """Sort experience rows from newest to oldest using parsed period years."""
+
+    def key(row: CandidateFact) -> tuple[int, int]:
+        _, _, period = _parse_experience_entry(row.content)
+        return _period_sort_key(period if period else row.content)
+
+    return sorted(rows, key=key, reverse=True)
+
+
+def _sort_education_rows_desc(rows: list[str]) -> list[str]:
+    """Sort education rows from newest to oldest by detected graduation year."""
+
+    return sorted(rows, key=_education_year_sort_key, reverse=True)
+
+
+def _period_sort_key(text: str) -> tuple[int, int]:
+    """Return (end_year, start_year) for chronological sorting."""
+
+    normalized = text.lower()
+    years = [int(year) for year in re.findall(r"\b(?:19|20)\d{2}\b", normalized)]
+    start_year = years[0] if years else 0
+    end_year = years[-1] if years else 0
+    if any(token in normalized for token in ("present", "current", "now")):
+        end_year = 9999
+    return end_year, start_year
+
+
+def _education_year_sort_key(text: str) -> int:
+    """Return the most relevant year in an education entry for sorting."""
+
+    years = [int(year) for year in re.findall(r"\b(?:19|20)\d{2}\b", text)]
+    if not years:
+        return 0
+    return max(years)
+
+
+def _parse_experience_entry(content: str) -> tuple[str, str, str]:
+    """Parse 'Role at Employer (Period)' text into structured components."""
+
+    text = " ".join(content.strip().split())
+    match = re.match(r"^(?P<role>.+?)\s+at\s+(?P<employer>.+?)\s*\((?P<period>.+)\)$", text, flags=re.IGNORECASE)
+    if match:
+        return (
+            match.group("role").strip(),
+            match.group("employer").strip(),
+            match.group("period").strip(),
+        )
+
+    return text, "", ""
+
+
+def _build_requirement_coverage_lines(job: Job, ranked_facts: list[CandidateFact]) -> list[str]:
+    """Build explicit requirement-coverage notes using ranked evidence snippets."""
+
+    requirements = []
+    structured = job.requirements_structured or {}
+    required_skills = structured.get("required_skills") if isinstance(structured.get("required_skills"), list) else []
+    requirements.extend([str(skill) for skill in required_skills[:4]])
+
+    description = (job.description_text or "").lower()
+    if "sales cycle" in description:
+        requirements.append("end-to-end sales cycle ownership")
+    if "negotiat" in description:
+        requirements.append("complex commercial negotiation")
+    if "executive" in description:
+        requirements.append("executive stakeholder relationship management")
+
+    if not requirements:
+        return []
+
+    evidence_rows = [row.content for row in ranked_facts[:8]]
+    lines: list[str] = []
+    for requirement in requirements[:6]:
+        token = requirement.lower()
+        matched = next((row for row in evidence_rows if any(part in row.lower() for part in token.split()[:2])), None)
+        if matched:
+            lines.append(f"- Requirement coverage ({requirement}): {matched}")
+        else:
+            lines.append(f"- Requirement coverage ({requirement}): partial evidence; discuss transferable examples in interview.")
+
+    return lines
 
 
 def _truth_tier_max(claims: list[PreparedClaim]) -> TruthTier:

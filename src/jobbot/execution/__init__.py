@@ -1,8 +1,11 @@
 """Execution workflow exports."""
 
 from jobbot.execution.schemas import (
+    AutoApplyContinuousWorkerStatusRead,
     AutoApplyQueueControlRead,
     AutoApplyEnqueueRead,
+    AutoApplyPreflightCheckRead,
+    AutoApplyPreflightRead,
     AutoApplyQueueItemRead,
     AutoApplyQueueRequeueRead,
     AutoApplyQueueRunRead,
@@ -36,11 +39,20 @@ from jobbot.execution.schemas import (
     DraftLinkedInAssistPlanRead,
     DraftLinkedInGuardedSubmitCriteriaRead,
 )
+from jobbot.execution.worker_runtime import (
+    get_auto_apply_continuous_worker_status,
+    list_auto_apply_continuous_worker_statuses,
+    start_auto_apply_continuous_worker,
+    stop_auto_apply_continuous_worker,
+)
 from jobbot.execution.auto_apply import (
+    AutoApplyPreflightBlockedError,
     QueueRunnerAlreadyActiveError,
     control_auto_apply_queue_items,
+    evaluate_auto_apply_preflight,
     enqueue_auto_apply_jobs,
     get_auto_apply_queue_summary,
+    list_auto_apply_queue_summaries,
     list_auto_apply_queue_items,
     requeue_failed_auto_apply_items,
     run_auto_apply_queue,
@@ -81,7 +93,10 @@ from jobbot.execution.service import (
 
 __all__ = [
     "AutoApplyQueueControlRead",
+    "AutoApplyContinuousWorkerStatusRead",
     "AutoApplyEnqueueRead",
+    "AutoApplyPreflightCheckRead",
+    "AutoApplyPreflightRead",
     "AutoApplyQueueItemRead",
     "AutoApplyQueueRequeueRead",
     "AutoApplyQueueRunRead",
@@ -117,10 +132,15 @@ __all__ = [
     "extract_linkedin_question_widgets",
     "build_linkedin_assist_plan",
     "evaluate_linkedin_guarded_submit_criteria",
+    "AutoApplyPreflightBlockedError",
     "QueueRunnerAlreadyActiveError",
     "control_auto_apply_queue_items",
+    "evaluate_auto_apply_preflight",
+    "get_auto_apply_continuous_worker_status",
     "enqueue_auto_apply_jobs",
     "get_auto_apply_queue_summary",
+    "list_auto_apply_queue_summaries",
+    "list_auto_apply_continuous_worker_statuses",
     "bootstrap_draft_application_attempt",
     "build_draft_field_plan",
     "build_site_field_overlay",
@@ -148,6 +168,8 @@ __all__ = [
     "replay_execution_dashboard_bulk_history_by_id",
     "run_dashboard_bulk_submit_remediation",
     "run_auto_apply_queue",
+    "start_auto_apply_continuous_worker",
+    "stop_auto_apply_continuous_worker",
     "run_submit_remediation_action",
     "start_draft_execution_attempt",
 ]

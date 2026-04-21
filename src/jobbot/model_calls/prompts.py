@@ -39,6 +39,21 @@ _PROMPT_REGISTRY: dict[str, PromptVersionSpec] = {
         version_id="prep_extension_v1",
         description="Tier-3 extension answer generation prompt.",
     ),
+    "preparation_cv_draft": PromptVersionSpec(
+        key="preparation_cv_draft",
+        version_id="prep_cv_draft_v1",
+        description="Iterative CV writer draft prompt for job-targeted resume structure.",
+    ),
+    "preparation_cv_review": PromptVersionSpec(
+        key="preparation_cv_review",
+        version_id="prep_cv_review_v1",
+        description="Iterative CV writer reviewer/second-opinion quality-control prompt.",
+    ),
+    "preparation_cv_finalize": PromptVersionSpec(
+        key="preparation_cv_finalize",
+        version_id="prep_cv_finalize_v1",
+        description="Iterative CV writer finalization prompt using reviewer feedback.",
+    ),
 }
 
 

@@ -1,0 +1,65 @@
+{
+  "name": "Alex Doe",
+  "slug": "alex-doe",
+  "personal_details": {
+    "email": "alex@example.com",
+    "phone": "+1-555-0100",
+    "location": "Seattle, WA",
+    "linkedin_url": "https://www.linkedin.com/in/alex-doe",
+    "portfolio_url": "https://alex.dev",
+    "github_url": "https://github.com/alexdoe"
+  },
+  "target_preferences": {
+    "target_titles": ["Senior Backend Engineer", "Platform Engineer"],
+    "preferred_locations": ["Seattle, WA", "Remote"],
+    "remote": true,
+    "employment_type": "full_time",
+    "work_authorization": "US citizen",
+    "requires_sponsorship": false,
+    "salary_min": 170000,
+    "salary_max": 220000,
+    "currency": "USD"
+  },
+  "source_profile_data": {
+    "resume_paths": ["resume_variant_v1.md"],
+    "source_resume_version": "v1",
+    "linkedin_exported_at": "2026-04-19"
+  },
+  "banned_claims": [
+    "Do not claim Kubernetes production ownership",
+    "Do not claim ML model deployment experience"
+  ],
+  "facts": [
+    {
+      "fact_key": "employment-acme-2021-2024",
+      "category": "employment",
+      "content": "Senior Software Engineer at Acme Corp from 2021 to 2024, built internal workflow APIs in Python and PostgreSQL.",
+      "structured_data": {
+        "company": "Acme Corp",
+        "title": "Senior Software Engineer",
+        "start": "2021-01",
+        "end": "2024-02"
+      },
+      "confidence": 1.0
+    },
+    {
+      "fact_key": "project-ops-dashboard",
+      "category": "project",
+      "content": "Built a React + TypeScript operations dashboard used by support and finance teams.",
+      "structured_data": {
+        "tech": ["React", "TypeScript"],
+        "domain": "internal operations"
+      },
+      "confidence": 1.0
+    },
+    {
+      "fact_key": "skill-python",
+      "category": "skills",
+      "content": "Strong Python backend development for APIs and background workers.",
+      "structured_data": {
+        "skill": "Python"
+      },
+      "confidence": 1.0
+    }
+  ]
+}

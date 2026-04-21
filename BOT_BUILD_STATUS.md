@@ -1,10 +1,11 @@
-# Job Bot Build Status
+﻿# Job Bot Build Status
 
 ## Current State
 - Phase: `Phase 4 - Controlled Application Execution`
-- Overall status: `in_progress`
+- Overall status: `release_hardening_no_go`
 - Implementation mode: `local-first, deterministic-first`
 - Primary spec: `FINAL_JOB_BOT_PRD.md`
+- Release gate source: `docs/PRODUCTION_READINESS_CHECKLIST.md`
 - Latest validation: `245 passed` (`.venv\\Scripts\\python -m pytest -q`)
 
 ## Completed
@@ -191,7 +192,7 @@
 - Added explicit operational CLI commands for retry/reauth workflows:
   - `retry-submit-attempt` for deterministic single-attempt remediation replay.
   - `reauth-browser-profile` to mark browser profiles healthy after manual reauthentication.
-- Added model-call telemetry service scaffolding for PRD §21.4 cost control:
+- Added model-call telemetry service scaffolding for PRD Â§21.4 cost control:
   - `record_model_call` persistence helper (stage/provider/model/prompt-version + token/cost telemetry).
   - `get_model_cost_dashboard` aggregation helper (lookback daily buckets, stage breakdown, daily/weekly budget pressure flags).
 - Surfaced model-call cost telemetry through API:
@@ -204,12 +205,12 @@
   - Added Workday selector overlays, required-field profile, and guarded-submit strategy plan.
   - Enabled Workday target-open and submit-gate support through site handler capability gates.
   - Updated API/service execution tests to validate Workday guarded-submit probe-failure behavior (`guarded_submit_probe_failed`) instead of unsupported-site behavior.
-- Added PRD §21.5 prompt-versioning contract baseline through a central prompt registry:
+- Added PRD Â§21.5 prompt-versioning contract baseline through a central prompt registry:
   - Added `model_calls/prompts.py` with stable prompt keys/IDs and deterministic registry listing.
   - Added replay-compatibility helpers (`is_prompt_replay_compatible`, `assert_prompt_replay_compatible`) for old-vs-new prompt checks.
   - Wired model-call budget guardrail writes to resolve prompt version IDs from registry defaults.
   - Added prompt-registry and compatibility tests plus guardrail prompt-version wiring coverage.
-- Implemented PRD §21.6 dedup layers 2-4 in discovery ingestion:
+- Implemented PRD Â§21.6 dedup layers 2-4 in discovery ingestion:
   - Layer 2: ATS external-id scoped matching (`external_job_id` + vendor/source scope).
   - Layer 3: normalized company/title/location tuple matching (existing deterministic fingerprint path).
   - Layer 4: deterministic fuzzy candidate matching (token similarity over title/company with conservative confirmation via metadata overlap or exact location).
@@ -222,7 +223,7 @@
   - Added optional enrichment model-pass hook with telemetry recording (`stage=enrichment`) while preserving deterministic extraction output behavior.
   - Enforced prompt-version contract for enrichment via prompt registry (`enrich_v1`) and replay compatibility checks.
   - Added enrichment tests for model-call persistence and incompatible replay prompt rejection.
-- Added prompt-version contract API surfaces for PRD §21.5 visibility and replay checks:
+- Added prompt-version contract API surfaces for PRD Â§21.5 visibility and replay checks:
   - API: `GET /api/model-calls/prompts` returns stable registry key/version/description entries.
   - API: `GET /api/model-calls/replay-compatibility` evaluates old-vs-new prompt version compatibility.
   - Added API regressions for prompt registry output and compatibility validation guardrails.
@@ -234,7 +235,7 @@
   - CLI: `enrich-job --replay-prompt-version ...`
   - CLI: `score-job --replay-prompt-version ...`
   - Added CLI regressions to assert replay prompt-version passthrough and command success paths.
-- Added CLI prompt-governance operations for PRD §21.5 visibility:
+- Added CLI prompt-governance operations for PRD Â§21.5 visibility:
   - CLI: `list-prompt-registry`
   - CLI: `check-prompt-replay --recorded-prompt-version ... --replay-prompt-version ...`
   - Added CLI regressions for compatibility true/false paths and invalid-version failure path.
@@ -258,6 +259,24 @@
     `submit_interaction_mode=simulated_probe_fallback` as a failure path.
   - New failure code: `guarded_submit_simulation_not_allowed_in_auto_apply`.
   - Added API regression to ensure simulated fallback cannot be counted as a successful auto-apply.
+- Added deterministic auto-apply admission policy guardrails before enqueue and run:
+  - New admission checks enforce `ready_to_apply`, confidence threshold, and approved prepared documents.
+  - Preflight now includes `queue_admission_policy` sampling and blocks unattended runs when queued jobs violate policy.
+  - Enqueue now reports `blocked_job_ids` and `blocked_reasons` for policy-rejected jobs.
+  - Added API regressions to validate enqueue blocking and preflight admission blocking behavior.
+- Added verified-submit contract and canary guardrails for unattended auto-apply:
+  - Queue runs now classify submit outcomes as `submitted_verified` vs `submitted_unverified` using submit-stage diagnostics.
+  - Unverified submit outcomes auto-queue manual review items (`auto_apply_submit_unverified_review`) and are never counted as success.
+  - Added candidate-scoped canary budget limits (`hourly`/`daily` verified-submit caps) and vendor allowlist enforcement for queue drains.
+  - Preflight now includes `canary_submit_budget` blocking checks.
+  - Queue summary now exposes verification KPIs (`verified_submit_count_1h`, `verified_submit_count_24h`, `unverified_submit_count_24h`).
+  - Added one-command canary operator CLI loop: `run-auto-apply-canary` (preflight -> run -> KPI snapshot).
+  - Added API regressions for unverified-submit review routing and canary budget conflict behavior.
+- Added deterministic recovery automation controls for failed-item requeue:
+  - Requeue supports `actionable_only` filtering so only actionable failure classes are retried.
+  - Added cooldown gating (`cooldown_seconds`) to prevent immediate hot-loop retries after fresh failures.
+  - Added API/CLI controls for actionable-only recovery with explicit cooldown configuration.
+  - Added API regression coverage for actionable-only and cooldown-enforced requeue behavior.
 - Added failed-item requeue recovery controls for auto-apply queues:
   - New service/model path for candidate-scoped failed-item requeue with optional targeted queue IDs.
   - New API: `POST /api/auto-apply/{candidate_profile_slug}/requeue-failed`.
@@ -347,6 +366,83 @@
 - Brought the scoped JobBot test suite to green in `.venv` with `233 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `234 passed`.
 - Brought the scoped JobBot test suite to green in `.venv` with `235 passed`.
+- Added execution-dashboard auto-apply operations panel with HTML controls for bounded run, pause/resume/cancel, failed-item requeue, and queue snapshot visibility.
+- Added dashboard remediation-template action that applies summary-recommended top-failure requeue payloads in one click without manual command assembly.
+- Added dashboard SLO severity filtering controls (`all`, `warning+`, `critical`) for queue triage prioritization in operator HTML flows.
+- Added API-side queue SLO filtering (`queue_slo_filter=all|warning|critical`) on `/api/auto-apply/{candidate}/queue` so machine consumers can enforce the same backlog severity thresholds as dashboard triage.
+- Added fleet-level machine-consumer queue summary APIs: `GET /api/auto-apply/summaries` (JSON read) and `GET /api/auto-apply/summaries/export` (CSV export), both with SLO filtering and optional empty-candidate inclusion.
+- Added deterministic queue summary sorting heuristics for machine consumers (`severity_desc`, `queued_desc`, `failure_rate_desc`, `candidate_asc`) across both fleet JSON read and CSV export surfaces.
+- Added explicit queue summary timestamp/window metadata (`summary_generated_at`, `recent_window_seconds`, `recent_window_started_at`, `recent_window_ended_at`) across summary read models and CSV exports for poll-interval correlation in external monitoring.
+- Added supervised in-process continuous queue worker mode with API start/stop/status/list controls and heartbeat/cycle diagnostics (`/api/auto-apply/{candidate}/worker/*`, `/api/auto-apply/workers`).
+- Added deterministic auto-apply preflight gating before queue drains and worker starts, covering Playwright runtime availability, browser profile health policy, and recent selector-probe failure-rate checks.
+- Added machine-consumable preflight API surface (`GET /api/auto-apply/{candidate_profile_slug}/preflight`) and structured `409` preflight-failure diagnostics on queue-run/worker-start operations.
+- Added execution-dashboard worker runtime controls and visibility (start/stop actions, heartbeat/cycle/throughput diagnostics, and operation feedback redirects) so candidate workers are manageable without direct API calls.
+- Added cursor-based fleet summary pagination on `GET /api/auto-apply/summaries` (`cursor` + `X-Next-Cursor`) with deterministic `candidate_asc` ordering guardrails for large-fleet operational polling.
+- Added machine-consumable queue snapshot lineage IDs (`X-Snapshot-Lineage-Id`) on fleet summary JSON/CSV endpoints so downstream pollers can deduplicate repeated reads safely.
+- Added explicit queue summary freshness headers (`X-Snapshot-Generated-At`, `X-Snapshot-Max-Age-Seconds`) on fleet summary JSON/CSV endpoints so external monitors can pair lineage with staleness windows.
+- Added a live-test operator runbook (`docs/LIVE_TEST_OPERATOR_RUNBOOK.md`) covering preflight, bounded drain, worker supervision, and remediation loop with exact API/CLI signals.
+- Added CLI preflight readiness command (`check-auto-apply-preflight`) so live-test feasibility can be verified without API server bootstrapping.
+- Added settings-driven preflight selector-health tuning controls (`JOBBOT_AUTO_APPLY_SELECTOR_PROBE_*`) so warning/critical thresholds and sample window can be calibrated without code edits.
+- Added a true iterative LLM CV writer pipeline (`draft -> review second-opinion -> finalize`) with provider telemetry, prompt-version contracts, evidence-key grounding filters, and deterministic fallback when provider keys are missing.
+- Added functional KPI slice for auto-apply readiness monitoring:
+  - Queue summaries now expose submit quality rates (`verified_submit_rate_24h`, `unverified_submit_ratio_24h`).
+  - Added blocker trend telemetry (`blocker_counts_24h`, `top_blocker_code_24h`, `top_blocker_count_24h`) with stable tie-break semantics.
+  - Extended summaries CSV export with KPI columns for machine-consumer analytics pulls.
+  - Extended CLI summary view with submit-rate and blocker-trend KPI lines for rapid operator triage.
+  - Added API regression coverage for functional KPI rate and blocker trend calculations.
+- Added lineage-driven conditional polling optimization on fleet summary JSON/CSV endpoints:
+  - Supports `If-None-Match` and explicit `X-Snapshot-Lineage-Id` request validators.
+  - Returns `304 Not Modified` with stable snapshot headers + `ETag` when lineage is unchanged.
+  - Preserves normal `200` payload responses when lineage changes.
+  - Added API regression coverage for unchanged (`304`) and changed (`200`) snapshot flows.
+- Added fleet summary CLI parity for machine-consumer operations diagnostics:
+  - New CLI list command: `list-auto-apply-summaries` with API-parity controls (`--queue-slo-filter`, `--sort-by`, `--limit`, `--include-empty`, `--cursor`).
+  - New CLI export command: `export-auto-apply-summaries --output-file ...` with API-parity filtering/sorting and KPI CSV columns.
+  - Added CLI regression coverage for cursor paging and CSV export output.
+- Added preflight threshold-observability surfaces for live-test calibration:
+  - Preflight now emits an explicit `effective_configuration` check with resolved runtime knobs for selector health, admission policy, and canary limits/allowlist.
+  - CLI `check-auto-apply-preflight` now prints effective knobs in one machine-readable JSON line.
+  - Added API regression coverage for overridden selector thresholds in `effective_configuration` output.
+- Added per-candidate queue-summary delta markers for repeated polling triage:
+  - Queue summaries now emit deterministic `summary_delta_marker` values that change when candidate summary state changes.
+  - Fleet JSON summaries and CSV exports include `summary_delta_marker` for machine-consumer diffing.
+  - CLI fleet summary list/export surfaces now include delta markers for fast operator scan workflows.
+  - Added regressions for marker presence and marker mutation when summary state changes.
+- Added scriptable CLI JSON diagnostics mode for fleet summaries:
+  - `list-auto-apply-summaries --json-output` now emits structured JSON payloads (`items`, `next_cursor`, and applied controls) for local automation workflows.
+  - Preserves existing table mode as default for human operators.
+  - Added CLI regression coverage for JSON output shape and marker presence.
+- Added preflight configuration drift warnings for calibration safety:
+  - New non-blocking preflight check: `configuration_drift`.
+  - Warns when effective selector/admission/canary knobs diverge from conservative defaults.
+  - Includes explicit `drift_keys`, `defaults`, and `effective` payloads for operator audits.
+  - Added regression coverage for both default (`ok`) and override (`warning`) drift paths.
+- Added production-grade release verification flow:
+  - Shared cross-platform verification script: `scripts/verify-release.ps1`.
+  - CI now runs the shared verification script and emits release validation artifacts per OS.
+  - Added release validation artifact documentation and template under `docs/release-validation/`.
+  - Added production operations guide for safe pause/stop/rollback procedures.
+- Hardened runtime observability for supervised auto-apply workers:
+  - Worker status now preserves runtime preflight blocked reason codes and blocked-count diagnostics.
+  - Execution dashboard surfaces worker preflight-block context alongside last error state.
+- Hardened deterministic CV preparation fallback semantics:
+  - When the iterative LLM writer is enabled but no configured provider is ready, resume generation now records an explicit deterministic fallback reason in generated-document metadata.
+  - Added regression coverage for deterministic fallback metadata and worker runtime preflight diagnostics.
+- Added optional changed-candidate response hints for fleet summary polling:
+  - `GET /api/auto-apply/summaries` and `GET /api/auto-apply/summaries/export` now accept optional `X-Prior-Summary-Markers` request header (JSON map of candidate->marker).
+  - Endpoints emit `X-Changed-Candidate-Count` and `X-Changed-Candidates` response hints when prior markers are provided.
+  - Snapshot/header passthrough preserves change hints on normal and conditional responses.
+  - Added API regression coverage for changed and unchanged marker-map scenarios.
+- Added bounded changed-candidate header metadata for large fleets:
+  - `X-Changed-Candidates` is now capped to a bounded candidate list size.
+  - Added metadata headers: `X-Changed-Candidates-Returned` and `X-Changed-Candidates-Truncated`.
+  - `X-Changed-Candidate-Count` still reports full changed cardinality.
+  - Added regression coverage for non-truncated and truncated header cases.
+- Added fleet summary export cursor pagination support for long-window analytics pulls:
+  - `GET /api/auto-apply/summaries/export` now supports `cursor` with deterministic `candidate_asc` guardrails.
+  - Export responses now emit `X-Next-Cursor` when additional candidates remain.
+  - Snapshot lineage now includes export cursor context for stable conditional polling semantics.
+  - Added API regression coverage for export cursor paging and invalid cursor-sort combinations.
 
 ## In Progress
 - Hardening review queue semantics before generated documents and answer packs depend on them.
@@ -357,17 +453,16 @@
 - Extending execution checkpoint state into broader operational filters and dashboards beyond inbox/detail reads.
 - Extending the replay bundle into direct artifact opening and browser replay actions beyond bounded preview reads.
 - Converting the new green `.venv` test workflow into routine validation for each major Phase 4 iteration.
-- Investigating a local Windows temp-directory ACL issue that is currently breaking fresh pytest temp-root cleanup despite the repo code remaining importable and manually verifiable.
 - Expanding Tier 3 truth-tier handling from answer-plan scaffolding into explicit generated-claim provenance and review-state propagation across readiness summaries and dashboards.
 
 ## Blocked
 - None currently.
 
 ## Next Tasks
-1. Add queue-control dashboard surfacing/actions so pause/resume/cancel can be driven from operator HTML flows without CLI/API-only usage.
-2. Add remediation-template dashboard actions that apply suggested requeue payloads without manual command assembly.
-3. Add SLO-severity filtering/sorting on queue and dashboard views to prioritize critical backlog first.
-4. Add queue summary export/read APIs for machine-consumable operations tooling beyond CLI/HTML.
+1. Add fleet summary CLI JSON-lines streaming mode for large polling batches.
+2. Add preflight drift severity bucketing (`high_risk` vs `tuning_only`) based on which knobs changed.
+3. Add request-level cap negotiation for changed-candidate header hints (client-declared max list size).
+4. Add parquet export output mode for fleet summaries.
 
 ## Decisions
 - New implementation lives in `src/jobbot/` instead of modifying existing bot repos.
@@ -375,12 +470,13 @@
 - Browser execution will target native Playwright flows, not a proprietary external agent CLI.
 - Progress tracking is kept in repo via `BOT_BUILD_STATUS.md`, `docs/roadmap/`, and `docs/adr/`.
 - Volatile workflow states are stored as strings in SQLite; more stable classifications can remain DB enums.
+- Product/repo-facing name is finalized as `JobBot`.
+- LinkedIn discovery remains secondary until ATS parity and production guardrails are complete.
+- Execution evidence remains attempt-addressed first; content-addressed indexing can be layered later.
+- Application and review states remain validated string columns at app boundary for migration agility.
 
 ## Open Questions
-- Final product/repo-facing name beyond package name `jobbot`.
-- Whether LinkedIn discovery should enter Phase 1 immediately or remain secondary to ATS adapters.
-- Whether artifacts should be attempt-addressed or content-addressed first.
-- Whether application state and review status should stay as DB enums or move to validated string columns before more migrations land.
+- None currently.
 
 ## Definition of Done For Phase 0
 - Project scaffold exists and imports cleanly.
@@ -388,3 +484,4 @@
 - Initial schema is modeled and migrated.
 - Prompt/versioning and artifact conventions are documented.
 - PRD phases are represented in roadmap docs with acceptance criteria.
+

@@ -529,6 +529,8 @@ class AutoApplyEnqueueRead(BaseModel):
     queued_count: int
     requeued_count: int
     skipped_count: int
+    blocked_job_ids: list[int] = []
+    blocked_reasons: dict[str, list[str]] = {}
     items: list[AutoApplyQueueItemRead]
 
 
@@ -547,6 +549,33 @@ class AutoApplyQueueRunRead(BaseModel):
     items: list[AutoApplyQueueItemRead]
 
 
+class AutoApplyPreflightCheckRead(BaseModel):
+    """Read model for one deterministic auto-apply preflight check."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    check_key: str
+    status: str
+    blocking: bool = False
+    reason_code: str | None = None
+    summary: str
+    details: dict[str, object] = {}
+    recommended_actions: list[str] = []
+
+
+class AutoApplyPreflightRead(BaseModel):
+    """Read model for candidate-scoped auto-apply preflight readiness."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_profile_slug: str
+    browser_profile_key: str | None = None
+    evaluated_at: datetime
+    allow_run: bool
+    blocked_reason_codes: list[str] = []
+    checks: list[AutoApplyPreflightCheckRead]
+
+
 class AutoApplyQueueSummaryRead(BaseModel):
     """Read model for candidate-scoped auto-apply queue health summary."""
 
@@ -561,11 +590,24 @@ class AutoApplyQueueSummaryRead(BaseModel):
     failed_count: int
     retry_scheduled_count: int
     stale_running_count: int
+    summary_generated_at: datetime
+    recent_window_seconds: int = 3600
+    recent_window_started_at: datetime | None = None
+    recent_window_ended_at: datetime | None = None
     next_attempt_at: datetime | None = None
     oldest_queued_age_seconds: int | None = None
     oldest_retry_scheduled_age_seconds: int | None = None
     recent_completed_count_1h: int = 0
     recent_failure_rate_1h: float | None = None
+    verified_submit_count_1h: int = 0
+    verified_submit_count_24h: int = 0
+    unverified_submit_count_24h: int = 0
+    verified_submit_rate_24h: float | None = None
+    unverified_submit_ratio_24h: float | None = None
+    summary_delta_marker: str | None = None
+    blocker_counts_24h: dict[str, int] = {}
+    top_blocker_code_24h: str | None = None
+    top_blocker_count_24h: int = 0
     runner_lease_active: bool = False
     runner_lease_expires_at: datetime | None = None
     runner_lease_remaining_seconds: int | None = None
@@ -607,6 +649,35 @@ class AutoApplyQueueControlRead(BaseModel):
     updated_count: int
     skipped_count: int
     items: list[AutoApplyQueueItemRead]
+
+
+class AutoApplyContinuousWorkerStatusRead(BaseModel):
+    """Read model for one candidate-scoped continuous auto-apply worker runtime status."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_profile_slug: str
+    active: bool = False
+    browser_profile_key: str | None = None
+    limit: int = 0
+    lease_seconds: int = 0
+    poll_seconds: int = 0
+    max_cycles: int | None = None
+    started_at: datetime | None = None
+    stopped_at: datetime | None = None
+    last_heartbeat_at: datetime | None = None
+    last_run_started_at: datetime | None = None
+    last_run_finished_at: datetime | None = None
+    cycles_completed: int = 0
+    total_processed_count: int = 0
+    total_succeeded_count: int = 0
+    total_failed_count: int = 0
+    total_retried_count: int = 0
+    total_reclaimed_count: int = 0
+    last_error_code: str | None = None
+    last_error_message: str | None = None
+    last_preflight_blocked_reason_codes: list[str] = []
+    last_preflight_blocked_count: int = 0
 
 
 class DraftLinkedInQuestionRead(BaseModel):

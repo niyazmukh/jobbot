@@ -1,0 +1,50 @@
+{
+  "release_branch": "release/YYYY-MM-DD-prod-readiness",
+  "candidate_commit_sha": "REPLACE_WITH_GIT_SHA",
+  "verification_started_at": "2026-04-21T00:00:00Z",
+  "verification_finished_at": "2026-04-21T00:10:00Z",
+  "git_tree_clean": true,
+  "rollback_target_ref": "origin/main",
+  "rollback_target_sha": "REPLACE_WITH_ROLLBACK_SHA",
+  "validation_commands": [
+    {
+      "name": "lint",
+      "command": "python -m ruff check ."
+    },
+    {
+      "name": "test",
+      "command": "python -m pytest -q",
+      "repeat": 2
+    }
+  ],
+  "validation_results": [
+    {
+      "name": "lint",
+      "status": "passed",
+      "started_at": "2026-04-21T00:00:00Z",
+      "finished_at": "2026-04-21T00:01:00Z"
+    },
+    {
+      "name": "test-1",
+      "status": "passed",
+      "started_at": "2026-04-21T00:01:00Z",
+      "finished_at": "2026-04-21T00:06:00Z"
+    },
+    {
+      "name": "test-2",
+      "status": "passed",
+      "started_at": "2026-04-21T00:06:00Z",
+      "finished_at": "2026-04-21T00:11:00Z"
+    }
+  ],
+  "operational_smoke_validation": {
+    "status": "pending",
+    "canary_validation_outcome": "pending",
+    "notes": "Record bounded drain/canary results for the exact candidate SHA here."
+  },
+  "sign_off": {
+    "security": "pending",
+    "engineering": "pending",
+    "operations": "pending"
+  }
+}

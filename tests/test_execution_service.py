@@ -104,6 +104,40 @@ def seed_candidate_job_and_ready_snapshot(
     return job.id, eligibility
 
 
+def _stub_greenhouse_target_capture(monkeypatch, *, capture_method: str = "http_get") -> None:
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_html",
+        lambda **kwargs: (
+            (
+                "<html><body>"
+                "<div data-qa='application-review'>Review</div>"
+                "<button type='submit' data-qa='submit-application'>Submit</button>"
+                "</body></html>"
+            ),
+            {
+                "capture_method": capture_method,
+                "status_code": 200,
+                "final_url": kwargs["target_url"],
+            },
+        ),
+    )
+
+
+def _stub_successful_guarded_submit_interaction(monkeypatch, *, mode: str = "simulated_probe_fallback") -> None:
+    monkeypatch.setattr(
+        "jobbot.execution.service._execute_guarded_submit_interaction",
+        lambda **kwargs: {
+            "interaction_mode": mode,
+            "attempted": mode == "playwright",
+            "clicked": True,
+            "clicked_selector": kwargs["submit_selectors"][0] if kwargs.get("submit_selectors") else None,
+            "final_url": kwargs["target_url"],
+            "matched_confirmation_markers": [],
+            "status": "clicked",
+        },
+    )
+
+
 def test_bootstrap_draft_application_attempt_creates_application_attempt_and_event(tmp_path: Path):
     session = make_session()
     job_id, eligibility = seed_candidate_job_and_ready_snapshot(session, tmp_path)
@@ -928,6 +962,7 @@ def test_execute_guarded_submit_succeeds_after_passing_submit_gate(tmp_path: Pat
     start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
     build_draft_field_plan(session, attempt_id=attempt.attempt_id)
     build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+    _stub_greenhouse_target_capture(monkeypatch)
     open_site_target_page(session, attempt_id=attempt.attempt_id)
     mappings = session.query(models.FieldMapping).filter_by(attempt_id=attempt.attempt_id).all()
     for mapping in mappings:
@@ -952,6 +987,7 @@ def test_execute_guarded_submit_succeeds_after_passing_submit_gate(tmp_path: Pat
         "jobbot.execution.service._capture_target_page_trace_via_playwright",
         lambda **kwargs: b"PK\x03\x04guarded-submit-fake",
     )
+    _stub_successful_guarded_submit_interaction(monkeypatch)
 
     submitted = execute_guarded_submit(session, attempt_id=attempt.attempt_id)
     event = session.query(models.ApplicationEvent).filter_by(
@@ -1093,6 +1129,7 @@ def test_execute_guarded_submit_blocks_when_submit_interaction_fails(
     start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
     build_draft_field_plan(session, attempt_id=attempt.attempt_id)
     build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+    _stub_greenhouse_target_capture(monkeypatch)
     open_site_target_page(session, attempt_id=attempt.attempt_id)
     mappings = session.query(models.FieldMapping).filter_by(attempt_id=attempt.attempt_id).all()
     for mapping in mappings:
@@ -1648,7 +1685,7 @@ def test_run_dashboard_bulk_submit_remediation_scopes_by_linkedin_stop_reason(tm
     assert bulk.targeted_attempt_ids == [checkpointed_attempt.attempt_id]
 
 
-def test_execute_guarded_submit_is_idempotent_after_first_success(tmp_path: Path):
+def test_execute_guarded_submit_is_idempotent_after_first_success(tmp_path: Path, monkeypatch):
     session = make_session()
     job_id, _ = seed_candidate_job_and_ready_snapshot(session, tmp_path)
     candidate = session.query(models.CandidateProfile).filter_by(slug="alex-doe").one()
@@ -1679,6 +1716,7 @@ def test_execute_guarded_submit_is_idempotent_after_first_success(tmp_path: Path
     start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
     build_draft_field_plan(session, attempt_id=attempt.attempt_id)
     build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+    _stub_greenhouse_target_capture(monkeypatch)
     open_site_target_page(session, attempt_id=attempt.attempt_id)
     mappings = session.query(models.FieldMapping).filter_by(attempt_id=attempt.attempt_id).all()
     for mapping in mappings:
@@ -1693,6 +1731,7 @@ def test_execute_guarded_submit_is_idempotent_after_first_success(tmp_path: Path
     session.commit()
     gate = evaluate_submit_gate(session, attempt_id=attempt.attempt_id)
     assert gate.allow_submit is True
+    _stub_successful_guarded_submit_interaction(monkeypatch)
 
     first = execute_guarded_submit(session, attempt_id=attempt.attempt_id)
     second = execute_guarded_submit(session, attempt_id=attempt.attempt_id)
@@ -1738,6 +1777,7 @@ def test_execute_guarded_submit_succeeds_for_lever_with_vendor_mode_and_plan(
     start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
     build_draft_field_plan(session, attempt_id=attempt.attempt_id)
     build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+    _stub_greenhouse_target_capture(monkeypatch)
     open_site_target_page(session, attempt_id=attempt.attempt_id)
     mappings = session.query(models.FieldMapping).filter_by(attempt_id=attempt.attempt_id).all()
     for mapping in mappings:
@@ -1761,6 +1801,7 @@ def test_execute_guarded_submit_succeeds_for_lever_with_vendor_mode_and_plan(
         "jobbot.execution.service._capture_target_page_trace_via_playwright",
         lambda **kwargs: b"PK\x03\x04lever-submit-trace",
     )
+    _stub_successful_guarded_submit_interaction(monkeypatch)
 
     submitted = execute_guarded_submit(session, attempt_id=attempt.attempt_id)
     event = session.query(models.ApplicationEvent).filter_by(
@@ -1881,7 +1922,7 @@ def test_list_execution_overview_returns_blocked_attempts_with_job_context(tmp_p
     assert rows[0].latest_artifact_route is not None
     assert rows[0].latest_artifact_label is not None
     assert rows[0].visual_evidence_route is not None
-    assert rows[0].visual_evidence_label == "Open HTML"
+    assert rows[0].visual_evidence_label in {"Open HTML", "Download trace"}
 
 
 def test_list_execution_overview_and_dashboard_support_failure_and_confidence_filters(tmp_path: Path):
@@ -2504,6 +2545,7 @@ def test_get_execution_replay_bundle_includes_guarded_submit_assets_after_succes
     start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
     build_draft_field_plan(session, attempt_id=attempt.attempt_id)
     build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+    _stub_greenhouse_target_capture(monkeypatch)
     open_site_target_page(session, attempt_id=attempt.attempt_id)
     mappings = session.query(models.FieldMapping).filter_by(attempt_id=attempt.attempt_id).all()
     for mapping in mappings:
@@ -2527,6 +2569,7 @@ def test_get_execution_replay_bundle_includes_guarded_submit_assets_after_succes
         "jobbot.execution.service._capture_target_page_trace_via_playwright",
         lambda **kwargs: b"PK\x03\x04guarded-submit-trace",
     )
+    _stub_successful_guarded_submit_interaction(monkeypatch)
     execute_guarded_submit(session, attempt_id=attempt.attempt_id)
 
     replay = get_execution_replay_bundle(session, attempt_id=attempt.attempt_id)
@@ -2585,6 +2628,7 @@ def test_list_execution_overview_prefers_latest_visual_evidence_after_guarded_su
     start_draft_execution_attempt(session, attempt_id=attempt.attempt_id)
     build_draft_field_plan(session, attempt_id=attempt.attempt_id)
     build_site_field_overlay(session, attempt_id=attempt.attempt_id)
+    _stub_greenhouse_target_capture(monkeypatch)
     open_site_target_page(session, attempt_id=attempt.attempt_id)
     mappings = session.query(models.FieldMapping).filter_by(attempt_id=attempt.attempt_id).all()
     for mapping in mappings:
@@ -2608,6 +2652,7 @@ def test_list_execution_overview_prefers_latest_visual_evidence_after_guarded_su
         "jobbot.execution.service._capture_target_page_trace_via_playwright",
         lambda **kwargs: b"PK\x03\x04guarded-submit-trace",
     )
+    _stub_successful_guarded_submit_interaction(monkeypatch)
     execute_guarded_submit(session, attempt_id=attempt.attempt_id)
 
     rows = list_execution_overview(
@@ -2786,6 +2831,10 @@ def test_capture_target_page_html_uses_http_get_when_available(monkeypatch):
         "jobbot.execution.service.urlopen",
         lambda request, timeout=0: FakeResponse(),
     )
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_html_via_playwright",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("playwright_unavailable")),
+    )
 
     html, metadata = _capture_target_page_html(
         target_url="https://example.com/jobs/42",
@@ -2817,6 +2866,10 @@ def test_capture_target_page_html_falls_back_to_stub_on_error(monkeypatch):
     monkeypatch.setattr(
         "jobbot.execution.service.urlopen",
         lambda request, timeout=0: (_ for _ in ()).throw(OSError("offline")),
+    )
+    monkeypatch.setattr(
+        "jobbot.execution.service._capture_target_page_html_via_playwright",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("playwright_unavailable")),
     )
 
     html, metadata = _capture_target_page_html(

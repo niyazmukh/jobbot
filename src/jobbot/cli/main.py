@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 
@@ -53,9 +54,11 @@ from jobbot.execution.linkedin import evaluate_linkedin_guarded_submit_criteria
 from jobbot.execution.auto_apply import (
     QueueRunnerAlreadyActiveError,
     control_auto_apply_queue_items,
+    evaluate_auto_apply_preflight,
     enqueue_auto_apply_jobs,
     get_auto_apply_queue_summary,
     list_auto_apply_queue_items,
+    list_auto_apply_queue_summaries,
     requeue_failed_auto_apply_items,
     run_auto_apply_queue,
 )
@@ -71,6 +74,74 @@ from jobbot.scoring.service import score_job_for_candidate
 
 app = typer.Typer(help="JobBot operational CLI.")
 console = Console()
+
+
+def _normalize_queue_slo_filter(value: str) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized not in {"all", "warning", "critical"}:
+        raise typer.BadParameter("queue_slo_filter must be one of: all, warning, critical")
+    return normalized
+
+
+def _normalize_auto_apply_summary_sort(value: str) -> str:
+    normalized = (value or "").strip().lower()
+    allowed = {"severity_desc", "queued_desc", "failure_rate_desc", "candidate_asc"}
+    if normalized not in allowed:
+        raise typer.BadParameter(
+            "sort_by must be one of: severity_desc, queued_desc, failure_rate_desc, candidate_asc"
+        )
+    return normalized
+
+
+def _queue_slo_filter_includes(*, queue_slo_filter: str, summary_slo_status: str) -> bool:
+    if queue_slo_filter == "all":
+        return True
+    if queue_slo_filter == "warning":
+        return summary_slo_status in {"warning", "critical"}
+    return summary_slo_status == "critical"
+
+
+def _auto_apply_slo_severity_rank(status: str) -> int:
+    severity_order = {
+        "ok": 0,
+        "warning": 1,
+        "critical": 2,
+    }
+    return severity_order.get(status, 0)
+
+
+def _sort_auto_apply_queue_summaries(summaries: list, *, sort_by: str) -> list:
+    if sort_by == "candidate_asc":
+        return sorted(summaries, key=lambda row: row.candidate_profile_slug)
+    if sort_by == "queued_desc":
+        return sorted(
+            summaries,
+            key=lambda row: (
+                -row.queued_count,
+                -_auto_apply_slo_severity_rank(row.slo_status),
+                -row.failed_count,
+                row.candidate_profile_slug,
+            ),
+        )
+    if sort_by == "failure_rate_desc":
+        return sorted(
+            summaries,
+            key=lambda row: (
+                -(row.recent_failure_rate_1h if row.recent_failure_rate_1h is not None else -1.0),
+                -_auto_apply_slo_severity_rank(row.slo_status),
+                -row.failed_count,
+                row.candidate_profile_slug,
+            ),
+        )
+    return sorted(
+        summaries,
+        key=lambda row: (
+            -_auto_apply_slo_severity_rank(row.slo_status),
+            -row.queued_count,
+            -row.failed_count,
+            row.candidate_profile_slug,
+        ),
+    )
 
 
 @app.command()
@@ -470,6 +541,12 @@ def enqueue_auto_apply_cmd(
         "[green]Auto-apply queued:[/green] "
         f"queued={result.queued_count} requeued={result.requeued_count} skipped={result.skipped_count}"
     )
+    if result.blocked_job_ids:
+        console.print(f"Admission blocked job IDs: {result.blocked_job_ids}")
+        for job_id in result.blocked_job_ids:
+            reason_codes = result.blocked_reasons.get(str(job_id), [])
+            if reason_codes:
+                console.print(f"- job_id={job_id}: {reason_codes}")
 
 
 @app.command("list-auto-apply-queue")
@@ -557,6 +634,19 @@ def show_auto_apply_summary_cmd(
         f"recent_failure_rate_1h={summary.recent_failure_rate_1h if summary.recent_failure_rate_1h is not None else 'none'}"
     )
     console.print(
+        "Submit verification KPIs: "
+        f"verified_1h={summary.verified_submit_count_1h} "
+        f"verified_24h={summary.verified_submit_count_24h} "
+        f"unverified_24h={summary.unverified_submit_count_24h} "
+        f"verified_rate_24h={summary.verified_submit_rate_24h if summary.verified_submit_rate_24h is not None else 'none'} "
+        f"unverified_ratio_24h={summary.unverified_submit_ratio_24h if summary.unverified_submit_ratio_24h is not None else 'none'}"
+    )
+    console.print(
+        "Blocker trend (24h): "
+        f"top_blocker={summary.top_blocker_code_24h or 'none'} "
+        f"top_blocker_count={summary.top_blocker_count_24h}"
+    )
+    console.print(
         "Remediation template: "
         f"top_failure_code={summary.top_failure_code or 'none'} "
         f"top_failure_count={summary.top_failure_count} "
@@ -574,6 +664,261 @@ def show_auto_apply_summary_cmd(
     )
     if summary.slo_recommended_actions:
         console.print(f"SLO actions: {summary.slo_recommended_actions}")
+
+
+@app.command("list-auto-apply-summaries")
+def list_auto_apply_summaries_cmd(
+    limit: int = typer.Option(50, "--limit", min=1, max=200),
+    queue_slo_filter: str = typer.Option("all", "--queue-slo-filter"),
+    sort_by: str = typer.Option("severity_desc", "--sort-by"),
+    include_empty: bool = typer.Option(False, "--include-empty"),
+    cursor: str | None = typer.Option(None, "--cursor"),
+    json_output: bool = typer.Option(False, "--json-output"),
+) -> None:
+    """List fleet-level auto-apply summaries with API-parity controls."""
+
+    normalized_queue_slo_filter = _normalize_queue_slo_filter(queue_slo_filter)
+    normalized_sort_by = _normalize_auto_apply_summary_sort(sort_by)
+    normalized_cursor = (cursor or "").strip() or None
+    if normalized_cursor is not None and normalized_sort_by != "candidate_asc":
+        raise typer.BadParameter("cursor_requires_candidate_asc_sort")
+
+    session = SessionLocal()
+    try:
+        summaries = list_auto_apply_queue_summaries(
+            session,
+            limit=limit + 1,
+            include_empty=include_empty,
+            cursor=normalized_cursor,
+        )
+    finally:
+        session.close()
+
+    next_cursor: str | None = None
+    if len(summaries) > limit:
+        next_cursor = summaries[limit - 1].candidate_profile_slug
+        summaries = summaries[:limit]
+
+    filtered = [
+        summary
+        for summary in summaries
+        if _queue_slo_filter_includes(
+            queue_slo_filter=normalized_queue_slo_filter,
+            summary_slo_status=summary.slo_status,
+        )
+    ]
+    sorted_rows = _sort_auto_apply_queue_summaries(filtered, sort_by=normalized_sort_by)
+
+    if json_output:
+        payload = {
+            "limit": limit,
+            "queue_slo_filter": normalized_queue_slo_filter,
+            "sort_by": normalized_sort_by,
+            "include_empty": include_empty,
+            "cursor": normalized_cursor,
+            "next_cursor": next_cursor,
+            "items": [summary.model_dump(mode="json") for summary in sorted_rows],
+        }
+        console.print_json(data=payload)
+        return
+
+    table = Table(title="Auto-Apply Fleet Summaries", show_header=True, header_style="bold cyan")
+    table.add_column("Candidate", style="bold")
+    table.add_column("SLO")
+    table.add_column("Queued", justify="right")
+    table.add_column("Failed", justify="right")
+    table.add_column("Failure Rate 1h", justify="right")
+    table.add_column("Verified Rate 24h", justify="right")
+    table.add_column("Top Blocker 24h")
+    table.add_column("Delta Marker")
+
+    for summary in sorted_rows:
+        table.add_row(
+            summary.candidate_profile_slug,
+            summary.slo_status,
+            str(summary.queued_count),
+            str(summary.failed_count),
+            (
+                f"{summary.recent_failure_rate_1h:.2f}"
+                if summary.recent_failure_rate_1h is not None
+                else ""
+            ),
+            (
+                f"{summary.verified_submit_rate_24h:.2f}"
+                if summary.verified_submit_rate_24h is not None
+                else ""
+            ),
+            summary.top_blocker_code_24h or "",
+            summary.summary_delta_marker or "",
+        )
+
+    console.print(table)
+    if next_cursor is not None:
+        console.print(f"Next cursor: {next_cursor}")
+
+
+@app.command("export-auto-apply-summaries")
+def export_auto_apply_summaries_cmd(
+    output_file: Path = typer.Option(..., "--output-file"),
+    limit: int = typer.Option(50, "--limit", min=1, max=200),
+    queue_slo_filter: str = typer.Option("all", "--queue-slo-filter"),
+    sort_by: str = typer.Option("severity_desc", "--sort-by"),
+    include_empty: bool = typer.Option(False, "--include-empty"),
+    cursor: str | None = typer.Option(None, "--cursor"),
+) -> None:
+    """Export fleet-level auto-apply summaries to CSV with API-parity controls."""
+
+    normalized_queue_slo_filter = _normalize_queue_slo_filter(queue_slo_filter)
+    normalized_sort_by = _normalize_auto_apply_summary_sort(sort_by)
+    normalized_cursor = (cursor or "").strip() or None
+    if normalized_cursor is not None and normalized_sort_by != "candidate_asc":
+        raise typer.BadParameter("cursor_requires_candidate_asc_sort")
+
+    session = SessionLocal()
+    try:
+        summaries = list_auto_apply_queue_summaries(
+            session,
+            limit=limit,
+            include_empty=include_empty,
+            cursor=normalized_cursor,
+        )
+    finally:
+        session.close()
+
+    filtered = [
+        summary
+        for summary in summaries
+        if _queue_slo_filter_includes(
+            queue_slo_filter=normalized_queue_slo_filter,
+            summary_slo_status=summary.slo_status,
+        )
+    ]
+    sorted_rows = _sort_auto_apply_queue_summaries(filtered, sort_by=normalized_sort_by)
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    with output_file.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "candidate_profile_slug",
+                "slo_status",
+                "total_count",
+                "queued_count",
+                "paused_count",
+                "running_count",
+                "succeeded_count",
+                "failed_count",
+                "retry_scheduled_count",
+                "stale_running_count",
+                "summary_generated_at",
+                "recent_window_seconds",
+                "recent_window_started_at",
+                "recent_window_ended_at",
+                "next_attempt_at",
+                "recent_failure_rate_1h",
+                "verified_submit_count_1h",
+                "verified_submit_count_24h",
+                "unverified_submit_count_24h",
+                "verified_submit_rate_24h",
+                "unverified_submit_ratio_24h",
+                "summary_delta_marker",
+                "top_blocker_code_24h",
+                "top_blocker_count_24h",
+                "top_failure_code",
+                "top_failure_count",
+                "recommended_remediation_action",
+            ]
+        )
+        for summary in sorted_rows:
+            writer.writerow(
+                [
+                    summary.candidate_profile_slug,
+                    summary.slo_status,
+                    summary.total_count,
+                    summary.queued_count,
+                    summary.paused_count,
+                    summary.running_count,
+                    summary.succeeded_count,
+                    summary.failed_count,
+                    summary.retry_scheduled_count,
+                    summary.stale_running_count,
+                    summary.summary_generated_at.isoformat(),
+                    summary.recent_window_seconds,
+                    summary.recent_window_started_at.isoformat() if summary.recent_window_started_at else "",
+                    summary.recent_window_ended_at.isoformat() if summary.recent_window_ended_at else "",
+                    summary.next_attempt_at.isoformat() if summary.next_attempt_at else "",
+                    summary.recent_failure_rate_1h if summary.recent_failure_rate_1h is not None else "",
+                    summary.verified_submit_count_1h,
+                    summary.verified_submit_count_24h,
+                    summary.unverified_submit_count_24h,
+                    summary.verified_submit_rate_24h if summary.verified_submit_rate_24h is not None else "",
+                    summary.unverified_submit_ratio_24h if summary.unverified_submit_ratio_24h is not None else "",
+                    summary.summary_delta_marker or "",
+                    summary.top_blocker_code_24h or "",
+                    summary.top_blocker_count_24h,
+                    summary.top_failure_code or "",
+                    summary.top_failure_count,
+                    summary.recommended_remediation_action or "",
+                ]
+            )
+
+    console.print(f"[green]Exported auto-apply summaries:[/green] rows={len(sorted_rows)} file={output_file}")
+
+
+@app.command("check-auto-apply-preflight")
+def check_auto_apply_preflight_cmd(
+    candidate_profile: str = typer.Option(..., "--candidate-profile"),
+    browser_profile_key: str | None = typer.Option(None, "--browser-profile-key"),
+) -> None:
+    """Evaluate deterministic preflight readiness before unattended auto-apply runs."""
+
+    session = SessionLocal()
+    try:
+        preflight = evaluate_auto_apply_preflight(
+            session,
+            candidate_profile_slug=candidate_profile,
+            browser_profile_key=browser_profile_key,
+        )
+    except ValueError as exc:
+        session.close()
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        session.close()
+
+    console.print(f"[bold]Auto-apply preflight:[/bold] {preflight.candidate_profile_slug}")
+    console.print(f"Browser profile: {preflight.browser_profile_key or 'none'}")
+    console.print(f"Allow run: {preflight.allow_run}")
+    if preflight.blocked_reason_codes:
+        console.print(f"Blocked reasons: {preflight.blocked_reason_codes}")
+
+    table = Table(title="Auto-Apply Preflight Checks", show_header=True, header_style="bold cyan")
+    table.add_column("Check", style="bold")
+    table.add_column("Status")
+    table.add_column("Blocking")
+    table.add_column("Reason")
+
+    for check in preflight.checks:
+        table.add_row(
+            check.check_key,
+            check.status,
+            str(check.blocking),
+            check.reason_code or "",
+        )
+
+    console.print(table)
+
+    for check in preflight.checks:
+        if check.recommended_actions:
+            console.print(
+                f"Recommendations ({check.check_key}): {', '.join(check.recommended_actions)}"
+            )
+
+    effective_config = next(
+        (check.details for check in preflight.checks if check.check_key == "effective_configuration"),
+        None,
+    )
+    if effective_config is not None:
+        console.print(f"Effective knobs: {json.dumps(effective_config, sort_keys=True, ensure_ascii=True)}")
 
 
 @app.command("run-auto-apply-queue")
@@ -619,11 +964,77 @@ def run_auto_apply_queue_cmd(
     )
 
 
+@app.command("run-auto-apply-canary")
+def run_auto_apply_canary_cmd(
+    candidate_profile: str = typer.Option(..., "--candidate-profile"),
+    browser_profile_key: str | None = typer.Option(None, "--browser-profile-key"),
+    limit: int = typer.Option(5, "--limit", min=1, max=50),
+    lease_seconds: int = typer.Option(300, "--lease-seconds", min=30, max=3600),
+) -> None:
+    """Run one deterministic canary loop: preflight -> bounded drain -> summary."""
+
+    session = SessionLocal()
+    try:
+        preflight = evaluate_auto_apply_preflight(
+            session,
+            candidate_profile_slug=candidate_profile,
+            browser_profile_key=browser_profile_key,
+        )
+        console.print(f"[bold]Canary preflight:[/bold] allow_run={preflight.allow_run}")
+        if preflight.blocked_reason_codes:
+            console.print(f"Blocked reasons: {preflight.blocked_reason_codes}")
+        if not preflight.allow_run:
+            raise typer.Exit(code=2)
+
+        result = run_auto_apply_queue(
+            session,
+            candidate_profile_slug=candidate_profile,
+            browser_profile_key=browser_profile_key,
+            limit=limit,
+            lease_seconds=lease_seconds,
+            preflight_required=False,
+        )
+        summary = get_auto_apply_queue_summary(
+            session,
+            candidate_profile_slug=candidate_profile,
+        )
+    except QueueRunnerAlreadyActiveError as exc:
+        session.close()
+        raise typer.BadParameter(
+            "queue_runner_already_active "
+            f"(runner_lease_remaining_seconds={exc.remaining_seconds}, "
+            f"runner_lease_expires_at={exc.lease_expires_at}, "
+            f"runner_lease_owner_host={exc.owner_host}, "
+            f"runner_lease_owner_pid={exc.owner_pid})"
+        ) from exc
+    except ValueError as exc:
+        session.close()
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        session.close()
+
+    console.print(
+        "[green]Canary run completed:[/green] "
+        f"processed={result.processed_count} succeeded={result.succeeded_count} "
+        f"failed={result.failed_count} retried={result.retried_count}"
+    )
+    console.print(
+        "Canary KPI snapshot: "
+        f"verified_1h={summary.verified_submit_count_1h} "
+        f"verified_24h={summary.verified_submit_count_24h} "
+        f"unverified_24h={summary.unverified_submit_count_24h}"
+    )
+    if result.processed_count == 0:
+        raise typer.Exit(code=1)
+
+
 @app.command("requeue-auto-apply-failed")
 def requeue_auto_apply_failed_cmd(
     candidate_profile: str = typer.Option(..., "--candidate-profile"),
     queue_ids: list[int] = typer.Option([], "--queue-id"),
     limit: int = typer.Option(100, "--limit", min=1, max=500),
+    actionable_only: bool = typer.Option(False, "--actionable-only"),
+    cooldown_seconds: int | None = typer.Option(None, "--cooldown-seconds", min=0, max=86400),
 ) -> None:
     """Requeue failed auto-apply queue items for one candidate."""
 
@@ -634,6 +1045,8 @@ def requeue_auto_apply_failed_cmd(
             candidate_profile_slug=candidate_profile,
             queue_ids=queue_ids,
             limit=limit,
+            actionable_only=actionable_only,
+            cooldown_seconds=cooldown_seconds,
         )
     except ValueError as exc:
         session.close()
@@ -645,7 +1058,8 @@ def requeue_auto_apply_failed_cmd(
         "[green]Failed auto-apply items requeued:[/green] "
         f"requeued={result.requeued_count} "
         f"skipped={result.skipped_count} "
-        f"missing={len(result.missing_queue_ids)}"
+        f"missing={len(result.missing_queue_ids)} "
+        f"actionable_only={actionable_only}"
     )
     if result.missing_queue_ids:
         console.print(f"Missing queue IDs: {result.missing_queue_ids}")

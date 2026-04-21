@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import csv
+from datetime import datetime, timezone
+import hashlib
+import io
+import json
 from html import escape
 from typing import Annotated
 from urllib.parse import parse_qsl, quote, urlencode
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
@@ -23,6 +28,9 @@ from jobbot.eligibility import (
     materialize_application_eligibility,
 )
 from jobbot.execution import (
+    AutoApplyPreflightBlockedError,
+    AutoApplyPreflightRead,
+    AutoApplyContinuousWorkerStatusRead,
     AutoApplyQueueControlRead,
     AutoApplyEnqueueRead,
     AutoApplyQueueItemRead,
@@ -55,6 +63,7 @@ from jobbot.execution import (
     build_draft_field_plan,
     build_site_field_overlay,
     control_auto_apply_queue_items,
+    evaluate_auto_apply_preflight,
     execute_guarded_submit,
     evaluate_linkedin_guarded_submit_criteria,
     evaluate_linkedin_guarded_submit_criteria_for_attempt,
@@ -72,6 +81,8 @@ from jobbot.execution import (
     list_execution_dashboard_bulk_history_reads,
     list_execution_overview,
     list_auto_apply_queue_items,
+    list_auto_apply_queue_summaries,
+    list_auto_apply_continuous_worker_statuses,
     requeue_failed_auto_apply_items,
     list_draft_application_attempts,
     open_site_target_page,
@@ -81,6 +92,9 @@ from jobbot.execution import (
     replay_execution_dashboard_bulk_history_by_id,
     run_dashboard_bulk_submit_remediation,
     run_auto_apply_queue,
+    start_auto_apply_continuous_worker,
+    stop_auto_apply_continuous_worker,
+    get_auto_apply_continuous_worker_status,
     run_submit_remediation_action,
     start_draft_execution_attempt,
 )
@@ -119,6 +133,8 @@ def get_db_session():
 
 
 DbSession = Annotated[Session, Depends(get_db_session)]
+
+_CHANGED_CANDIDATES_HEADER_MAX = 25
 
 
 def create_app() -> FastAPI:
@@ -468,6 +484,31 @@ def create_app() -> FastAPI:
         history_retention_before: Annotated[int | None, Query(ge=0)] = None,
         history_retention_after: Annotated[int | None, Query(ge=0)] = None,
         history_retention_removed: Annotated[int | None, Query(ge=0)] = None,
+        queue_slo_filter: str = "all",
+        auto_apply_operation: str | None = None,
+        auto_apply_updated_count: Annotated[int | None, Query(ge=0)] = None,
+        auto_apply_skipped_count: Annotated[int | None, Query(ge=0)] = None,
+        auto_apply_missing_count: Annotated[int | None, Query(ge=0)] = None,
+        auto_apply_requeued_count: Annotated[int | None, Query(ge=0)] = None,
+        auto_apply_processed_count: Annotated[int | None, Query(ge=0)] = None,
+        auto_apply_succeeded_count: Annotated[int | None, Query(ge=0)] = None,
+        auto_apply_failed_count: Annotated[int | None, Query(ge=0)] = None,
+        auto_apply_retried_count: Annotated[int | None, Query(ge=0)] = None,
+        auto_apply_reclaimed_count: Annotated[int | None, Query(ge=0)] = None,
+        auto_apply_conflict_code: str | None = None,
+        auto_apply_conflict_remaining_seconds: Annotated[int | None, Query(ge=0)] = None,
+        auto_apply_conflict_owner_host: str | None = None,
+        auto_apply_conflict_owner_pid: Annotated[int | None, Query(ge=0)] = None,
+        auto_apply_preflight_code: str | None = None,
+        auto_apply_preflight_blocked_count: Annotated[int | None, Query(ge=0)] = None,
+        auto_apply_worker_operation: str | None = None,
+        auto_apply_worker_active: bool | None = None,
+        auto_apply_worker_cycles_completed: Annotated[int | None, Query(ge=0)] = None,
+        auto_apply_worker_processed_count: Annotated[int | None, Query(ge=0)] = None,
+        auto_apply_worker_last_error_code: str | None = None,
+        auto_apply_worker_conflict_code: str | None = None,
+        auto_apply_worker_preflight_code: str | None = None,
+        auto_apply_worker_preflight_blocked_count: Annotated[int | None, Query(ge=0)] = None,
     ) -> HTMLResponse:
         """Render a candidate-scoped execution dashboard."""
 
@@ -494,6 +535,20 @@ def create_app() -> FastAPI:
                 db,
                 candidate_profile_slug=candidate_profile_slug,
             )
+            auto_apply_summary = get_auto_apply_queue_summary(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+            )
+            auto_apply_items = list_auto_apply_queue_items(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                limit=200,
+            )
+            auto_apply_worker_status = AutoApplyContinuousWorkerStatusRead.model_validate(
+                get_auto_apply_continuous_worker_status(
+                    candidate_profile_slug=candidate_profile_slug,
+                )
+            )
         except ValueError as exc:
             if str(exc) == "candidate_profile_not_found":
                 raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
@@ -518,6 +573,34 @@ def create_app() -> FastAPI:
                 history_retention_current_limit=history_retention_current_limit,
                 bulk_history=history,
                 history_sort=history_sort,
+                auto_apply_summary=auto_apply_summary,
+                auto_apply_items=auto_apply_items,
+                queue_slo_filter=queue_slo_filter,
+                auto_apply_operation=auto_apply_operation,
+                auto_apply_updated_count=auto_apply_updated_count,
+                auto_apply_skipped_count=auto_apply_skipped_count,
+                auto_apply_missing_count=auto_apply_missing_count,
+                auto_apply_requeued_count=auto_apply_requeued_count,
+                auto_apply_processed_count=auto_apply_processed_count,
+                auto_apply_succeeded_count=auto_apply_succeeded_count,
+                auto_apply_failed_count=auto_apply_failed_count,
+                auto_apply_retried_count=auto_apply_retried_count,
+                auto_apply_reclaimed_count=auto_apply_reclaimed_count,
+                auto_apply_conflict_code=auto_apply_conflict_code,
+                auto_apply_conflict_remaining_seconds=auto_apply_conflict_remaining_seconds,
+                auto_apply_conflict_owner_host=auto_apply_conflict_owner_host,
+                auto_apply_conflict_owner_pid=auto_apply_conflict_owner_pid,
+                auto_apply_preflight_code=auto_apply_preflight_code,
+                auto_apply_preflight_blocked_count=auto_apply_preflight_blocked_count,
+                auto_apply_worker_status=auto_apply_worker_status,
+                auto_apply_worker_operation=auto_apply_worker_operation,
+                auto_apply_worker_active=auto_apply_worker_active,
+                auto_apply_worker_cycles_completed=auto_apply_worker_cycles_completed,
+                auto_apply_worker_processed_count=auto_apply_worker_processed_count,
+                auto_apply_worker_last_error_code=auto_apply_worker_last_error_code,
+                auto_apply_worker_conflict_code=auto_apply_worker_conflict_code,
+                auto_apply_worker_preflight_code=auto_apply_worker_preflight_code,
+                auto_apply_worker_preflight_blocked_count=auto_apply_worker_preflight_blocked_count,
             )
         )
 
@@ -698,6 +781,365 @@ def create_app() -> FastAPI:
         query_params["history_retention_before"] = str(retention.before_count)
         query_params["history_retention_after"] = str(retention.after_count)
         query_params["history_retention_removed"] = str(retention.removed_count)
+        query_string = urlencode(query_params)
+        if query_string:
+            redirect_url = f"{redirect_url}?{query_string}"
+        return RedirectResponse(url=redirect_url, status_code=303)
+
+    @app.post(
+        "/execution/dashboard/{candidate_profile_slug}/auto-apply/run",
+        response_class=RedirectResponse,
+    )
+    async def execution_dashboard_auto_apply_run_page(
+        candidate_profile_slug: str,
+        request: Request,
+        db: DbSession,
+    ) -> RedirectResponse:
+        """Run one bounded auto-apply drain pass from dashboard HTML and return to dashboard."""
+
+        form = await _read_dashboard_urlencoded_form(request)
+        browser_profile_key_raw = str(form.get("browser_profile_key") or "").strip()
+        browser_profile_key = browser_profile_key_raw or None
+        limit = _parse_dashboard_int_field(form.get("limit"), default=10, min_value=1, max_value=200)
+        lease_seconds = _parse_dashboard_int_field(
+            form.get("lease_seconds"),
+            default=300,
+            min_value=30,
+            max_value=3600,
+        )
+
+        redirect_url = f"/execution/dashboard/{candidate_profile_slug}"
+        query_params = dict(parse_qsl(str(request.url.query), keep_blank_values=True))
+
+        try:
+            preflight = evaluate_auto_apply_preflight(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                browser_profile_key=browser_profile_key,
+            )
+            if not preflight.allow_run:
+                query_params["auto_apply_operation"] = "run_preflight_blocked"
+                query_params["auto_apply_preflight_code"] = "auto_apply_preflight_failed"
+                query_params["auto_apply_preflight_blocked_count"] = str(
+                    len(preflight.blocked_reason_codes)
+                )
+                query_string = urlencode(query_params)
+                if query_string:
+                    redirect_url = f"{redirect_url}?{query_string}"
+                return RedirectResponse(url=redirect_url, status_code=303)
+
+            run = run_auto_apply_queue(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                browser_profile_key=browser_profile_key,
+                limit=limit,
+                lease_seconds=lease_seconds,
+                preflight_required=False,
+            )
+            query_params["auto_apply_operation"] = "run"
+            query_params["auto_apply_processed_count"] = str(run.processed_count)
+            query_params["auto_apply_succeeded_count"] = str(run.succeeded_count)
+            query_params["auto_apply_failed_count"] = str(run.failed_count)
+            query_params["auto_apply_retried_count"] = str(run.retried_count)
+            query_params["auto_apply_reclaimed_count"] = str(run.reclaimed_count)
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail=detail) from exc
+            if detail == "invalid_lease_seconds":
+                raise HTTPException(status_code=400, detail=detail) from exc
+            if detail == "queue_runner_already_active":
+                query_params["auto_apply_operation"] = "run"
+                query_params["auto_apply_conflict_code"] = detail
+                if isinstance(exc, QueueRunnerAlreadyActiveError):
+                    query_params["auto_apply_conflict_remaining_seconds"] = str(exc.remaining_seconds or 0)
+                    if exc.owner_host:
+                        query_params["auto_apply_conflict_owner_host"] = exc.owner_host
+                    if exc.owner_pid is not None:
+                        query_params["auto_apply_conflict_owner_pid"] = str(exc.owner_pid)
+            else:
+                raise
+
+        query_string = urlencode(query_params)
+        if query_string:
+            redirect_url = f"{redirect_url}?{query_string}"
+        return RedirectResponse(url=redirect_url, status_code=303)
+
+    @app.post(
+        "/execution/dashboard/{candidate_profile_slug}/auto-apply/queue-control",
+        response_class=RedirectResponse,
+    )
+    async def execution_dashboard_auto_apply_queue_control_page(
+        candidate_profile_slug: str,
+        request: Request,
+        db: DbSession,
+    ) -> RedirectResponse:
+        """Run pause/resume/cancel queue control from dashboard HTML and return to dashboard."""
+
+        form = await _read_dashboard_urlencoded_form(request)
+        operation = str(form.get("operation") or "").strip().lower()
+        queue_ids = _parse_dashboard_queue_ids(form.get("queue_ids"))
+        limit = _parse_dashboard_int_field(form.get("limit"), default=100, min_value=1, max_value=500)
+
+        try:
+            result = control_auto_apply_queue_items(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                operation=operation,
+                queue_ids=queue_ids,
+                limit=limit,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail=detail) from exc
+            if detail == "invalid_queue_operation":
+                raise HTTPException(status_code=400, detail=detail) from exc
+            raise
+
+        redirect_url = f"/execution/dashboard/{candidate_profile_slug}"
+        query_params = dict(parse_qsl(str(request.url.query), keep_blank_values=True))
+        query_params["auto_apply_operation"] = result.operation
+        query_params["auto_apply_updated_count"] = str(result.updated_count)
+        query_params["auto_apply_skipped_count"] = str(result.skipped_count)
+        query_params["auto_apply_missing_count"] = str(len(result.missing_queue_ids))
+        query_string = urlencode(query_params)
+        if query_string:
+            redirect_url = f"{redirect_url}?{query_string}"
+        return RedirectResponse(url=redirect_url, status_code=303)
+
+    @app.post(
+        "/execution/dashboard/{candidate_profile_slug}/auto-apply/requeue-failed",
+        response_class=RedirectResponse,
+    )
+    async def execution_dashboard_auto_apply_requeue_failed_page(
+        candidate_profile_slug: str,
+        request: Request,
+        db: DbSession,
+    ) -> RedirectResponse:
+        """Requeue failed queue items from dashboard HTML and return to dashboard."""
+
+        form = await _read_dashboard_urlencoded_form(request)
+        queue_ids = _parse_dashboard_queue_ids(form.get("queue_ids"))
+        limit = _parse_dashboard_int_field(form.get("limit"), default=100, min_value=1, max_value=500)
+
+        try:
+            result = requeue_failed_auto_apply_items(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                queue_ids=queue_ids,
+                limit=limit,
+            )
+        except ValueError as exc:
+            if str(exc) == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
+            raise
+
+        redirect_url = f"/execution/dashboard/{candidate_profile_slug}"
+        query_params = dict(parse_qsl(str(request.url.query), keep_blank_values=True))
+        query_params["auto_apply_operation"] = "requeue_failed"
+        query_params["auto_apply_requeued_count"] = str(result.requeued_count)
+        query_params["auto_apply_skipped_count"] = str(result.skipped_count)
+        query_params["auto_apply_missing_count"] = str(len(result.missing_queue_ids))
+        query_string = urlencode(query_params)
+        if query_string:
+            redirect_url = f"{redirect_url}?{query_string}"
+        return RedirectResponse(url=redirect_url, status_code=303)
+
+    @app.post(
+        "/execution/dashboard/{candidate_profile_slug}/auto-apply/remediation-template",
+        response_class=RedirectResponse,
+    )
+    async def execution_dashboard_auto_apply_remediation_template_page(
+        candidate_profile_slug: str,
+        request: Request,
+        db: DbSession,
+    ) -> RedirectResponse:
+        """Apply summary-recommended requeue template from dashboard HTML and return to dashboard."""
+
+        form = await _read_dashboard_urlencoded_form(request)
+        max_queue_ids = _parse_dashboard_int_field(
+            form.get("max_queue_ids"),
+            default=20,
+            min_value=1,
+            max_value=200,
+        )
+
+        try:
+            summary = get_auto_apply_queue_summary(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+            )
+        except ValueError as exc:
+            if str(exc) == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
+            raise
+
+        redirect_url = f"/execution/dashboard/{candidate_profile_slug}"
+        query_params = dict(parse_qsl(str(request.url.query), keep_blank_values=True))
+        query_params["auto_apply_operation"] = "remediation_template"
+
+        queue_ids = summary.top_failure_queue_ids[:max_queue_ids]
+        if (
+            not summary.recommended_requeue_route
+            or not summary.recommended_remediation_action
+            or not queue_ids
+        ):
+            query_params["auto_apply_requeued_count"] = "0"
+            query_params["auto_apply_skipped_count"] = "0"
+            query_params["auto_apply_missing_count"] = "0"
+            query_string = urlencode(query_params)
+            if query_string:
+                redirect_url = f"{redirect_url}?{query_string}"
+            return RedirectResponse(url=redirect_url, status_code=303)
+
+        try:
+            result = requeue_failed_auto_apply_items(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                queue_ids=queue_ids,
+                limit=max_queue_ids,
+            )
+        except ValueError as exc:
+            if str(exc) == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
+            raise
+
+        query_params["auto_apply_requeued_count"] = str(result.requeued_count)
+        query_params["auto_apply_skipped_count"] = str(result.skipped_count)
+        query_params["auto_apply_missing_count"] = str(len(result.missing_queue_ids))
+        query_string = urlencode(query_params)
+        if query_string:
+            redirect_url = f"{redirect_url}?{query_string}"
+        return RedirectResponse(url=redirect_url, status_code=303)
+
+    @app.post(
+        "/execution/dashboard/{candidate_profile_slug}/auto-apply/worker/start",
+        response_class=RedirectResponse,
+    )
+    async def execution_dashboard_auto_apply_worker_start_page(
+        candidate_profile_slug: str,
+        request: Request,
+        db: DbSession,
+    ) -> RedirectResponse:
+        """Start candidate-scoped continuous worker from dashboard HTML and return to dashboard."""
+
+        form = await _read_dashboard_urlencoded_form(request)
+        browser_profile_key_raw = str(form.get("browser_profile_key") or "").strip()
+        browser_profile_key = browser_profile_key_raw or None
+        limit = _parse_dashboard_int_field(form.get("limit"), default=10, min_value=1, max_value=200)
+        lease_seconds = _parse_dashboard_int_field(
+            form.get("lease_seconds"),
+            default=300,
+            min_value=30,
+            max_value=3600,
+        )
+        poll_seconds = _parse_dashboard_int_field(
+            form.get("poll_seconds"),
+            default=30,
+            min_value=1,
+            max_value=300,
+        )
+        max_cycles_raw = str(form.get("max_cycles") or "").strip()
+        max_cycles: int | None = None
+        if max_cycles_raw:
+            max_cycles = _parse_dashboard_int_field(
+                max_cycles_raw,
+                default=1,
+                min_value=1,
+                max_value=100000,
+            )
+        preflight_required_raw = str(form.get("preflight_required") or "true").strip().lower()
+        preflight_required = preflight_required_raw not in {"false", "0", "no"}
+
+        redirect_url = f"/execution/dashboard/{candidate_profile_slug}"
+        query_params = dict(parse_qsl(str(request.url.query), keep_blank_values=True))
+
+        try:
+            # Validate candidate profile exists before worker startup attempts.
+            get_auto_apply_queue_summary(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+            )
+            if preflight_required:
+                preflight = evaluate_auto_apply_preflight(
+                    db,
+                    candidate_profile_slug=candidate_profile_slug,
+                    browser_profile_key=browser_profile_key,
+                )
+                if not preflight.allow_run:
+                    query_params["auto_apply_worker_operation"] = "start_preflight_blocked"
+                    query_params["auto_apply_worker_preflight_code"] = "auto_apply_preflight_failed"
+                    query_params["auto_apply_worker_preflight_blocked_count"] = str(
+                        len(preflight.blocked_reason_codes)
+                    )
+                    query_string = urlencode(query_params)
+                    if query_string:
+                        redirect_url = f"{redirect_url}?{query_string}"
+                    return RedirectResponse(url=redirect_url, status_code=303)
+
+            payload = start_auto_apply_continuous_worker(
+                candidate_profile_slug=candidate_profile_slug,
+                browser_profile_key=browser_profile_key,
+                limit=limit,
+                lease_seconds=lease_seconds,
+                poll_seconds=poll_seconds,
+                max_cycles=max_cycles,
+            )
+            status = AutoApplyContinuousWorkerStatusRead.model_validate(payload)
+            query_params["auto_apply_worker_operation"] = "start"
+            query_params["auto_apply_worker_active"] = "true" if status.active else "false"
+            query_params["auto_apply_worker_cycles_completed"] = str(status.cycles_completed)
+            query_params["auto_apply_worker_processed_count"] = str(status.total_processed_count)
+            if status.last_error_code:
+                query_params["auto_apply_worker_last_error_code"] = status.last_error_code
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail=detail) from exc
+            if detail == "continuous_worker_already_active":
+                query_params["auto_apply_worker_operation"] = "start_conflict"
+                query_params["auto_apply_worker_conflict_code"] = detail
+            else:
+                raise
+
+        query_string = urlencode(query_params)
+        if query_string:
+            redirect_url = f"{redirect_url}?{query_string}"
+        return RedirectResponse(url=redirect_url, status_code=303)
+
+    @app.post(
+        "/execution/dashboard/{candidate_profile_slug}/auto-apply/worker/stop",
+        response_class=RedirectResponse,
+    )
+    async def execution_dashboard_auto_apply_worker_stop_page(
+        candidate_profile_slug: str,
+        request: Request,
+    ) -> RedirectResponse:
+        """Stop candidate-scoped continuous worker from dashboard HTML and return to dashboard."""
+
+        form = await _read_dashboard_urlencoded_form(request)
+        join_timeout_seconds = _parse_dashboard_int_field(
+            form.get("join_timeout_seconds"),
+            default=2,
+            min_value=0,
+            max_value=30,
+        )
+
+        payload = stop_auto_apply_continuous_worker(
+            candidate_profile_slug=candidate_profile_slug,
+            join_timeout_seconds=join_timeout_seconds,
+        )
+        status = AutoApplyContinuousWorkerStatusRead.model_validate(payload)
+
+        redirect_url = f"/execution/dashboard/{candidate_profile_slug}"
+        query_params = dict(parse_qsl(str(request.url.query), keep_blank_values=True))
+        query_params["auto_apply_worker_operation"] = "stop"
+        query_params["auto_apply_worker_active"] = "true" if status.active else "false"
+        query_params["auto_apply_worker_cycles_completed"] = str(status.cycles_completed)
+        query_params["auto_apply_worker_processed_count"] = str(status.total_processed_count)
+        if status.last_error_code:
+            query_params["auto_apply_worker_last_error_code"] = status.last_error_code
         query_string = urlencode(query_params)
         if query_string:
             redirect_url = f"{redirect_url}?{query_string}"
@@ -1095,6 +1537,215 @@ def create_app() -> FastAPI:
             raise
 
     @app.get(
+        "/api/auto-apply/summaries",
+        response_model=list[AutoApplyQueueSummaryRead],
+    )
+    def list_auto_apply_queue_summaries_endpoint(
+        db: DbSession,
+        request: Request,
+        response: Response,
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+        queue_slo_filter: Annotated[str, Query(pattern="^(all|warning|critical)$")] = "all",
+        sort_by: Annotated[
+            str,
+            Query(pattern="^(severity_desc|queued_desc|failure_rate_desc|candidate_asc)$"),
+        ] = "severity_desc",
+        include_empty: bool = False,
+        cursor: str | None = None,
+    ) -> list[AutoApplyQueueSummaryRead]:
+        """Return fleet-level candidate queue summaries for operations tooling."""
+
+        normalized_cursor = (cursor or "").strip() or None
+        if normalized_cursor is not None and sort_by != "candidate_asc":
+            raise HTTPException(
+                status_code=400,
+                detail="cursor_requires_candidate_asc_sort",
+            )
+
+        summaries = list_auto_apply_queue_summaries(
+            db,
+            limit=limit + 1,
+            include_empty=include_empty,
+            cursor=normalized_cursor,
+        )
+        next_cursor = None
+        if len(summaries) > limit:
+            next_cursor = summaries[limit - 1].candidate_profile_slug
+            summaries = summaries[:limit]
+
+        if next_cursor is not None:
+            response.headers["X-Next-Cursor"] = next_cursor
+
+        filtered = [
+            summary
+            for summary in summaries
+            if _auto_apply_slo_filter_includes(
+                queue_slo_filter=queue_slo_filter,
+                summary_slo_status=summary.slo_status,
+            )
+        ]
+        filtered = _sort_auto_apply_queue_summaries(filtered, sort_by=sort_by)
+        _set_auto_apply_changed_candidate_headers(request, response, filtered)
+        snapshot_lineage_id = _build_auto_apply_snapshot_lineage_id(
+            filtered,
+            queue_slo_filter=queue_slo_filter,
+            sort_by=sort_by,
+            include_empty=include_empty,
+            limit=limit,
+            cursor=normalized_cursor,
+        )
+        response.headers["X-Snapshot-Lineage-Id"] = snapshot_lineage_id
+        response.headers["ETag"] = _format_snapshot_etag(snapshot_lineage_id)
+        _set_auto_apply_snapshot_freshness_headers(response, filtered)
+
+        if _is_snapshot_not_modified(request, snapshot_lineage_id):
+            return Response(
+                status_code=304,
+                headers=_build_auto_apply_snapshot_headers(response),
+            )
+        return filtered
+
+    @app.get("/api/auto-apply/summaries/export", response_class=Response)
+    def export_auto_apply_queue_summaries_endpoint(
+        db: DbSession,
+        request: Request,
+        response: Response,
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+        queue_slo_filter: Annotated[str, Query(pattern="^(all|warning|critical)$")] = "all",
+        sort_by: Annotated[
+            str,
+            Query(pattern="^(severity_desc|queued_desc|failure_rate_desc|candidate_asc)$"),
+        ] = "severity_desc",
+        include_empty: bool = False,
+        cursor: str | None = None,
+    ) -> Response:
+        """Export fleet-level candidate queue summaries as CSV."""
+
+        normalized_cursor = (cursor or "").strip() or None
+        if normalized_cursor is not None and sort_by != "candidate_asc":
+            raise HTTPException(
+                status_code=400,
+                detail="cursor_requires_candidate_asc_sort",
+            )
+
+        summaries = list_auto_apply_queue_summaries(
+            db,
+            limit=limit + 1,
+            include_empty=include_empty,
+            cursor=normalized_cursor,
+        )
+        next_cursor = None
+        if len(summaries) > limit:
+            next_cursor = summaries[limit - 1].candidate_profile_slug
+            summaries = summaries[:limit]
+
+        if next_cursor is not None:
+            response.headers["X-Next-Cursor"] = next_cursor
+
+        filtered = [
+            summary
+            for summary in summaries
+            if _auto_apply_slo_filter_includes(
+                queue_slo_filter=queue_slo_filter,
+                summary_slo_status=summary.slo_status,
+            )
+        ]
+        filtered = _sort_auto_apply_queue_summaries(filtered, sort_by=sort_by)
+        _set_auto_apply_changed_candidate_headers(request, response, filtered)
+        snapshot_lineage_id = _build_auto_apply_snapshot_lineage_id(
+            filtered,
+            queue_slo_filter=queue_slo_filter,
+            sort_by=sort_by,
+            include_empty=include_empty,
+            limit=limit,
+            cursor=normalized_cursor,
+        )
+        response.headers["X-Snapshot-Lineage-Id"] = snapshot_lineage_id
+        response.headers["ETag"] = _format_snapshot_etag(snapshot_lineage_id)
+        _set_auto_apply_snapshot_freshness_headers(response, filtered)
+
+        if _is_snapshot_not_modified(request, snapshot_lineage_id):
+            return Response(
+                status_code=304,
+                headers=_build_auto_apply_snapshot_headers(response),
+            )
+
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(
+            [
+                "candidate_profile_slug",
+                "slo_status",
+                "total_count",
+                "queued_count",
+                "paused_count",
+                "running_count",
+                "succeeded_count",
+                "failed_count",
+                "retry_scheduled_count",
+                "stale_running_count",
+                "summary_generated_at",
+                "recent_window_seconds",
+                "recent_window_started_at",
+                "recent_window_ended_at",
+                "next_attempt_at",
+                "recent_failure_rate_1h",
+                "verified_submit_count_1h",
+                "verified_submit_count_24h",
+                "unverified_submit_count_24h",
+                "verified_submit_rate_24h",
+                "unverified_submit_ratio_24h",
+                "summary_delta_marker",
+                "top_blocker_code_24h",
+                "top_blocker_count_24h",
+                "top_failure_code",
+                "top_failure_count",
+                "recommended_remediation_action",
+            ]
+        )
+        for summary in filtered:
+            writer.writerow(
+                [
+                    summary.candidate_profile_slug,
+                    summary.slo_status,
+                    summary.total_count,
+                    summary.queued_count,
+                    summary.paused_count,
+                    summary.running_count,
+                    summary.succeeded_count,
+                    summary.failed_count,
+                    summary.retry_scheduled_count,
+                    summary.stale_running_count,
+                    summary.summary_generated_at.isoformat(),
+                    summary.recent_window_seconds,
+                    summary.recent_window_started_at.isoformat() if summary.recent_window_started_at else "",
+                    summary.recent_window_ended_at.isoformat() if summary.recent_window_ended_at else "",
+                    summary.next_attempt_at.isoformat() if summary.next_attempt_at else "",
+                    summary.recent_failure_rate_1h if summary.recent_failure_rate_1h is not None else "",
+                    summary.verified_submit_count_1h,
+                    summary.verified_submit_count_24h,
+                    summary.unverified_submit_count_24h,
+                    summary.verified_submit_rate_24h if summary.verified_submit_rate_24h is not None else "",
+                    summary.unverified_submit_ratio_24h if summary.unverified_submit_ratio_24h is not None else "",
+                    summary.summary_delta_marker or "",
+                    summary.top_blocker_code_24h or "",
+                    summary.top_blocker_count_24h,
+                    summary.top_failure_code or "",
+                    summary.top_failure_count,
+                    summary.recommended_remediation_action or "",
+                ]
+            )
+
+        return Response(
+            content=buffer.getvalue(),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": "attachment; filename=auto-apply-queue-summaries.csv",
+                **_build_auto_apply_snapshot_headers(response),
+            },
+        )
+
+    @app.get(
         "/api/auto-apply/{candidate_profile_slug}/queue",
         response_model=list[AutoApplyQueueItemRead],
     )
@@ -1102,10 +1753,20 @@ def create_app() -> FastAPI:
         candidate_profile_slug: str,
         db: DbSession,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
+        queue_slo_filter: Annotated[str, Query(pattern="^(all|warning|critical)$")] = "all",
     ) -> list[AutoApplyQueueItemRead]:
         """List durable auto-apply queue rows for one candidate."""
 
         try:
+            summary = get_auto_apply_queue_summary(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+            )
+            if not _auto_apply_slo_filter_includes(
+                queue_slo_filter=queue_slo_filter,
+                summary_slo_status=summary.slo_status,
+            ):
+                return []
             return list_auto_apply_queue_items(
                 db,
                 candidate_profile_slug=candidate_profile_slug,
@@ -1136,6 +1797,121 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
             raise
 
+    @app.get(
+        "/api/auto-apply/{candidate_profile_slug}/preflight",
+        response_model=AutoApplyPreflightRead,
+    )
+    def auto_apply_queue_preflight_endpoint(
+        candidate_profile_slug: str,
+        db: DbSession,
+        browser_profile_key: str | None = None,
+    ) -> AutoApplyPreflightRead:
+        """Return deterministic preflight readiness before auto-apply queue drains."""
+
+        try:
+            return evaluate_auto_apply_preflight(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+                browser_profile_key=browser_profile_key,
+            )
+        except ValueError as exc:
+            if str(exc) == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail="candidate_profile_not_found") from exc
+            raise
+
+    @app.post(
+        "/api/auto-apply/{candidate_profile_slug}/worker/start",
+        response_model=AutoApplyContinuousWorkerStatusRead,
+    )
+    def start_auto_apply_queue_worker_endpoint(
+        candidate_profile_slug: str,
+        db: DbSession,
+        browser_profile_key: str | None = None,
+        limit: Annotated[int, Query(ge=1, le=200)] = 10,
+        lease_seconds: Annotated[int, Query(ge=30, le=3600)] = 300,
+        poll_seconds: Annotated[int, Query(ge=1, le=300)] = 30,
+        max_cycles: Annotated[int | None, Query(ge=1, le=100000)] = None,
+        preflight_required: bool = True,
+    ) -> AutoApplyContinuousWorkerStatusRead:
+        """Start one supervised in-process continuous queue worker for one candidate."""
+
+        try:
+            # Validate candidate profile exists before starting a background worker.
+            get_auto_apply_queue_summary(
+                db,
+                candidate_profile_slug=candidate_profile_slug,
+            )
+            if preflight_required:
+                preflight = evaluate_auto_apply_preflight(
+                    db,
+                    candidate_profile_slug=candidate_profile_slug,
+                    browser_profile_key=browser_profile_key,
+                )
+                if not preflight.allow_run:
+                    raise AutoApplyPreflightBlockedError(preflight)
+            payload = start_auto_apply_continuous_worker(
+                candidate_profile_slug=candidate_profile_slug,
+                browser_profile_key=browser_profile_key,
+                limit=limit,
+                lease_seconds=lease_seconds,
+                poll_seconds=poll_seconds,
+                max_cycles=max_cycles,
+            )
+            return AutoApplyContinuousWorkerStatusRead.model_validate(payload)
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "candidate_profile_not_found":
+                raise HTTPException(status_code=404, detail=detail) from exc
+            if detail == "continuous_worker_already_active":
+                raise HTTPException(status_code=409, detail=detail) from exc
+            if detail == "auto_apply_preflight_failed" and isinstance(exc, AutoApplyPreflightBlockedError):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": detail,
+                        "preflight": exc.preflight.model_dump(mode="json"),
+                    },
+                ) from exc
+            raise
+
+    @app.post(
+        "/api/auto-apply/{candidate_profile_slug}/worker/stop",
+        response_model=AutoApplyContinuousWorkerStatusRead,
+    )
+    def stop_auto_apply_queue_worker_endpoint(
+        candidate_profile_slug: str,
+        join_timeout_seconds: Annotated[int, Query(ge=0, le=30)] = 2,
+    ) -> AutoApplyContinuousWorkerStatusRead:
+        """Stop one supervised in-process continuous queue worker for one candidate."""
+
+        payload = stop_auto_apply_continuous_worker(
+            candidate_profile_slug=candidate_profile_slug,
+            join_timeout_seconds=join_timeout_seconds,
+        )
+        return AutoApplyContinuousWorkerStatusRead.model_validate(payload)
+
+    @app.get(
+        "/api/auto-apply/{candidate_profile_slug}/worker/status",
+        response_model=AutoApplyContinuousWorkerStatusRead,
+    )
+    def auto_apply_queue_worker_status_endpoint(candidate_profile_slug: str) -> AutoApplyContinuousWorkerStatusRead:
+        """Return candidate-scoped continuous worker runtime status."""
+
+        payload = get_auto_apply_continuous_worker_status(candidate_profile_slug=candidate_profile_slug)
+        return AutoApplyContinuousWorkerStatusRead.model_validate(payload)
+
+    @app.get(
+        "/api/auto-apply/workers",
+        response_model=list[AutoApplyContinuousWorkerStatusRead],
+    )
+    def list_auto_apply_queue_worker_statuses_endpoint(
+        limit: Annotated[int, Query(ge=1, le=500)] = 200,
+    ) -> list[AutoApplyContinuousWorkerStatusRead]:
+        """Return fleet-level continuous worker runtime statuses."""
+
+        payload = list_auto_apply_continuous_worker_statuses(limit=limit)
+        return [AutoApplyContinuousWorkerStatusRead.model_validate(row) for row in payload]
+
     @app.post(
         "/api/auto-apply/{candidate_profile_slug}/run",
         response_model=AutoApplyQueueRunRead,
@@ -1146,6 +1922,7 @@ def create_app() -> FastAPI:
         browser_profile_key: str | None = None,
         limit: Annotated[int, Query(ge=1, le=200)] = 10,
         lease_seconds: Annotated[int, Query(ge=30, le=3600)] = 300,
+        preflight_required: bool = True,
     ) -> AutoApplyQueueRunRead:
         """Run a bounded auto-apply queue drain pass for one candidate."""
 
@@ -1156,6 +1933,7 @@ def create_app() -> FastAPI:
                 browser_profile_key=browser_profile_key,
                 limit=limit,
                 lease_seconds=lease_seconds,
+                preflight_required=preflight_required,
             )
         except ValueError as exc:
             detail = str(exc)
@@ -1163,6 +1941,11 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=404, detail=detail) from exc
             if detail == "invalid_lease_seconds":
                 raise HTTPException(status_code=400, detail=detail) from exc
+            if detail in {
+                "auto_apply_canary_hourly_limit_reached",
+                "auto_apply_canary_daily_limit_reached",
+            }:
+                raise HTTPException(status_code=409, detail=detail) from exc
             if detail == "queue_runner_already_active":
                 if isinstance(exc, QueueRunnerAlreadyActiveError):
                     raise HTTPException(
@@ -1180,6 +1963,14 @@ def create_app() -> FastAPI:
                         },
                     ) from exc
                 raise HTTPException(status_code=409, detail=detail) from exc
+            if detail == "auto_apply_preflight_failed" and isinstance(exc, AutoApplyPreflightBlockedError):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": detail,
+                        "preflight": exc.preflight.model_dump(mode="json"),
+                    },
+                ) from exc
             raise
 
     @app.post(
@@ -1191,6 +1982,8 @@ def create_app() -> FastAPI:
         db: DbSession,
         queue_ids: Annotated[list[int] | None, Body(embed=True)] = None,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
+        actionable_only: bool = False,
+        cooldown_seconds: Annotated[int | None, Query(ge=0, le=86400)] = None,
     ) -> AutoApplyQueueRequeueRead:
         """Requeue failed auto-apply queue items for one candidate."""
 
@@ -1200,6 +1993,8 @@ def create_app() -> FastAPI:
                 candidate_profile_slug=candidate_profile_slug,
                 queue_ids=queue_ids,
                 limit=limit,
+                actionable_only=actionable_only,
+                cooldown_seconds=cooldown_seconds,
             )
         except ValueError as exc:
             if str(exc) == "candidate_profile_not_found":
@@ -2583,6 +3378,322 @@ def _render_execution_overview_page(
 </html>"""
 
 
+def _parse_dashboard_int_field(
+    raw_value: object,
+    *,
+    default: int,
+    min_value: int,
+    max_value: int,
+) -> int:
+    """Parse one bounded integer field from dashboard form input."""
+
+    text = str(raw_value or "").strip()
+    if not text:
+        return default
+    try:
+        value = int(text)
+    except ValueError:
+        return default
+    if value < min_value:
+        return min_value
+    if value > max_value:
+        return max_value
+    return value
+
+
+async def _read_dashboard_urlencoded_form(request: Request) -> dict[str, str]:
+    """Read URL-encoded request body into a simple key/value mapping."""
+
+    body = await request.body()
+    if not body:
+        return {}
+    parsed = dict(parse_qsl(body.decode("utf-8"), keep_blank_values=True))
+    return {str(key): str(value) for key, value in parsed.items()}
+
+
+def _parse_dashboard_queue_ids(raw_value: object) -> list[int] | None:
+    """Parse comma-delimited queue IDs from dashboard form input."""
+
+    text = str(raw_value or "").strip()
+    if not text:
+        return None
+    queue_ids: list[int] = []
+    for token in text.split(","):
+        value = token.strip()
+        if not value:
+            continue
+        if value.isdigit():
+            queue_ids.append(int(value))
+    if not queue_ids:
+        return None
+    return list(dict.fromkeys(queue_ids))
+
+
+def _auto_apply_slo_filter_includes(*, queue_slo_filter: str, summary_slo_status: str) -> bool:
+    """Return whether one candidate dashboard SLO status should be included by filter."""
+
+    threshold_map = {
+        "all": 0,
+        "warning": 1,
+        "critical": 2,
+    }
+    threshold = threshold_map.get(queue_slo_filter, 0)
+    summary_severity = _auto_apply_slo_severity_rank(summary_slo_status)
+    return summary_severity >= threshold
+
+
+def _auto_apply_slo_severity_rank(status: str) -> int:
+    """Return one numeric severity rank for auto-apply queue SLO status."""
+
+    severity_order = {
+        "ok": 0,
+        "warning": 1,
+        "critical": 2,
+    }
+    return severity_order.get(status, 0)
+
+
+def _sort_auto_apply_queue_summaries(
+    summaries: list[AutoApplyQueueSummaryRead],
+    *,
+    sort_by: str,
+) -> list[AutoApplyQueueSummaryRead]:
+    """Sort fleet-level queue summaries using deterministic operations-first heuristics."""
+
+    if sort_by == "candidate_asc":
+        return sorted(summaries, key=lambda row: row.candidate_profile_slug)
+    if sort_by == "queued_desc":
+        return sorted(
+            summaries,
+            key=lambda row: (
+                -row.queued_count,
+                -_auto_apply_slo_severity_rank(row.slo_status),
+                -row.failed_count,
+                row.candidate_profile_slug,
+            ),
+        )
+    if sort_by == "failure_rate_desc":
+        return sorted(
+            summaries,
+            key=lambda row: (
+                -(row.recent_failure_rate_1h if row.recent_failure_rate_1h is not None else -1.0),
+                -_auto_apply_slo_severity_rank(row.slo_status),
+                -row.failed_count,
+                row.candidate_profile_slug,
+            ),
+        )
+    return sorted(
+        summaries,
+        key=lambda row: (
+            -_auto_apply_slo_severity_rank(row.slo_status),
+            -row.queued_count,
+            -row.failed_count,
+            row.candidate_profile_slug,
+        ),
+    )
+
+
+def _build_auto_apply_snapshot_lineage_id(
+    summaries: list[AutoApplyQueueSummaryRead],
+    *,
+    queue_slo_filter: str,
+    sort_by: str,
+    include_empty: bool,
+    limit: int,
+    cursor: str | None,
+) -> str:
+    """Build deterministic snapshot lineage ID for machine-consumer deduplication."""
+
+    row_payloads: list[dict] = []
+    for summary in summaries:
+        raw = summary.model_dump(mode="json")
+        row_payloads.append(
+            {
+                "candidate_profile_slug": raw.get("candidate_profile_slug"),
+                "total_count": raw.get("total_count"),
+                "queued_count": raw.get("queued_count"),
+                "paused_count": raw.get("paused_count"),
+                "running_count": raw.get("running_count"),
+                "succeeded_count": raw.get("succeeded_count"),
+                "failed_count": raw.get("failed_count"),
+                "retry_scheduled_count": raw.get("retry_scheduled_count"),
+                "stale_running_count": raw.get("stale_running_count"),
+                "next_attempt_at": raw.get("next_attempt_at"),
+                "recent_completed_count_1h": raw.get("recent_completed_count_1h"),
+                "recent_failure_rate_1h": raw.get("recent_failure_rate_1h"),
+                "runner_lease_active": raw.get("runner_lease_active"),
+                "runner_lease_expires_at": raw.get("runner_lease_expires_at"),
+                "runner_lease_owner_host": raw.get("runner_lease_owner_host"),
+                "runner_lease_owner_pid": raw.get("runner_lease_owner_pid"),
+                "top_failure_code": raw.get("top_failure_code"),
+                "top_failure_count": raw.get("top_failure_count"),
+                "top_failure_queue_ids": raw.get("top_failure_queue_ids"),
+                "summary_delta_marker": raw.get("summary_delta_marker"),
+                "recommended_remediation_action": raw.get("recommended_remediation_action"),
+                "recommended_requeue_route": raw.get("recommended_requeue_route"),
+                "recommended_cli_command": raw.get("recommended_cli_command"),
+                "slo_status": raw.get("slo_status"),
+                "slo_recommended_actions": raw.get("slo_recommended_actions"),
+            }
+        )
+
+    payload = {
+        "queue_slo_filter": queue_slo_filter,
+        "sort_by": sort_by,
+        "include_empty": include_empty,
+        "limit": limit,
+        "cursor": cursor,
+        "rows": row_payloads,
+    }
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    return f"snapshot_{digest[:20]}"
+
+
+def _set_auto_apply_snapshot_freshness_headers(
+    response: Response,
+    summaries: list[AutoApplyQueueSummaryRead],
+) -> None:
+    """Attach freshness headers so pollers can reason about snapshot age."""
+
+    if not summaries:
+        response.headers["X-Snapshot-Max-Age-Seconds"] = "0"
+        return
+
+    oldest_generated = min(summary.summary_generated_at for summary in summaries)
+    newest_generated = max(summary.summary_generated_at for summary in summaries)
+    now = datetime.now(timezone.utc)
+    max_age_seconds = max(0, int((now - oldest_generated).total_seconds()))
+
+    response.headers["X-Snapshot-Generated-At"] = newest_generated.isoformat()
+    response.headers["X-Snapshot-Max-Age-Seconds"] = str(max_age_seconds)
+
+
+def _normalize_if_none_match_values(raw_header: str | None) -> set[str]:
+    """Normalize If-None-Match values into raw validator tokens without quotes."""
+
+    if not raw_header:
+        return set()
+
+    normalized: set[str] = set()
+    for raw_token in raw_header.split(","):
+        token = raw_token.strip()
+        if not token:
+            continue
+        if token == "*":
+            normalized.add(token)
+            continue
+        if token.lower().startswith("w/"):
+            token = token[2:].strip()
+        if token.startswith('"') and token.endswith('"') and len(token) >= 2:
+            token = token[1:-1]
+        if token:
+            normalized.add(token)
+    return normalized
+
+
+def _format_snapshot_etag(snapshot_lineage_id: str) -> str:
+    """Format a stable strong ETag from lineage ID."""
+
+    return f'"{snapshot_lineage_id}"'
+
+
+def _is_snapshot_not_modified(request: Request, snapshot_lineage_id: str) -> bool:
+    """Return True when client validators indicate the snapshot is unchanged."""
+
+    validators = _normalize_if_none_match_values(request.headers.get("if-none-match"))
+    explicit_lineage = request.headers.get("x-snapshot-lineage-id")
+    if explicit_lineage:
+        validators.add(explicit_lineage.strip())
+
+    if not validators:
+        return False
+    return "*" in validators or snapshot_lineage_id in validators
+
+
+def _parse_prior_summary_markers(request: Request) -> dict[str, str]:
+    """Parse optional prior summary marker map from request headers."""
+
+    raw = (request.headers.get("x-prior-summary-markers") or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+
+    normalized: dict[str, str] = {}
+    for key, value in parsed.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        candidate_slug = key.strip()
+        marker = value.strip()
+        if not candidate_slug or not marker:
+            continue
+        normalized[candidate_slug] = marker
+    return normalized
+
+
+def _set_auto_apply_changed_candidate_headers(
+    request: Request,
+    response: Response,
+    summaries: list[AutoApplyQueueSummaryRead],
+) -> None:
+    """Set optional changed-candidate hint headers when prior markers are provided."""
+
+    prior_markers = _parse_prior_summary_markers(request)
+    if not prior_markers:
+        return
+
+    changed_candidates: list[str] = []
+    for summary in summaries:
+        marker = summary.summary_delta_marker or ""
+        if not marker:
+            changed_candidates.append(summary.candidate_profile_slug)
+            continue
+        if prior_markers.get(summary.candidate_profile_slug) != marker:
+            changed_candidates.append(summary.candidate_profile_slug)
+
+    changed_candidate_count = len(changed_candidates)
+    emitted_candidates = changed_candidates[:_CHANGED_CANDIDATES_HEADER_MAX]
+    truncated = changed_candidate_count > len(emitted_candidates)
+
+    response.headers["X-Changed-Candidate-Count"] = str(changed_candidate_count)
+    response.headers["X-Changed-Candidates"] = ",".join(emitted_candidates)
+    response.headers["X-Changed-Candidates-Returned"] = str(len(emitted_candidates))
+    response.headers["X-Changed-Candidates-Truncated"] = "true" if truncated else "false"
+
+
+def _build_auto_apply_snapshot_headers(response: Response) -> dict[str, str]:
+    """Build snapshot-related headers from the working response."""
+
+    headers = {
+        "X-Snapshot-Lineage-Id": response.headers.get("X-Snapshot-Lineage-Id", ""),
+        "X-Snapshot-Generated-At": response.headers.get("X-Snapshot-Generated-At", ""),
+        "X-Snapshot-Max-Age-Seconds": response.headers.get("X-Snapshot-Max-Age-Seconds", "0"),
+    }
+    etag = response.headers.get("ETag")
+    if etag:
+        headers["ETag"] = etag
+    next_cursor = response.headers.get("X-Next-Cursor")
+    if next_cursor:
+        headers["X-Next-Cursor"] = next_cursor
+    changed_candidate_count = response.headers.get("X-Changed-Candidate-Count")
+    if changed_candidate_count is not None:
+        headers["X-Changed-Candidate-Count"] = changed_candidate_count
+    changed_candidates = response.headers.get("X-Changed-Candidates")
+    if changed_candidates is not None:
+        headers["X-Changed-Candidates"] = changed_candidates
+    changed_candidates_returned = response.headers.get("X-Changed-Candidates-Returned")
+    if changed_candidates_returned is not None:
+        headers["X-Changed-Candidates-Returned"] = changed_candidates_returned
+    changed_candidates_truncated = response.headers.get("X-Changed-Candidates-Truncated")
+    if changed_candidates_truncated is not None:
+        headers["X-Changed-Candidates-Truncated"] = changed_candidates_truncated
+    return headers
+
+
 def _render_execution_dashboard_page(
     detail: DraftExecutionDashboardRead,
     *,
@@ -2599,6 +3710,34 @@ def _render_execution_dashboard_page(
     history_retention_current_limit: int = 10,
     bulk_history: list[DraftExecutionDashboardRemediationHistoryRead] | None = None,
     history_sort: str = "newest",
+    auto_apply_summary: AutoApplyQueueSummaryRead | None = None,
+    auto_apply_items: list[AutoApplyQueueItemRead] | None = None,
+    queue_slo_filter: str = "all",
+    auto_apply_operation: str | None = None,
+    auto_apply_updated_count: int | None = None,
+    auto_apply_skipped_count: int | None = None,
+    auto_apply_missing_count: int | None = None,
+    auto_apply_requeued_count: int | None = None,
+    auto_apply_processed_count: int | None = None,
+    auto_apply_succeeded_count: int | None = None,
+    auto_apply_failed_count: int | None = None,
+    auto_apply_retried_count: int | None = None,
+    auto_apply_reclaimed_count: int | None = None,
+    auto_apply_conflict_code: str | None = None,
+    auto_apply_conflict_remaining_seconds: int | None = None,
+    auto_apply_conflict_owner_host: str | None = None,
+    auto_apply_conflict_owner_pid: int | None = None,
+    auto_apply_preflight_code: str | None = None,
+    auto_apply_preflight_blocked_count: int | None = None,
+    auto_apply_worker_status: AutoApplyContinuousWorkerStatusRead | None = None,
+    auto_apply_worker_operation: str | None = None,
+    auto_apply_worker_active: bool | None = None,
+    auto_apply_worker_cycles_completed: int | None = None,
+    auto_apply_worker_processed_count: int | None = None,
+    auto_apply_worker_last_error_code: str | None = None,
+    auto_apply_worker_conflict_code: str | None = None,
+    auto_apply_worker_preflight_code: str | None = None,
+    auto_apply_worker_preflight_blocked_count: int | None = None,
 ) -> str:
     """Render a candidate-scoped execution dashboard page."""
 
@@ -2783,6 +3922,241 @@ def _render_execution_dashboard_page(
         "</form>"
         "</section>"
     )
+    auto_apply_feedback_html = ""
+    if auto_apply_operation:
+        lines: list[str] = [f"Operation: {escape(auto_apply_operation)}"]
+        if auto_apply_requeued_count is not None:
+            lines.append(f"requeued={auto_apply_requeued_count}")
+        if auto_apply_updated_count is not None:
+            lines.append(f"updated={auto_apply_updated_count}")
+        if auto_apply_processed_count is not None:
+            lines.append(f"processed={auto_apply_processed_count}")
+        if auto_apply_succeeded_count is not None:
+            lines.append(f"succeeded={auto_apply_succeeded_count}")
+        if auto_apply_failed_count is not None:
+            lines.append(f"failed={auto_apply_failed_count}")
+        if auto_apply_retried_count is not None:
+            lines.append(f"retried={auto_apply_retried_count}")
+        if auto_apply_reclaimed_count is not None:
+            lines.append(f"reclaimed={auto_apply_reclaimed_count}")
+        if auto_apply_skipped_count is not None:
+            lines.append(f"skipped={auto_apply_skipped_count}")
+        if auto_apply_missing_count is not None:
+            lines.append(f"missing={auto_apply_missing_count}")
+        if auto_apply_preflight_blocked_count is not None:
+            lines.append(f"preflight_blocked_checks={auto_apply_preflight_blocked_count}")
+        conflict_line = ""
+        if auto_apply_conflict_code:
+            conflict_line = (
+                "<div>"
+                f"Conflict: {escape(auto_apply_conflict_code)} "
+                f"remaining={escape(str(auto_apply_conflict_remaining_seconds or 0))}s "
+                f"owner={escape(str(auto_apply_conflict_owner_host or 'unknown'))}:{escape(str(auto_apply_conflict_owner_pid or 'unknown'))}"
+                "</div>"
+            )
+        preflight_line = ""
+        if auto_apply_preflight_code:
+            preflight_line = (
+                "<div>"
+                f"Preflight: {escape(auto_apply_preflight_code)}"
+                "</div>"
+            )
+        auto_apply_feedback_html = (
+            "<section class='panel'>"
+            "<h2>Auto-Apply Operation Result</h2>"
+            f"<div>{escape(' | '.join(lines))}</div>"
+            f"{conflict_line}"
+            f"{preflight_line}"
+            "</section>"
+        )
+
+    auto_apply_worker_feedback_html = ""
+    if auto_apply_worker_operation:
+        worker_lines: list[str] = [f"Worker operation: {escape(auto_apply_worker_operation)}"]
+        if auto_apply_worker_active is not None:
+            worker_lines.append(f"active={auto_apply_worker_active}")
+        if auto_apply_worker_cycles_completed is not None:
+            worker_lines.append(f"cycles={auto_apply_worker_cycles_completed}")
+        if auto_apply_worker_processed_count is not None:
+            worker_lines.append(f"processed={auto_apply_worker_processed_count}")
+        if auto_apply_worker_last_error_code:
+            worker_lines.append(f"last_error={escape(auto_apply_worker_last_error_code)}")
+        worker_conflict_line = ""
+        if auto_apply_worker_conflict_code:
+            worker_conflict_line = (
+                "<div>"
+                f"Worker conflict: {escape(auto_apply_worker_conflict_code)}"
+                "</div>"
+            )
+        worker_preflight_line = ""
+        if auto_apply_worker_preflight_code:
+            worker_preflight_line = (
+                "<div>"
+                f"Worker preflight: {escape(auto_apply_worker_preflight_code)} "
+                f"blocked_checks={escape(str(auto_apply_worker_preflight_blocked_count or 0))}"
+                "</div>"
+            )
+        auto_apply_worker_feedback_html = (
+            "<section class='panel'>"
+            "<h2>Auto-Apply Worker Result</h2>"
+            f"<div>{escape(' | '.join(worker_lines))}</div>"
+            f"{worker_conflict_line}"
+            f"{worker_preflight_line}"
+            "</section>"
+        )
+
+    auto_apply_panel_html = ""
+    if auto_apply_summary is not None:
+        queue_slo_filter_normalized = queue_slo_filter.strip().lower() or "all"
+        if queue_slo_filter_normalized not in {"all", "warning", "critical"}:
+            queue_slo_filter_normalized = "all"
+        include_queue_rows = _auto_apply_slo_filter_includes(
+            queue_slo_filter=queue_slo_filter_normalized,
+            summary_slo_status=auto_apply_summary.slo_status,
+        )
+        filtered_items = list(auto_apply_items or [])
+        if include_queue_rows:
+            filtered_items = filtered_items[:20]
+        else:
+            filtered_items = []
+        queue_rows_html = "\n".join(
+            (
+                "<li>"
+                f"#{row.queue_id} | job={row.job_id} | {escape(row.status)} | "
+                f"priority={row.priority} | attempts={row.attempt_count}/{row.max_attempts} | "
+                f"last_error={escape(str(row.last_error_code or 'none'))}"
+                "</li>"
+            )
+            for row in filtered_items
+        ) or "<li>No queue rows match the active SLO filter.</li>"
+        top_failure_queue_ids_csv = ",".join(str(queue_id) for queue_id in auto_apply_summary.top_failure_queue_ids[:20])
+        queue_control_route = (
+            f"/execution/dashboard/{escape(detail.candidate_profile_slug)}/auto-apply/queue-control"
+        )
+        queue_requeue_route = (
+            f"/execution/dashboard/{escape(detail.candidate_profile_slug)}/auto-apply/requeue-failed"
+        )
+        queue_remediation_template_route = (
+            f"/execution/dashboard/{escape(detail.candidate_profile_slug)}/auto-apply/remediation-template"
+        )
+        queue_run_route = (
+            f"/execution/dashboard/{escape(detail.candidate_profile_slug)}/auto-apply/run"
+        )
+        worker_start_route = (
+            f"/execution/dashboard/{escape(detail.candidate_profile_slug)}/auto-apply/worker/start"
+        )
+        worker_stop_route = (
+            f"/execution/dashboard/{escape(detail.candidate_profile_slug)}/auto-apply/worker/stop"
+        )
+        filter_links = (
+            "<small>SLO filter: "
+            f"<a href='/execution/dashboard/{escape(detail.candidate_profile_slug)}?queue_slo_filter=all'>all</a> | "
+            f"<a href='/execution/dashboard/{escape(detail.candidate_profile_slug)}?queue_slo_filter=warning'>warning+</a> | "
+            f"<a href='/execution/dashboard/{escape(detail.candidate_profile_slug)}?queue_slo_filter=critical'>critical</a>"
+            "</small>"
+        )
+        top_failure_requeue_form_html = ""
+        if top_failure_queue_ids_csv:
+            top_failure_requeue_form_html = (
+                f"<form method='post' action='{queue_requeue_route}'>"
+                f"<input type='hidden' name='queue_ids' value='{escape(top_failure_queue_ids_csv)}'>"
+                "<button type='submit'>Requeue top-failure scope</button>"
+                "</form>"
+            )
+        remediation_template_html = (
+            "<h3>Remediation Template</h3>"
+            f"<div>recommended_action={escape(str(auto_apply_summary.recommended_remediation_action or 'none'))}</div>"
+            f"<div>recommended_requeue_route={escape(str(auto_apply_summary.recommended_requeue_route or 'none'))}</div>"
+            f"<div><small>{escape(str(auto_apply_summary.recommended_cli_command or 'no_cli_template'))}</small></div>"
+            f"<form method='post' action='{queue_remediation_template_route}'>"
+            "<label>Max queue IDs: <input type='number' name='max_queue_ids' min='1' max='200' value='20'></label> "
+            "<button type='submit'>Apply recommended remediation template</button>"
+            "</form>"
+        )
+        worker_status = auto_apply_worker_status or AutoApplyContinuousWorkerStatusRead(
+            candidate_profile_slug=detail.candidate_profile_slug,
+        )
+        worker_controls_html = (
+            "<h3>Continuous Worker</h3>"
+            "<div>"
+            f"active={escape(str(worker_status.active))} | "
+            f"cycles={worker_status.cycles_completed} | "
+            f"processed={worker_status.total_processed_count} | "
+            f"succeeded={worker_status.total_succeeded_count} | "
+            f"failed={worker_status.total_failed_count} | "
+            f"retried={worker_status.total_retried_count}"
+            "</div>"
+            f"<div>last_error={escape(str(worker_status.last_error_code or 'none'))} | "
+            f"heartbeat={escape(str(worker_status.last_heartbeat_at or 'none'))}</div>"
+            f"<div>preflight_blocked_count={worker_status.last_preflight_blocked_count} | "
+            f"preflight_blocked_codes={escape(','.join(worker_status.last_preflight_blocked_reason_codes or []) or 'none')}</div>"
+            f"<form method='post' action='{worker_start_route}'>"
+            "<label>Browser profile key: <input type='text' name='browser_profile_key' placeholder='apply-main'></label> "
+            "<label>Limit: <input type='number' name='limit' min='1' max='200' value='10'></label> "
+            "<label>Lease seconds: <input type='number' name='lease_seconds' min='30' max='3600' value='300'></label> "
+            "<label>Poll seconds: <input type='number' name='poll_seconds' min='1' max='300' value='30'></label> "
+            "<label>Max cycles (optional): <input type='number' name='max_cycles' min='1' max='100000'></label> "
+            "<label>Preflight required: <select name='preflight_required'><option value='true' selected>true</option><option value='false'>false</option></select></label> "
+            "<button type='submit'>Start worker</button>"
+            "</form>"
+            f"<form method='post' action='{worker_stop_route}'>"
+            "<label>Join timeout seconds: <input type='number' name='join_timeout_seconds' min='0' max='30' value='2'></label> "
+            "<button type='submit'>Stop worker</button>"
+            "</form>"
+        )
+        auto_apply_panel_html = (
+            "<section class='panel'>"
+            "<h2>Auto-Apply Operations</h2>"
+            f"{filter_links}"
+            "<div>"
+            f"SLO={escape(auto_apply_summary.slo_status)} | "
+            f"queued={auto_apply_summary.queued_count} | paused={auto_apply_summary.paused_count} | "
+            f"running={auto_apply_summary.running_count} | retry={auto_apply_summary.retry_scheduled_count} | "
+            f"stale_running={auto_apply_summary.stale_running_count} | failed={auto_apply_summary.failed_count}"
+            "</div>"
+            f"<div>Top failure: {escape(str(auto_apply_summary.top_failure_code or 'none'))} "
+            f"(count={auto_apply_summary.top_failure_count})</div>"
+            f"<div>Runner lease active: {escape(str(auto_apply_summary.runner_lease_active))} "
+            f"remaining={escape(str(auto_apply_summary.runner_lease_remaining_seconds or 0))}s</div>"
+            "<h3>Run Queue</h3>"
+            f"<form method='post' action='{queue_run_route}'>"
+            "<label>Browser profile key: <input type='text' name='browser_profile_key' placeholder='apply-main'></label> "
+            "<label>Limit: <input type='number' name='limit' min='1' max='200' value='10'></label> "
+            "<label>Lease seconds: <input type='number' name='lease_seconds' min='30' max='3600' value='300'></label> "
+            "<button type='submit'>Run bounded drain</button>"
+            "</form>"
+            "<h3>Queue Controls</h3>"
+            f"<form method='post' action='{queue_control_route}'>"
+            "<input type='hidden' name='operation' value='pause'>"
+            "<label>Queue IDs (optional CSV): <input type='text' name='queue_ids' placeholder='101,102'></label> "
+            "<label>Limit: <input type='number' name='limit' min='1' max='500' value='100'></label> "
+            "<button type='submit'>Pause</button>"
+            "</form>"
+            f"<form method='post' action='{queue_control_route}'>"
+            "<input type='hidden' name='operation' value='resume'>"
+            "<label>Queue IDs (optional CSV): <input type='text' name='queue_ids' placeholder='101,102'></label> "
+            "<label>Limit: <input type='number' name='limit' min='1' max='500' value='100'></label> "
+            "<button type='submit'>Resume</button>"
+            "</form>"
+            f"<form method='post' action='{queue_control_route}'>"
+            "<input type='hidden' name='operation' value='cancel'>"
+            "<label>Queue IDs (optional CSV): <input type='text' name='queue_ids' placeholder='101,102'></label> "
+            "<label>Limit: <input type='number' name='limit' min='1' max='500' value='100'></label> "
+            "<button type='submit'>Cancel</button>"
+            "</form>"
+            "<h3>Failed-Item Requeue</h3>"
+            f"<form method='post' action='{queue_requeue_route}'>"
+            "<label>Queue IDs (optional CSV): <input type='text' name='queue_ids' placeholder='101,102'></label> "
+            "<label>Limit: <input type='number' name='limit' min='1' max='500' value='100'></label> "
+            "<button type='submit'>Requeue failed</button>"
+            "</form>"
+            f"{top_failure_requeue_form_html}"
+            f"{remediation_template_html}"
+            "<h3>Queue Snapshot (top 20)</h3>"
+            f"<ul>{queue_rows_html}</ul>"
+            f"{worker_controls_html}"
+            "</section>"
+        )
     bulk_history_html = ""
     if history_rows:
         history_sort_controls = (
@@ -2891,6 +4265,9 @@ def _render_execution_dashboard_page(
         <div><a href="/execution/overview/{escape(detail.candidate_profile_slug)}">Open execution overview</a></div>
       </section>
       {bulk_feedback_html}
+    {auto_apply_feedback_html}
+        {auto_apply_worker_feedback_html}
+    {auto_apply_panel_html}
       {history_retention_feedback_html}
       {history_retention_controls_html}
       {bulk_history_html}
